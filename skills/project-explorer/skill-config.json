@@ -1,0 +1,101 @@
+{
+  "skill_name": "project-explorer",
+  "description": "帮助开发者快速了解新项目的技能。包括分析项目架构、识别技术栈、理解目录结构、查找重要配置文件、指导开发新模块的入手点、以及了解项目部署和访问方式。",
+  "version": "1.0.0",
+  "author": "Project Explorer Team",
+  "trigger_keywords": [
+    "快速了解项目",
+    "项目结构",
+    "技术栈",
+    "目录结构",
+    "项目架构",
+    "开发新功能",
+    "项目部署",
+    "代码组织",
+    "项目分析",
+    "上手新项目"
+  ],
+  "supported_languages": [
+    "JavaScript",
+    "TypeScript",
+    "Python",
+    "Java",
+    "Go",
+    "Rust",
+    "C++",
+    "C#",
+    "PHP",
+    "Ruby"
+  ],
+  "supported_frameworks": [
+    "React",
+    "Vue",
+    "Angular",
+    "Next.js",
+    "Nuxt.js",
+    "Express",
+    "Django",
+    "Flask",
+    "Spring Boot",
+    "Laravel",
+    "Ruby on Rails",
+    "ASP.NET Core",
+    "FastAPI",
+    "NestJS"
+  ],
+  "file_patterns": [
+    "package.json",
+    "pom.xml",
+    "build.gradle",
+    "Cargo.toml",
+    "go.mod",
+    "requirements.txt",
+    "tsconfig.json",
+    "webpack.config.js",
+    "vite.config.js",
+    "next.config.js",
+    "Dockerfile",
+    "docker-compose.yml",
+    ".env",
+    "config.js",
+    "settings.py"
+  ],
+  "categories": [
+    "项目分析",
+    "代码审查",
+    "架构设计",
+    "开发指导",
+    "部署配置"
+  ],
+  "tools_required": [
+    "file_reader",
+    "directory_scanner",
+    "config_parser",
+    "json_parser"
+  ],
+  "output_formats": [
+    "项目概览报告",
+    "技术栈详情",
+    "开发建议文档",
+    "部署配置说明"
+  ],
+  "example_prompts": [
+    "我刚加入一个新项目，需要快速了解项目结构",
+    "这个项目使用了什么技术栈？前后端分别是什么？",
+    "我想在这个项目中添加一个新的用户管理模块，应该从哪里开始？",
+    "这个项目如何部署？需要什么环境？",
+    "请帮我分析这个项目的架构设计"
+  ],
+  "limitations": [
+    "仅支持静态代码分析",
+    "不运行代码进行测试",
+    "需要项目文件可访问",
+    "对复杂项目的分析可能需要多次迭代"
+  ],
+  "best_practices": [
+    "确保项目配置文件是最新的",
+    "提供项目的README文档",
+    "遵循标准的目录结构",
+    "使用统一的命名规范"
+  ]
+}

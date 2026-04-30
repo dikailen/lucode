@@ -1,0 +1,4 @@
+.env
+__pycache__/
+.agent_quarantine/
+.agent_runs/

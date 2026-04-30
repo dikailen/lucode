@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "selection_rules": [
+    "只能选择 configured=true 的模型。",
+    "代码任务优先 mimo_model。",
+    "复杂规划、Skill 创建、多 Agent 汇总优先 deepseek_V4_pro_model。",
+    "中文解释、项目探索、文本润色优先 deepseek_V4_flash_model。",
+    "如果首选模型未配置，选择同类能力中 configured=true 的替代模型。"
+  ],
+  "models": [
+    {
+      "id": "deepseek_V4_flash_model",
+      "display_name_zh": "DeepSeek V4 Flash",
+      "provider": "deepseek",
+      "configured": true,
+      "base_url_configured": true,
+      "model_name": "deepseek-v4-flash",
+      "strengths": [
+        "中文解释",
+        "项目分析",
+        "文本处理",
+        "低成本常规任务"
+      ],
+      "best_for_skills": [
+        "project_explorer",
+        "humanizer_zh"
+      ],
+      "cost_level": "low",
+      "reasoning_level": "medium",
+      "source": "env"
+    },
+    {
+      "id": "deepseek_V4_pro_model",
+      "display_name_zh": "DeepSeek V4 Pro",
+      "provider": "deepseek",
+      "configured": true,
+      "base_url_configured": true,
+      "model_name": "deepseek-v4-pro",
+      "strengths": [
+        "复杂规划",
+        "Skill 创建",
+        "多任务拆分",
+        "汇总判断"
+      ],
+      "best_for_skills": [
+        "skill_creator",
+        "orchestrator_planner",
+        "final_synthesizer"
+      ],
+      "cost_level": "high",
+      "reasoning_level": "high",
+      "source": "env"
+    },
+    {
+      "id": "mimo_model",
+      "display_name_zh": "MiMo v2.5 Pro",
+      "provider": "mimo",
+      "configured": true,
+      "base_url_configured": true,
+      "model_name": "mimo-v2.5-pro",
+      "strengths": [
+        "代码生成",
+        "代码解释",
+        "代码评审",
+        "排查报错"
+      ],
+      "best_for_skills": [
+        "jpc_now_skill"
+      ],
+      "cost_level": "medium",
+      "reasoning_level": "medium",
+      "source": "env"
+    }
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "description": "Auto-refreshed local MCP library used by the orchestrator planner. The program validates every requested MCP against this catalog before execution.",
+  "mcp_servers": [
+    {
+      "id": "project_filesystem_readonly",
+      "display_name_zh": "项目文件只读工具",
+      "summary_zh": "读取当前项目目录中的文件、目录树、文件信息，并搜索文件。",
+      "tools": [
+        "list_allowed_directories",
+        "list_directory",
+        "directory_tree",
+        "read_file",
+        "read_multiple_files",
+        "search_files",
+        "get_file_info"
+      ],
+      "allowed_for_skills": [
+        "jpc_now_skill",
+        "project_explorer"
+      ],
+      "approval_required": false,
+      "side_effects": "none",
+      "risk_level": "low",
+      "implemented": true
+    },
+    {
+      "id": "skills_filesystem_readonly",
+      "display_name_zh": "Skills 目录只读工具",
+      "summary_zh": "读取 skills 目录中的 SKILL.md、参考文件和 skill 结构。",
+      "tools": [
+        "list_allowed_directories",
+        "list_directory",
+        "directory_tree",
+        "read_file",
+        "read_multiple_files",
+        "search_files",
+        "get_file_info"
+      ],
+      "allowed_for_skills": [
+        "skill_creator"
+      ],
+      "approval_required": false,
+      "side_effects": "none",
+      "risk_level": "low",
+      "implemented": true
+    },
+    {
+      "id": "safe_backup",
+      "display_name_zh": "删除前备份工具",
+      "summary_zh": "在用户确认后为目标文件或目录创建 zip 备份。它不会移动、删除或修改原文件。",
+      "tools": [
+        "safe_delete_file"
+      ],
+      "allowed_for_skills": [
+        "jpc_now_skill",
+        "project_explorer",
+        "skill_creator"
+      ],
+      "approval_required": true,
+      "side_effects": "creates_zip_backup",
+      "risk_level": "medium",
+      "implemented": true
+    },
+    {
+      "id": "web_search",
+      "display_name_zh": "联网搜索与网页读取工具",
+      "summary_zh": "搜索最新信息、官方文档和外部资料，并可抓取网页正文用于核验。",
+      "tools": [
+        "web_search",
+        "web_fetch"
+      ],
+      "allowed_for_skills": [
+        "jpc_now_skill",
+        "project_explorer",
+        "skill_creator"
+      ],
+      "approval_required": false,
+      "side_effects": "external_network_request",
+      "risk_level": "medium",
+      "implemented": true,
+      "use_when": [
+        "用户明确要求联网",
+        "最新版本或最新文档",
+        "本地文件无法回答",
+        "需要引用外部来源"
+      ],
+      "avoid_when": [
+        "闲聊",
+        "本地代码足够回答",
+        "中文润色",
+        "不需要时效性的信息"
+      ]
+    }
+  ],
+  "future_memory_interface": {
+    "enabled": false,
+    "purpose": "Reserved for future knowledge-graph backed MCP discovery and user preference retrieval."
+  }
+}

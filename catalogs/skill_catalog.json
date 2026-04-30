@@ -1,0 +1,232 @@
+{
+  "version": 1,
+  "description": "Auto-refreshed local skill library used by the orchestrator planner. Full SKILL.md files are loaded only when an execution Agent is created.",
+  "skills": [
+    {
+      "id": "final_synthesizer",
+      "folder": "final-synthesizer",
+      "display_name_zh": "final-synthesizer",
+      "summary_zh": "多 Agent 执行后的最终汇总技能。用于读取多个临时 Agent 的输出，去重、合并冲突、保留证据，并生成给用户的最终中文回答。",
+      "tags": [
+        "skill"
+      ],
+      "default_model": "deepseek_V4_flash_model",
+      "allowed_mcp": [],
+      "good_for": [
+        "多 Agent 执行后的最终汇总技能。用于读取多个临时 Agent 的输出，去重、合并冲突、保留证据，并生成给用户的最终中文回答。"
+      ],
+      "not_for": [],
+      "cost_level": "medium",
+      "risk_level": "medium",
+      "selectable": false,
+      "internal": true
+    },
+    {
+      "id": "humanizer_zh",
+      "folder": "Humanizer-zh-main",
+      "display_name_zh": "中文去 AI 味",
+      "summary_zh": "| 去除文本中的 AI 生成痕迹。适用于编辑或审阅文本，使其听起来更自然、更像人类书写。 基于维基百科的\"AI 写作特征\"综合指南。检测并修复以下模式：夸大的象征意义、 宣传性语言、以 -ing 结尾的肤浅分析、模糊的归因、破折号过度使用、三段式法则、 AI 词汇、否定式排比、过多的连接性短语。",
+      "tags": [
+        "writing",
+        "chinese",
+        "rewrite",
+        "humanize",
+        "polish"
+      ],
+      "default_model": "deepseek_V4_flash_model",
+      "allowed_mcp": [],
+      "good_for": [
+        "中文润色",
+        "文案改写",
+        "去 AI 味",
+        "语气自然化"
+      ],
+      "not_for": [
+        "读取项目文件",
+        "代码评审",
+        "删除或备份文件"
+      ],
+      "cost_level": "low",
+      "risk_level": "low",
+      "selectable": true,
+      "internal": false
+    },
+    {
+      "id": "jpc_now_skill",
+      "folder": "jpc_now_skill",
+      "display_name_zh": "JPC 多语言代码规范",
+      "summary_zh": "多语言开发规范技能，覆盖 Java/Python/C++ 三种语言的编码最佳实践，结合 Karpathy 行为准则。当用户编写、修改、审查 Java/Python/C++ 代码时使用此技能，确保代码风格一致、遵循业界规范、避免常见 LLM 编码错误。触发场景包括：代码开发、代码评审、接口设计、重构、新增功能、修复 bug。即使用户未明确提及\"规范\"或\"最佳实践\"，只要涉及上述语言的编码任务，都应使用此技能。",
+      "tags": [
+        "code",
+        "python",
+        "java",
+        "cpp",
+        "review",
+        "refactor",
+        "bugfix"
+      ],
+      "default_model": "mimo_model",
+      "allowed_mcp": [
+        "project_filesystem_readonly",
+        "safe_backup",
+        "web_search"
+      ],
+      "good_for": [
+        "编写代码",
+        "修改代码",
+        "审查代码",
+        "解释代码",
+        "排查报错"
+      ],
+      "not_for": [
+        "中文文案润色",
+        "创建 skill",
+        "纯闲聊"
+      ],
+      "cost_level": "medium",
+      "risk_level": "medium",
+      "selectable": true,
+      "internal": false
+    },
+    {
+      "id": "orchestrator_planner",
+      "folder": "orchestrator-planner",
+      "display_name_zh": "orchestrator-planner",
+      "summary_zh": "动态多智能体系统的主脑规划技能。根据优化后的用户请求、Skill 图书馆和 MCP 图书馆，判断是否直接回答、创建单个 Agent、创建多个 Agent、联网搜索或向用户澄清。",
+      "tags": [
+        "skill",
+        "web"
+      ],
+      "default_model": "deepseek_V4_pro_model",
+      "allowed_mcp": [],
+      "good_for": [
+        "动态多智能体系统的主脑规划技能。根据优化后的用户请求、Skill 图书馆和 MCP 图书馆，判断是否直接回答、创建单个 Agent、创建多个 Agent、联网搜索或向用户澄清。"
+      ],
+      "not_for": [],
+      "cost_level": "medium",
+      "risk_level": "medium",
+      "selectable": false,
+      "internal": true
+    },
+    {
+      "id": "project_explorer",
+      "folder": "project-explorer",
+      "display_name_zh": "项目探索",
+      "summary_zh": "帮助开发者快速了解新项目的技能。包括分析项目架构、识别技术栈、理解目录结构、查找重要配置文件、指导开发新模块的入手点、以及了解项目部署和访问方式。当开发者刚进入新公司或接手新项目时，使用这个技能来快速掌握项目全貌。",
+      "tags": [
+        "project",
+        "repository",
+        "architecture",
+        "onboarding",
+        "filesystem"
+      ],
+      "default_model": "deepseek_V4_flash_model",
+      "allowed_mcp": [
+        "project_filesystem_readonly",
+        "safe_backup",
+        "web_search"
+      ],
+      "good_for": [
+        "项目结构分析",
+        "技术栈识别",
+        "运行方式说明",
+        "配置文件理解"
+      ],
+      "not_for": [
+        "直接修改代码",
+        "中文文案润色",
+        "创建新 skill"
+      ],
+      "cost_level": "medium",
+      "risk_level": "low",
+      "selectable": true,
+      "internal": false
+    },
+    {
+      "id": "query_refiner",
+      "folder": "query-refiner",
+      "display_name_zh": "query-refiner",
+      "summary_zh": "优化用户原始问题，使其更清晰、具体、可执行。用于动态多智能体系统的前置副脑，在主脑规划前整理用户意图、背景、约束和潜在歧义。",
+      "tags": [
+        "general"
+      ],
+      "default_model": "deepseek_V4_pro_model",
+      "allowed_mcp": [],
+      "good_for": [
+        "优化用户原始问题，使其更清晰、具体、可执行。用于动态多智能体系统的前置副脑，在主脑规划前整理用户意图、背景、约束和潜在歧义。"
+      ],
+      "not_for": [],
+      "cost_level": "medium",
+      "risk_level": "medium",
+      "selectable": false,
+      "internal": true
+    },
+    {
+      "id": "skill_creator",
+      "folder": "skill-creator",
+      "display_name_zh": "Skill 创建与优化",
+      "summary_zh": "Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to create a skill from scratch, edit, or optimize an existing skill, run evals to test a skill, benchmark skill performance with variance analysis, or optimize a skill's description for better triggering accuracy.",
+      "tags": [
+        "skill",
+        "prompt",
+        "workflow",
+        "evaluation",
+        "registry"
+      ],
+      "default_model": "deepseek_V4_pro_model",
+      "allowed_mcp": [
+        "skills_filesystem_readonly",
+        "safe_backup",
+        "web_search"
+      ],
+      "good_for": [
+        "创建 skill",
+        "优化 skill",
+        "评审 SKILL.md",
+        "设计 skill 测试"
+      ],
+      "not_for": [
+        "普通代码实现",
+        "项目整体结构分析",
+        "闲聊"
+      ],
+      "cost_level": "high",
+      "risk_level": "medium",
+      "selectable": true,
+      "internal": false
+    },
+    {
+      "id": "task_router",
+      "folder": "task-router",
+      "display_name_zh": "task-router",
+      "summary_zh": "快速判断用户请求是否属于闲聊、单一专家任务，或需要升级给 orchestrator-planner 做完整动态规划。此技能保留为轻量分类器和历史兼容层，不负责执行任务。",
+      "tags": [
+        "code",
+        "project",
+        "skill"
+      ],
+      "default_model": "mimo_model",
+      "allowed_mcp": [],
+      "good_for": [
+        "Route user requests to the best specialist Agent in a multi-agent system. Use whenever a conversation has multiple skill"
+      ],
+      "not_for": [],
+      "cost_level": "medium",
+      "risk_level": "medium",
+      "selectable": false,
+      "internal": true
+    }
+  ],
+  "future_memory_interface": {
+    "enabled": false,
+    "purpose": "Reserved for future knowledge-graph retrieval. The planner must not depend on it yet.",
+    "expected_inputs": [
+      "user_preferences",
+      "project_decisions",
+      "active_constraints"
+    ],
+    "expected_outputs": [
+      "relevant_memory_items"
+    ]
+  }
+}
