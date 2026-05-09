@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from catalog_system.loader import load_mcp_catalog, load_skill_catalog
 from catalog_system.model_catalog import load_model_catalog
 from planning.planner_schema import PlannerResult
+from runtime.safety.privacy import PrivacyPolicy
 
 
 @dataclass
@@ -12,9 +13,10 @@ class PlanValidation:
     warnings: list[str] = field(default_factory=list)
 
 
-def validate_plan(plan: PlannerResult) -> PlanValidation:
+def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = None) -> PlanValidation:
     """Validate a planner result before dynamic execution."""
 
+    privacy_policy = privacy_policy or PrivacyPolicy.from_env()
     errors = []
     warnings = []
 
@@ -48,7 +50,16 @@ def validate_plan(plan: PlannerResult) -> PlanValidation:
         if not plan.synthesis_instruction:
             errors.append("multi_agent 路线必须提供 synthesis_instruction。")
 
+    task_ids = [task.id for task in plan.tasks]
+    duplicates = sorted({task_id for task_id in task_ids if task_ids.count(task_id) > 1})
+    for task_id in duplicates:
+        errors.append(f"任务 id 重复：{task_id}")
+
     for task in plan.tasks:
+        for dep in task.depends_on:
+            if dep not in task_ids:
+                errors.append(f"任务 {task.id} 依赖了不存在的任务：{dep}")
+
         skill = skills.get(task.skill_id)
         if not skill:
             errors.append(f"未知 skill：{task.skill_id}")
@@ -57,11 +68,16 @@ def validate_plan(plan: PlannerResult) -> PlanValidation:
         if not skill.get("selectable", True):
             errors.append(f"skill 不可由主脑动态选择：{task.skill_id}")
 
+        if task.write_intent and "workspace_edit" not in task.mcp:
+            errors.append(f"任务 {task.id} 声明了 write_intent，但没有申请 workspace_edit。")
+
         model = models.get(task.model)
         if not model:
             errors.append(f"未知模型：{task.model}")
         elif not model.get("configured"):
             errors.append(f"模型未在 .env 中完整配置：{task.model}")
+        elif not privacy_policy.model_allowed(model):
+            errors.append(privacy_policy.model_error(task.model, model))
 
         allowed_mcp = set(skill.get("allowed_mcp") or [])
         for mcp_id in task.mcp:
@@ -79,6 +95,12 @@ def validate_plan(plan: PlannerResult) -> PlanValidation:
             allowed_for_skills = set(mcp.get("allowed_for_skills") or [])
             if task.skill_id not in allowed_for_skills:
                 errors.append(f"MCP {mcp_id} 未授权给 skill {task.skill_id}")
+
+            if mcp_id == "web_search" and privacy_policy.mode == "offline":
+                if privacy_policy.mcp_allowed(mcp_id):
+                    warnings.append(privacy_policy.mcp_warning(mcp_id))
+                else:
+                    errors.append(privacy_policy.mcp_warning(mcp_id))
 
     return PlanValidation(valid=not errors, errors=errors, warnings=warnings)
 

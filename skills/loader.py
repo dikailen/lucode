@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from planning.planner_schema import sanitize_text
 from skills.registry import SKILLS
 
 
@@ -18,7 +19,7 @@ def load_skill(skill_name: str) -> str:
     if not skill_path.exists():
         raise FileNotFoundError(f"Skill file not found: {skill_path}")
 
-    skill_text = skill_path.read_text(encoding="utf-8")
+    skill_text = sanitize_text(skill_path.read_text(encoding="utf-8"))
 
     return f"""
 You are a specialist Agent using the following skill instructions.

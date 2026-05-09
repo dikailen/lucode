@@ -24,6 +24,10 @@ def load_mcp_catalog() -> dict:
     return load_catalog("mcp_catalog.json")
 
 
+def load_permission_policy() -> dict:
+    return load_catalog("permission_policy.json")
+
+
 def compact_skill_catalog_for_prompt() -> str:
     """Return a compact skill library for the planner prompt."""
 
@@ -62,6 +66,24 @@ def compact_mcp_catalog_for_prompt() -> str:
             f"审批:{'需要' if item.get('approval_required') else '不需要'} | "
             f"用途:{_short(item.get('summary_zh', ''))}"
         )
+    return "\n".join(lines)
+
+
+def compact_permission_policy_for_prompt() -> str:
+    """Return a compact permission policy for the planner prompt."""
+
+    catalog = load_permission_policy()
+    lines = ["权限策略："]
+    for name, item in catalog.get("permissions", {}).items():
+        lines.append(
+            "- "
+            f"{name} | 默认:{item.get('default')} | "
+            f"范围:{item.get('scope')} | "
+            f"说明:{_short(item.get('notes', ''))}"
+        )
+    hard_denies = catalog.get("hard_denies") or []
+    if hard_denies:
+        lines.append("硬性拒绝：" + "；".join(hard_denies))
     return "\n".join(lines)
 
 

@@ -3,6 +3,8 @@ import re
 from pathlib import Path
 
 from catalog_system.model_catalog import load_model_catalog
+from catalog_system.model_probe import refresh_model_probe_cache
+from catalog_system.permission_policy import load_permission_policy
 from skills.registry import SKILLS
 
 
@@ -16,26 +18,48 @@ INTERNAL_SKILLS = {
 
 KNOWN_SKILL_POLICIES = {
     "jpc_now_skill": {
-        "default_model": "mimo_model",
-        "allowed_mcp": ["project_filesystem_readonly", "safe_backup", "web_search"],
+        "default_model": "mimo_v25_pro_model",
+        "allowed_mcp": [
+            "project_filesystem_readonly",
+            "code_locator",
+            "workspace_edit",
+            "command_runner",
+            "git_tools",
+            "safe_backup",
+            "web_search",
+        ],
         "cost_level": "medium",
         "risk_level": "medium",
     },
     "humanizer_zh": {
-        "default_model": "deepseek_V4_flash_model",
+        "default_model": "deepseek_v4_flash_model",
         "allowed_mcp": [],
         "cost_level": "low",
         "risk_level": "low",
     },
     "project_explorer": {
-        "default_model": "deepseek_V4_flash_model",
-        "allowed_mcp": ["project_filesystem_readonly", "safe_backup", "web_search"],
+        "default_model": "deepseek_v4_flash_model",
+        "allowed_mcp": [
+            "project_filesystem_readonly",
+            "code_locator",
+            "workspace_edit",
+            "git_tools",
+            "safe_backup",
+            "web_search",
+        ],
         "cost_level": "medium",
         "risk_level": "low",
     },
     "skill_creator": {
-        "default_model": "deepseek_V4_pro_model",
-        "allowed_mcp": ["skills_filesystem_readonly", "safe_backup", "web_search"],
+        "default_model": "deepseek_v4_pro_model",
+        "allowed_mcp": [
+            "skills_filesystem_readonly",
+            "workspace_edit",
+            "command_runner",
+            "git_tools",
+            "safe_backup",
+            "web_search",
+        ],
         "cost_level": "high",
         "risk_level": "medium",
     },
@@ -48,9 +72,17 @@ def refresh_catalogs(project_root: Path) -> None:
     catalog_dir = project_root / CATALOG_DIR_NAME
     catalog_dir.mkdir(exist_ok=True)
 
+    model_catalog = load_model_catalog(force_reload=True)
+    try:
+        refresh_model_probe_cache(project_root, model_catalog)
+        model_catalog = load_model_catalog(force_reload=True)
+    except Exception:
+        pass
+
     _write_json_if_changed(catalog_dir / "skill_catalog.json", build_skill_catalog(project_root))
-    _write_json_if_changed(catalog_dir / "mcp_catalog.json", build_mcp_catalog())
-    _write_json_if_changed(catalog_dir / "model_catalog.generated.json", load_model_catalog())
+    _write_json_if_changed(catalog_dir / "mcp_catalog.json", build_mcp_catalog(project_root))
+    _write_json_if_changed(catalog_dir / "model_catalog.generated.json", model_catalog)
+    _write_json_if_changed(catalog_dir / "permission_policy.json", load_permission_policy())
 
 
 def build_skill_catalog(project_root: Path) -> dict:
@@ -104,15 +136,26 @@ def build_skill_catalog(project_root: Path) -> dict:
     }
 
 
-def build_mcp_catalog() -> dict:
-    return {
+def build_mcp_catalog(project_root: Path | None = None) -> dict:
+    known_module_ids = {
+        "budgeted_filesystem",
+        "command",
+        "code_locator",
+        "git",
+        "safe_delete",
+        "workspace_edit",
+        "command_runner",
+        "git_tools",
+        "web_search",
+    }
+    catalog = {
         "version": 1,
         "description": "Auto-refreshed local MCP library used by the orchestrator planner. The program validates every requested MCP against this catalog before execution.",
         "mcp_servers": [
             {
                 "id": "project_filesystem_readonly",
                 "display_name_zh": "项目文件只读工具",
-                "summary_zh": "读取当前项目目录中的文件、目录树、文件信息，并搜索文件。",
+                "summary_zh": "带可配置读取预算的项目文件只读工具，可读取目录树、文件信息和少量目标文件，避免一次性吞入过多上下文。",
                 "tools": [
                     "list_allowed_directories",
                     "list_directory",
@@ -131,7 +174,7 @@ def build_mcp_catalog() -> dict:
             {
                 "id": "skills_filesystem_readonly",
                 "display_name_zh": "Skills 目录只读工具",
-                "summary_zh": "读取 skills 目录中的 SKILL.md、参考文件和 skill 结构。",
+                "summary_zh": "带可配置读取预算的 skills 目录只读工具，可读取 SKILL.md、参考文件和 skill 结构。",
                 "tools": [
                     "list_allowed_directories",
                     "list_directory",
@@ -148,6 +191,19 @@ def build_mcp_catalog() -> dict:
                 "implemented": True,
             },
             {
+                "id": "code_locator",
+                "display_name_zh": "代码定位工具",
+                "summary_zh": "在读取大文件前先定位最相关的代码文件、符号和片段；当前支持本地 BM25 召回、Python AST 符号索引、SQLite 调用图缓存和调用链展开，适合代码修复、评审、重构和项目入口查找。",
+                "tools": ["locate_code", "get_file_outline"],
+                "allowed_for_skills": ["jpc_now_skill", "project_explorer"],
+                "approval_required": False,
+                "side_effects": "none",
+                "risk_level": "low",
+                "implemented": True,
+                "use_when": ["代码定位", "bug 修复前找文件", "代码评审前缩小范围", "项目入口查找"],
+                "avoid_when": ["中文润色", "闲聊", "已明确给出唯一目标文件且可直接读取"],
+            },
+            {
                 "id": "safe_backup",
                 "display_name_zh": "删除前备份工具",
                 "summary_zh": "在用户确认后为目标文件或目录创建 zip 备份。它不会移动、删除或修改原文件。",
@@ -159,9 +215,54 @@ def build_mcp_catalog() -> dict:
                 "implemented": True,
             },
             {
+                "id": "workspace_edit",
+                "display_name_zh": "项目文件编辑工具",
+                "summary_zh": "在项目根目录内创建、写入、精确替换、应用 unified diff patch 或删除文件。写入、patch、删除均需要用户确认；覆盖和删除前会创建 zip 备份。",
+                "tools": [
+                    "create_file",
+                    "write_file",
+                    "replace_in_file",
+                    "apply_unified_patch",
+                    "delete_file",
+                ],
+                "allowed_for_skills": ["jpc_now_skill", "project_explorer", "skill_creator"],
+                "approval_required": True,
+                "side_effects": "writes_or_deletes_project_files_with_backup",
+                "risk_level": "high",
+                "implemented": True,
+                "use_when": ["用户明确要求创建或修改文件", "代码实现", "删除项目文件", "修改 SKILL.md"],
+                "avoid_when": ["只读分析", "闲聊", "用户只要求规划或解释"],
+            },
+            {
+                "id": "command_runner",
+                "display_name_zh": "本地命令执行工具",
+                "summary_zh": "在项目根目录作为工作目录运行本地命令。命令不经过 shell，危险命令会被拒绝，执行前需要用户确认。",
+                "tools": ["run_command"],
+                "allowed_for_skills": ["jpc_now_skill", "skill_creator"],
+                "approval_required": True,
+                "side_effects": "runs_local_process",
+                "risk_level": "high",
+                "implemented": True,
+                "use_when": ["运行测试", "运行 lint", "执行编译检查", "查看工具版本"],
+                "avoid_when": ["只读项目分析", "用户未授权执行命令"],
+            },
+            {
+                "id": "git_tools",
+                "display_name_zh": "Git 项目工具",
+                "summary_zh": "读取 git status、diff、log；本地 commit 需要用户确认，不提供 push/reset/clean。",
+                "tools": ["git_status", "git_diff", "git_log", "git_commit"],
+                "allowed_for_skills": ["jpc_now_skill", "project_explorer", "skill_creator"],
+                "approval_required": "git_commit_only",
+                "side_effects": "git_commit_can_create_local_commit",
+                "risk_level": "medium",
+                "implemented": True,
+                "use_when": ["检查工作区变化", "查看 diff", "生成本地提交"],
+                "avoid_when": ["用户未要求 git 信息"],
+            },
+            {
                 "id": "web_search",
                 "display_name_zh": "联网搜索与网页读取工具",
-                "summary_zh": "搜索最新信息、官方文档和外部资料，并可抓取网页正文用于核验。",
+                "summary_zh": "搜索最新信息、官方文档和外部资料，并可抓取网页正文用于核验；结果按官方文档、官方 GitHub、文档、包仓库、社区来源分级排序。",
                 "tools": ["web_search", "web_fetch"],
                 "allowed_for_skills": ["jpc_now_skill", "project_explorer", "skill_creator"],
                 "approval_required": False,
@@ -177,6 +278,38 @@ def build_mcp_catalog() -> dict:
             "purpose": "Reserved for future knowledge-graph backed MCP discovery and user preference retrieval.",
         },
     }
+    if project_root is None:
+        return catalog
+
+    known_ids = {item["id"] for item in catalog["mcp_servers"]}
+    mcp_dir = project_root / "mcp_servers"
+    if not mcp_dir.exists():
+        return catalog
+
+    for path in sorted(mcp_dir.rglob("*_mcp.py")):
+        mcp_id = _normalize_mcp_id(path.stem)
+        if not mcp_id or mcp_id in known_ids or mcp_id in known_module_ids:
+            continue
+        catalog["mcp_servers"].append(
+            {
+                "id": mcp_id,
+                "display_name_zh": f"{mcp_id}（待登记 MCP）",
+                "summary_zh": f"检测到文件 {path.name}，但尚未登记到 MCP 图书馆。待登记后才能正式给主脑调度。",
+                "tools": [],
+                "allowed_for_skills": [],
+                "approval_required": True,
+                "side_effects": "unknown",
+                "risk_level": "unknown",
+                "implemented": False,
+            }
+        )
+        known_ids.add(mcp_id)
+    return catalog
+
+
+def _normalize_mcp_id(stem: str) -> str:
+    value = stem.removesuffix("_mcp").lower().replace("-", "_")
+    return re.sub(r"[^a-z0-9_]+", "_", value).strip("_")
 
 
 def _read_skill_frontmatter(skill_file: Path) -> dict:

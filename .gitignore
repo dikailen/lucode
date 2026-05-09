@@ -2,3 +2,5 @@
 __pycache__/
 .agent_quarantine/
 .agent_runs/
+.agent_cache/
+.agent_test_tmp/

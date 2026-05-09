@@ -1,9 +1,21 @@
+import os
 import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
 
 from agents.mcp import MCPServerStdio, create_static_tool_filter
+from runtime.safety.privacy import PrivacyPolicy
 
+
+MCP_MODULES = {
+    "budgeted_filesystem": "mcp_servers.readonly.budgeted_filesystem_mcp",
+    "code_locator": "mcp_servers.readonly.code_locator_mcp",
+    "safe_delete": "mcp_servers.mutation.safe_delete_mcp",
+    "workspace_edit": "mcp_servers.mutation.workspace_edit_mcp",
+    "command_runner": "mcp_servers.execution.command_mcp",
+    "git_tools": "mcp_servers.execution.git_mcp",
+    "web_search": "mcp_servers.network.web_search_mcp",
+}
 
 READ_ONLY_FILESYSTEM_TOOLS = [
     "list_allowed_directories",
@@ -14,28 +26,76 @@ READ_ONLY_FILESYSTEM_TOOLS = [
     "search_files",
     "get_file_info",
 ]
+DEFAULT_READONLY_BUDGET_PROFILE = {
+    "max_read_calls": "10",
+    "max_files_per_call": "5",
+    "max_chars_per_file": "6000",
+    "max_total_chars": "30000",
+    "max_tree_depth": "3",
+    "max_tree_entries": "350",
+}
 
 
-def create_readonly_filesystem_server(root_dir: Path, name: str) -> MCPServerStdio:
-    """Create a read-only filesystem MCP server limited to one directory."""
+def _env_value(name: str, default: str) -> str:
+    return os.environ.get(name) or default
 
+
+def _safe_mcp_env(values: dict[str, str]) -> dict[str, str]:
+    """Return a minimal child-process env without inherited API keys or tokens."""
+
+    denied_markers = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
+    project_root = str(Path(__file__).resolve().parent.parent)
+    safe = {}
+    for key, value in values.items():
+        normalized = str(key or "").upper()
+        if any(marker in normalized for marker in denied_markers):
+            continue
+        safe[str(key)] = str(value)
+    safe.setdefault("PYTHONIOENCODING", "utf-8")
+    safe.setdefault("PYTHONPATH", project_root)
+    return safe
+
+
+def _module_args(module_name: str) -> list[str]:
+    return ["-m", module_name]
+
+
+def create_readonly_filesystem_server(
+    root_dir: Path,
+    name: str,
+    budget_profile: dict[str, str] | None = None,
+) -> MCPServerStdio:
+    """Create a budgeted read-only filesystem MCP server limited to one directory."""
+
+    profile = {**DEFAULT_READONLY_BUDGET_PROFILE, **(budget_profile or {})}
     return MCPServerStdio(
         name=name,
         params={
             "command": sys.executable,
-            "args": [
-                str(Path(__file__).resolve().parent / "quiet_stdio.py"),
-                "npx",
-                "--yes",
-                "--loglevel=error",
-                "--no-update-notifier",
-                "@modelcontextprotocol/server-filesystem",
-                str(root_dir),
-            ],
-            "env": {
-                "NO_UPDATE_NOTIFIER": "1",
-                "NPM_CONFIG_LOGLEVEL": "error",
-            },
+            "args": _module_args(MCP_MODULES["budgeted_filesystem"]),
+            "env": _safe_mcp_env({
+                "BUDGETED_FS_ROOT": str(root_dir),
+                "BUDGETED_FS_LABEL": name,
+                "BUDGETED_FS_MAX_READ_CALLS": _env_value("MCP_FS_MAX_READ_CALLS", profile["max_read_calls"]),
+                "BUDGETED_FS_MAX_FILES_PER_CALL": _env_value(
+                    "MCP_FS_MAX_FILES_PER_CALL",
+                    profile["max_files_per_call"],
+                ),
+                "BUDGETED_FS_MAX_CHARS_PER_FILE": _env_value(
+                    "MCP_FS_MAX_CHARS_PER_FILE",
+                    profile["max_chars_per_file"],
+                ),
+                "BUDGETED_FS_MAX_TOTAL_CHARS": _env_value(
+                    "MCP_FS_MAX_TOTAL_CHARS",
+                    profile["max_total_chars"],
+                ),
+                "BUDGETED_FS_MAX_TREE_DEPTH": _env_value("MCP_FS_MAX_TREE_DEPTH", profile["max_tree_depth"]),
+                "BUDGETED_FS_MAX_TREE_ENTRIES": _env_value(
+                    "MCP_FS_MAX_TREE_ENTRIES",
+                    profile["max_tree_entries"],
+                ),
+                "PYTHONIOENCODING": "utf-8",
+            }),
         },
         tool_filter=create_static_tool_filter(
             allowed_tool_names=READ_ONLY_FILESYSTEM_TOOLS,
@@ -53,14 +113,14 @@ def create_safe_delete_server(project_root: Path, quarantine_dir: Path) -> MCPSe
         name="safe_delete_mcp",
         params={
             "command": sys.executable,
-            "args": [
-                str(Path(__file__).resolve().parent / "safe_delete_mcp.py"),
-            ],
-            "env": {
+            "args": _module_args(MCP_MODULES["safe_delete"]),
+            "env": _safe_mcp_env({
                 "SAFE_DELETE_PROJECT_ROOT": str(project_root),
                 "SAFE_DELETE_QUARANTINE_DIR": str(quarantine_dir),
+                "SAFE_DELETE_MAX_BACKUP_BYTES": _env_value("SAFE_DELETE_MAX_BACKUP_BYTES", str(50 * 1024 * 1024)),
+                "SAFE_DELETE_MAX_BACKUP_FILES": _env_value("SAFE_DELETE_MAX_BACKUP_FILES", "5000"),
                 "PYTHONIOENCODING": "utf-8",
-            },
+            }),
         },
         tool_filter=create_static_tool_filter(
             allowed_tool_names=["safe_delete_file"],
@@ -78,23 +138,135 @@ def create_safe_delete_server(project_root: Path, quarantine_dir: Path) -> MCPSe
 def create_web_search_server(project_root: Path) -> MCPServerStdio:
     """Create a web-search MCP server for current external information lookup."""
 
+    approval = "never"
+    if PrivacyPolicy.from_env().mode == "offline":
+        approval = "always"
+
     return MCPServerStdio(
         name="web_search_mcp",
         params={
             "command": sys.executable,
-            "args": [
-                str(Path(__file__).resolve().parent / "web_search_mcp.py"),
-            ],
-            "env": {
+            "args": _module_args(MCP_MODULES["web_search"]),
+            "env": _safe_mcp_env({
                 "PYTHONIOENCODING": "utf-8",
                 "WEB_SEARCH_MAX_RESULTS": "5",
                 "WEB_SEARCH_TIMEOUT_SECONDS": "15",
-            },
+            }),
         },
         tool_filter=create_static_tool_filter(
             allowed_tool_names=["web_search", "web_fetch"],
         ),
+        require_approval=approval,
+        cache_tools_list=True,
+        client_session_timeout_seconds=30,
+    )
+
+
+def create_code_locator_server(project_root: Path) -> MCPServerStdio:
+    """Create a read-only code locator MCP server for scoped code discovery."""
+
+    return MCPServerStdio(
+        name="code_locator_mcp",
+        params={
+            "command": sys.executable,
+            "args": _module_args(MCP_MODULES["code_locator"]),
+            "env": _safe_mcp_env({
+                "CODE_LOCATOR_PROJECT_ROOT": str(project_root),
+                "CODE_LOCATOR_CACHE_DIR": str(project_root / ".agent_cache"),
+                "CODE_LOCATOR_MAX_FILES": _env_value("CODE_LOCATOR_MAX_FILES", "700"),
+                "CODE_LOCATOR_MAX_FILE_BYTES": _env_value("CODE_LOCATOR_MAX_FILE_BYTES", "300000"),
+                "PYTHONIOENCODING": "utf-8",
+            }),
+        },
+        tool_filter=create_static_tool_filter(
+            allowed_tool_names=["locate_code", "get_file_outline"],
+        ),
         require_approval="never",
+        cache_tools_list=True,
+        client_session_timeout_seconds=30,
+    )
+
+
+def create_workspace_edit_server(project_root: Path, quarantine_dir: Path) -> MCPServerStdio:
+    """Create a workspace editing MCP server. Mutating tools require approval."""
+
+    return MCPServerStdio(
+        name="workspace_edit_mcp",
+        params={
+            "command": sys.executable,
+            "args": _module_args(MCP_MODULES["workspace_edit"]),
+            "env": _safe_mcp_env({
+                "WORKSPACE_EDIT_PROJECT_ROOT": str(project_root),
+                "WORKSPACE_EDIT_QUARANTINE_DIR": str(quarantine_dir),
+                "WORKSPACE_EDIT_STRICT_SHA256": _env_value("WORKSPACE_EDIT_STRICT_SHA256", "1"),
+                "WORKSPACE_EDIT_MAX_BACKUP_BYTES": _env_value(
+                    "WORKSPACE_EDIT_MAX_BACKUP_BYTES",
+                    str(50 * 1024 * 1024),
+                ),
+                "WORKSPACE_EDIT_MAX_BACKUP_FILES": _env_value("WORKSPACE_EDIT_MAX_BACKUP_FILES", "5000"),
+                "PYTHONIOENCODING": "utf-8",
+            }),
+        },
+        tool_filter=create_static_tool_filter(
+            allowed_tool_names=[
+                "create_file",
+                "write_file",
+                "replace_in_file",
+                "apply_unified_patch",
+                "delete_file",
+            ],
+        ),
+        require_approval="always",
+        cache_tools_list=True,
+        client_session_timeout_seconds=30,
+    )
+
+
+def create_command_runner_server(project_root: Path, quarantine_dir: Path) -> MCPServerStdio:
+    """Create a command runner MCP server. Commands require approval."""
+
+    return MCPServerStdio(
+        name="command_runner_mcp",
+        params={
+            "command": sys.executable,
+            "args": _module_args(MCP_MODULES["command_runner"]),
+            "env": _safe_mcp_env({
+                "COMMAND_RUNNER_PROJECT_ROOT": str(project_root),
+                "COMMAND_RUNNER_QUARANTINE_DIR": str(quarantine_dir),
+                "PYTHONIOENCODING": "utf-8",
+            }),
+        },
+        tool_filter=create_static_tool_filter(
+            allowed_tool_names=["run_command"],
+        ),
+        require_approval="always",
+        cache_tools_list=True,
+        client_session_timeout_seconds=30,
+    )
+
+
+def create_git_tools_server(project_root: Path, quarantine_dir: Path) -> MCPServerStdio:
+    """Create a Git helper MCP server. Read-only tools are allowed; commits require approval."""
+
+    return MCPServerStdio(
+        name="git_tools_mcp",
+        params={
+            "command": sys.executable,
+            "args": _module_args(MCP_MODULES["git_tools"]),
+            "env": _safe_mcp_env({
+                "GIT_TOOLS_PROJECT_ROOT": str(project_root),
+                "GIT_TOOLS_QUARANTINE_DIR": str(quarantine_dir),
+                "PYTHONIOENCODING": "utf-8",
+            }),
+        },
+        tool_filter=create_static_tool_filter(
+            allowed_tool_names=["git_status", "git_diff", "git_log", "git_commit"],
+        ),
+        require_approval={
+            "always": {
+                "tool_names": ["git_commit"],
+            },
+        },
         cache_tools_list=True,
         client_session_timeout_seconds=30,
     )
@@ -109,6 +281,7 @@ class MCPServerManager:
         self.verbose = verbose
         self._stack = AsyncExitStack()
         self._servers = {}
+        self._readonly_budget_profiles: dict[str, dict[str, str]] = {}
 
     async def __aenter__(self):
         await self._stack.__aenter__()
@@ -134,19 +307,32 @@ class MCPServerManager:
     def started_ids(self) -> list[str]:
         return sorted(self._servers)
 
+    def set_readonly_budget_profile(self, mcp_id: str, profile: dict[str, str]) -> None:
+        self._readonly_budget_profiles[mcp_id] = dict(profile)
+
     def _create_server(self, mcp_id: str) -> MCPServerStdio:
         if mcp_id == "project_filesystem_readonly":
             return create_readonly_filesystem_server(
                 self.project_root,
                 "project_filesystem_readonly",
+                budget_profile=self._readonly_budget_profiles.get(mcp_id),
             )
         if mcp_id == "skills_filesystem_readonly":
             return create_readonly_filesystem_server(
                 self.project_root / "skills",
                 "skills_filesystem_readonly",
+                budget_profile=self._readonly_budget_profiles.get(mcp_id),
             )
         if mcp_id == "safe_backup":
             return create_safe_delete_server(self.project_root, self.quarantine_dir)
         if mcp_id == "web_search":
             return create_web_search_server(self.project_root)
+        if mcp_id == "code_locator":
+            return create_code_locator_server(self.project_root)
+        if mcp_id == "workspace_edit":
+            return create_workspace_edit_server(self.project_root, self.quarantine_dir)
+        if mcp_id == "command_runner":
+            return create_command_runner_server(self.project_root, self.quarantine_dir)
+        if mcp_id == "git_tools":
+            return create_git_tools_server(self.project_root, self.quarantine_dir)
         raise KeyError(f"Unknown MCP server id: {mcp_id}")

@@ -6,7 +6,7 @@
       "id": "final_synthesizer",
       "folder": "final-synthesizer",
       "display_name_zh": "final-synthesizer",
-      "summary_zh": "多 Agent 执行后的最终汇总技能。用于读取多个临时 Agent 的输出，去重、合并冲突、保留证据，并生成给用户的最终中文回答。",
+      "summary_zh": "多 Agent 执行后的最终审核技能。用于读取多个临时 Agent 的输出，检查是否满足用户需求和验收标准，保留证据、标出遗漏，并生成给用户的最终中文报告。",
       "tags": [
         "skill"
       ],
@@ -68,6 +68,10 @@
       "default_model": "mimo_model",
       "allowed_mcp": [
         "project_filesystem_readonly",
+        "code_locator",
+        "workspace_edit",
+        "command_runner",
+        "git_tools",
         "safe_backup",
         "web_search"
       ],
@@ -123,6 +127,9 @@
       "default_model": "deepseek_V4_flash_model",
       "allowed_mcp": [
         "project_filesystem_readonly",
+        "code_locator",
+        "workspace_edit",
+        "git_tools",
         "safe_backup",
         "web_search"
       ],
@@ -176,6 +183,9 @@
       "default_model": "deepseek_V4_pro_model",
       "allowed_mcp": [
         "skills_filesystem_readonly",
+        "workspace_edit",
+        "command_runner",
+        "git_tools",
         "safe_backup",
         "web_search"
       ],

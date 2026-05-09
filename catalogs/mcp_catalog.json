@@ -5,7 +5,7 @@
     {
       "id": "project_filesystem_readonly",
       "display_name_zh": "项目文件只读工具",
-      "summary_zh": "读取当前项目目录中的文件、目录树、文件信息，并搜索文件。",
+      "summary_zh": "带可配置读取预算的项目文件只读工具，可读取目录树、文件信息和少量目标文件，避免一次性吞入过多上下文。",
       "tools": [
         "list_allowed_directories",
         "list_directory",
@@ -27,7 +27,7 @@
     {
       "id": "skills_filesystem_readonly",
       "display_name_zh": "Skills 目录只读工具",
-      "summary_zh": "读取 skills 目录中的 SKILL.md、参考文件和 skill 结构。",
+      "summary_zh": "带可配置读取预算的 skills 目录只读工具，可读取 SKILL.md、参考文件和 skill 结构。",
       "tools": [
         "list_allowed_directories",
         "list_directory",
@@ -44,6 +44,34 @@
       "side_effects": "none",
       "risk_level": "low",
       "implemented": true
+    },
+    {
+      "id": "code_locator",
+      "display_name_zh": "代码定位工具",
+      "summary_zh": "在读取大文件前先定位最相关的代码文件、符号和片段；当前支持本地 BM25 召回、Python AST 符号索引、SQLite 调用图缓存和调用链展开，适合代码修复、评审、重构和项目入口查找。",
+      "tools": [
+        "locate_code",
+        "get_file_outline"
+      ],
+      "allowed_for_skills": [
+        "jpc_now_skill",
+        "project_explorer"
+      ],
+      "approval_required": false,
+      "side_effects": "none",
+      "risk_level": "low",
+      "implemented": true,
+      "use_when": [
+        "代码定位",
+        "bug 修复前找文件",
+        "代码评审前缩小范围",
+        "项目入口查找"
+      ],
+      "avoid_when": [
+        "中文润色",
+        "闲聊",
+        "已明确给出唯一目标文件且可直接读取"
+      ]
     },
     {
       "id": "safe_backup",
@@ -63,9 +91,95 @@
       "implemented": true
     },
     {
+      "id": "workspace_edit",
+      "display_name_zh": "项目文件编辑工具",
+      "summary_zh": "在项目根目录内创建、写入、精确替换、应用 unified diff patch 或删除文件。写入、patch、删除均需要用户确认；覆盖和删除前会创建 zip 备份。",
+      "tools": [
+        "create_file",
+        "write_file",
+        "replace_in_file",
+        "apply_unified_patch",
+        "delete_file"
+      ],
+      "allowed_for_skills": [
+        "jpc_now_skill",
+        "project_explorer",
+        "skill_creator"
+      ],
+      "approval_required": true,
+      "side_effects": "writes_or_deletes_project_files_with_backup",
+      "risk_level": "high",
+      "implemented": true,
+      "use_when": [
+        "用户明确要求创建或修改文件",
+        "代码实现",
+        "删除项目文件",
+        "修改 SKILL.md"
+      ],
+      "avoid_when": [
+        "只读分析",
+        "闲聊",
+        "用户只要求规划或解释"
+      ]
+    },
+    {
+      "id": "command_runner",
+      "display_name_zh": "本地命令执行工具",
+      "summary_zh": "在项目根目录作为工作目录运行本地命令。命令不经过 shell，危险命令会被拒绝，执行前需要用户确认。",
+      "tools": [
+        "run_command"
+      ],
+      "allowed_for_skills": [
+        "jpc_now_skill",
+        "skill_creator"
+      ],
+      "approval_required": true,
+      "side_effects": "runs_local_process",
+      "risk_level": "high",
+      "implemented": true,
+      "use_when": [
+        "运行测试",
+        "运行 lint",
+        "执行编译检查",
+        "查看工具版本"
+      ],
+      "avoid_when": [
+        "只读项目分析",
+        "用户未授权执行命令"
+      ]
+    },
+    {
+      "id": "git_tools",
+      "display_name_zh": "Git 项目工具",
+      "summary_zh": "读取 git status、diff、log；本地 commit 需要用户确认，不提供 push/reset/clean。",
+      "tools": [
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_commit"
+      ],
+      "allowed_for_skills": [
+        "jpc_now_skill",
+        "project_explorer",
+        "skill_creator"
+      ],
+      "approval_required": "git_commit_only",
+      "side_effects": "git_commit_can_create_local_commit",
+      "risk_level": "medium",
+      "implemented": true,
+      "use_when": [
+        "检查工作区变化",
+        "查看 diff",
+        "生成本地提交"
+      ],
+      "avoid_when": [
+        "用户未要求 git 信息"
+      ]
+    },
+    {
       "id": "web_search",
       "display_name_zh": "联网搜索与网页读取工具",
-      "summary_zh": "搜索最新信息、官方文档和外部资料，并可抓取网页正文用于核验。",
+      "summary_zh": "搜索最新信息、官方文档和外部资料，并可抓取网页正文用于核验；结果按官方文档、官方 GitHub、文档、包仓库、社区来源分级排序。",
       "tools": [
         "web_search",
         "web_fetch"
