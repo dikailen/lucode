@@ -1,7 +1,6 @@
-from agents import Agent
-
 from catalog_system.model_catalog import ModelRegistry
 from planning.planner_schema import PlannedTask, sanitize_text
+from runtime.agents.sdk import agent_class
 from skills.loader import load_skill
 
 
@@ -12,7 +11,7 @@ class AgentFactory:
         self.model_registry = model_registry
         self.mcp_manager = mcp_manager
 
-    async def create_task_agent(self, task: PlannedTask) -> Agent:
+    async def create_task_agent(self, task: PlannedTask):
         model_info = self.model_registry.get_model_info(task.model)
         if task.mcp and not model_info.get("supports_tools", True):
             raise ValueError(
@@ -24,6 +23,7 @@ class AgentFactory:
         servers = await self.mcp_manager.get_many(task.mcp)
         instructions = self._task_instructions(task)
 
+        Agent = agent_class()
         return Agent(
             name=f"dynamic_{task.id}",
             instructions=instructions,
@@ -176,7 +176,8 @@ class AgentFactory:
             lines.append("- 本任务没有分配 MCP 工具，请直接基于上文和前序任务输出完成。")
         return "\n".join(lines) + "\n"
 
-    def create_direct_answer_agent(self, model_id: str, instruction: str) -> Agent:
+    def create_direct_answer_agent(self, model_id: str, instruction: str):
+        Agent = agent_class()
         return Agent(
             name="direct_answer_agent",
             instructions=sanitize_text(
@@ -189,7 +190,7 @@ class AgentFactory:
             model=self.model_registry.get_model(model_id),
         )
 
-    def create_solo_agent(self, model_id: str, mcp_servers=None) -> Agent:
+    def create_solo_agent(self, model_id: str, mcp_servers=None):
         servers = list(mcp_servers or [])
         if servers:
             model_info = self.model_registry.get_model_info(model_id)
@@ -199,6 +200,7 @@ class AgentFactory:
                     f"{model_id}（{model_info.get('model_name') or '未知模型名'}）。"
                     "请换用支持工具调用的模型，或不要给 solo 挂载 MCP 工具。"
                 )
+        Agent = agent_class()
         return Agent(
             name="solo_agent",
             instructions=sanitize_text(
@@ -218,7 +220,8 @@ class AgentFactory:
             mcp_servers=servers,
         )
 
-    def create_synthesizer_agent(self, model_id: str, run_workspace_server) -> Agent:
+    def create_synthesizer_agent(self, model_id: str, run_workspace_server):
+        Agent = agent_class()
         return Agent(
             name="final_synthesizer_agent",
             instructions=sanitize_text(load_skill("final_synthesizer")),

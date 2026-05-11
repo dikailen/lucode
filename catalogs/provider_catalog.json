@@ -1,0 +1,114 @@
+{
+  "deepseek": {
+    "display_name": "DeepSeek",
+    "homepage": "https://platform.deepseek.com",
+    "base_url": "https://api.deepseek.com",
+    "compatible_type": "openai_compatible",
+    "models": [
+      "deepseek-chat",
+      "deepseek-reasoner"
+    ],
+    "supports_tools": true,
+    "reasoning_level": "high",
+    "cost_level": "medium"
+  },
+  "mimo": {
+    "display_name": "MiMo",
+    "homepage": "https://platform.mimo.com",
+    "base_url": "https://api.mimo.com/v1",
+    "compatible_type": "openai_compatible",
+    "models": [
+      "mimo-v2.5-pro",
+      "mimo-v2.5"
+    ],
+    "supports_tools": true,
+    "reasoning_level": "medium",
+    "cost_level": "medium"
+  },
+  "dashscope": {
+    "display_name": "Qwen / DashScope",
+    "homepage": "https://dashscope.aliyun.com",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "compatible_type": "openai_compatible",
+    "models": [
+      "qwen-plus",
+      "qwen-max",
+      "qwen-coder-plus"
+    ],
+    "supports_tools": "probe",
+    "reasoning_level": "medium",
+    "cost_level": "medium"
+  },
+  "siliconflow": {
+    "display_name": "硅基流动",
+    "homepage": "https://cloud.siliconflow.cn",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "compatible_type": "openai_compatible",
+    "models": [
+      "Qwen/Qwen3-8B",
+      "deepseek-ai/DeepSeek-R1"
+    ],
+    "supports_tools": "probe",
+    "reasoning_level": "medium",
+    "cost_level": "low"
+  },
+  "openrouter": {
+    "display_name": "OpenRouter",
+    "homepage": "https://openrouter.ai",
+    "base_url": "https://openrouter.ai/api/v1",
+    "compatible_type": "openai_compatible",
+    "models": [
+      "openai/gpt-4o",
+      "anthropic/claude-3.5-sonnet",
+      "deepseek/deepseek-chat"
+    ],
+    "supports_tools": "probe",
+    "reasoning_level": "high",
+    "cost_level": "medium"
+  },
+  "ollama": {
+    "display_name": "Ollama",
+    "homepage": "https://ollama.com",
+    "base_url": "http://localhost:11434/v1",
+    "compatible_type": "ollama",
+    "local": true,
+    "models": [
+      "qwen3:8b"
+    ],
+    "supports_tools": "probe",
+    "reasoning_level": "medium",
+    "cost_level": "local"
+  },
+  "lmstudio": {
+    "display_name": "LM Studio",
+    "homepage": "https://lmstudio.ai",
+    "base_url": "http://localhost:1234/v1",
+    "compatible_type": "openai_compatible",
+    "local": true,
+    "models": [],
+    "supports_tools": "probe",
+    "reasoning_level": "medium",
+    "cost_level": "local"
+  },
+  "llama_cpp": {
+    "display_name": "llama.cpp server",
+    "homepage": "https://github.com/ggml-org/llama.cpp",
+    "base_url": "http://localhost:8080/v1",
+    "compatible_type": "openai_compatible",
+    "local": true,
+    "models": [],
+    "supports_tools": "probe",
+    "reasoning_level": "medium",
+    "cost_level": "local"
+  },
+  "custom_openai_compatible": {
+    "display_name": "自定义中转",
+    "homepage": "",
+    "base_url": "",
+    "compatible_type": "openai_compatible",
+    "models": [],
+    "supports_tools": "probe",
+    "reasoning_level": "medium",
+    "cost_level": "custom"
+  }
+}

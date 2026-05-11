@@ -10,8 +10,10 @@ from mcp.server.fastmcp import FastMCP
 
 try:
     from mcp_servers.core.operation_log import append_operation_log
+    from runtime.safety.permissions import evaluate_permission, load_effective_permissions
 except ModuleNotFoundError:
     from operation_log import append_operation_log
+    from runtime.safety.permissions import evaluate_permission, load_effective_permissions
 
 
 mcp = FastMCP("workspace_edit", log_level="ERROR")
@@ -154,6 +156,13 @@ def _relative_target(target: Path) -> str:
     return str(target.relative_to(_project_root())).replace("\\", "/")
 
 
+def _enforce_permission(action: str, target: Path) -> None:
+    policy = load_effective_permissions(_project_root())
+    decision = evaluate_permission(policy, action, target=_relative_target(target))
+    if decision.decision == "deny":
+        raise ValueError(f"{action} denied by permissions.toml: {decision.reason}")
+
+
 def _log_operation(
     action: str,
     target: Path,
@@ -254,6 +263,7 @@ def _parse_patch_paths(patch: str) -> list[Path]:
 )
 def create_file(target_path: str, content: str, reason: str) -> str:
     target = _resolve_target(target_path, must_exist=False)
+    _enforce_permission("write", target)
     _write_text(target, content)
     _log_operation("create_file", target, reason, None, result_summary="created UTF-8 file")
     return f"已创建文件：{target}\n原因：{reason}"
@@ -268,6 +278,7 @@ def create_file(target_path: str, content: str, reason: str) -> str:
 )
 def write_file(target_path: str, content: str, reason: str, expected_sha256: str = "") -> str:
     target = _resolve_target(target_path, must_exist=None)
+    _enforce_permission("write", target)
     _verify_expected_sha256(target, expected_sha256, require_for_existing=True)
     backup_path = _zip_target(target, "write_file")
     _write_text(target, content)
@@ -292,6 +303,7 @@ def replace_in_file(
     expected_sha256: str = "",
 ) -> str:
     target = _resolve_target(target_path, must_exist=True)
+    _enforce_permission("write", target)
     _verify_expected_sha256(target, expected_sha256, require_for_existing=True)
     if not target.is_file():
         raise ValueError(f"Target is not a file: {target}")
@@ -336,6 +348,7 @@ def apply_unified_patch(patch: str, reason: str, expected_sha256_by_path: dict |
     targets = _parse_patch_paths(patch)
     expected_hashes = expected_sha256_by_path or {}
     for target in targets:
+        _enforce_permission("write", target)
         relative = _relative_target(target)
         expected = expected_hashes.get(relative) or expected_hashes.get(str(target)) or ""
         _verify_expected_sha256(target, str(expected), require_for_existing=True)
@@ -378,6 +391,7 @@ def apply_unified_patch(patch: str, reason: str, expected_sha256_by_path: dict |
 )
 def delete_file(target_path: str, reason: str, expected_sha256: str = "") -> str:
     target = _resolve_target(target_path, must_exist=True)
+    _enforce_permission("delete", target)
     _verify_expected_sha256(target, expected_sha256, require_for_existing=True)
     backup_path = _zip_target(target, "delete_file")
     if target.is_dir():

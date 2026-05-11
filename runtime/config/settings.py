@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 
 from catalog_system.model_catalog import load_model_catalog
 from runtime.config.execution_mode import normalize_execution_mode
+from runtime.config.model_config import load_effective_lucode_config, model_ids_from_refs, model_refs_from_config
 from runtime.safety.privacy import normalize_privacy_mode
 
 
@@ -27,7 +28,7 @@ class RuntimeSettings:
     @classmethod
     def from_env(cls) -> "RuntimeSettings":
         default_priorities = _dynamic_default_priorities()
-        return cls(
+        settings = cls(
             query_refiner_enabled=_env_bool("AGENTS_QUERY_REFINER_ENABLED", False),
             query_refiner_model_priority=_env_list(
                 "AGENTS_QUERY_REFINER_MODEL_PRIORITY",
@@ -44,6 +45,7 @@ class RuntimeSettings:
             privacy_mode=normalize_privacy_mode(os.environ.get("AGENTS_PRIVACY_MODE") or "local_first"),
             execution_mode=normalize_execution_mode(os.environ.get("AGENTS_EXECUTION_MODE") or "solo"),
         )
+        return _apply_lucode_config_overrides(settings)
 
     def model_priority_for(self, role: str) -> list[str]:
         normalized = role.strip().lower().replace("-", "_")
@@ -84,6 +86,44 @@ def _env_list(name: str, default: list[str]) -> list[str]:
         return list(default)
     values = [item.strip() for item in raw.split(",") if item.strip()]
     return values or list(default)
+
+
+def _apply_lucode_config_overrides(settings: RuntimeSettings) -> RuntimeSettings:
+    try:
+        config = load_effective_lucode_config()
+    except Exception:
+        return settings
+
+    mode = str(config.get("mode") or "").strip()
+    if mode:
+        settings.execution_mode = normalize_execution_mode(mode)
+    privacy = str(config.get("privacy") or "").strip()
+    if privacy:
+        settings.privacy_mode = normalize_privacy_mode(privacy)
+
+    default_refs = model_refs_from_config(config)
+    default_ids = model_ids_from_refs(default_refs)
+    role_config = config.get("roles") or {}
+    if isinstance(role_config, dict):
+        query_refiner_ids = model_ids_from_refs(role_config.get("query_refiner") or [])
+        orchestrator_ids = model_ids_from_refs(role_config.get("orchestrator") or [])
+        final_ids = model_ids_from_refs(role_config.get("final_synthesizer") or [])
+        if query_refiner_ids:
+            settings.query_refiner_model_priority = query_refiner_ids
+        if orchestrator_ids:
+            settings.orchestrator_model_priority = orchestrator_ids
+        if final_ids:
+            settings.final_synthesizer_model_priority = final_ids
+
+    if default_ids:
+        if not isinstance(role_config, dict) or not role_config.get("query_refiner"):
+            settings.query_refiner_model_priority = list(default_ids)
+        if not isinstance(role_config, dict) or not role_config.get("orchestrator"):
+            settings.orchestrator_model_priority = list(default_ids)
+        if not isinstance(role_config, dict) or not role_config.get("final_synthesizer"):
+            settings.final_synthesizer_model_priority = list(default_ids)
+
+    return settings
 
 
 def _dynamic_default_priorities() -> dict[str, list[str]]:

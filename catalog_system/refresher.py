@@ -1,9 +1,10 @@
 import json
+import os
 import re
+import threading
 from pathlib import Path
 
 from catalog_system.model_catalog import load_model_catalog
-from catalog_system.model_probe import refresh_model_probe_cache
 from catalog_system.permission_policy import load_permission_policy
 from skills.registry import SKILLS
 
@@ -66,23 +67,55 @@ KNOWN_SKILL_POLICIES = {
 }
 
 
-def refresh_catalogs(project_root: Path) -> None:
+def refresh_catalogs(project_root: Path, probe_mode: str | None = None) -> None:
     """Refresh local planning catalogs from skills, known MCPs, and configured models."""
 
     catalog_dir = project_root / CATALOG_DIR_NAME
     catalog_dir.mkdir(exist_ok=True)
 
     model_catalog = load_model_catalog(force_reload=True)
-    try:
-        refresh_model_probe_cache(project_root, model_catalog)
-        model_catalog = load_model_catalog(force_reload=True)
-    except Exception:
-        pass
+    mode = _normalize_probe_mode(probe_mode or os.environ.get("MODEL_PROBE_STARTUP_MODE") or "background")
+    if mode == "sync":
+        model_catalog = _run_model_probe_refresh(project_root, model_catalog)
+    elif mode == "background":
+        _start_background_probe_refresh(project_root, model_catalog)
 
     _write_json_if_changed(catalog_dir / "skill_catalog.json", build_skill_catalog(project_root))
     _write_json_if_changed(catalog_dir / "mcp_catalog.json", build_mcp_catalog(project_root))
     _write_json_if_changed(catalog_dir / "model_catalog.generated.json", model_catalog)
     _write_json_if_changed(catalog_dir / "permission_policy.json", load_permission_policy())
+
+
+def _normalize_probe_mode(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"sync", "synchronous", "blocking"}:
+        return "sync"
+    if normalized in {"off", "disabled", "disable", "false", "0", "none"}:
+        return "off"
+    return "background"
+
+
+def _start_background_probe_refresh(project_root: Path, model_catalog: dict) -> None:
+    def _worker() -> None:
+        try:
+            refreshed_catalog = _run_model_probe_refresh(project_root, model_catalog)
+            catalog_dir = project_root / CATALOG_DIR_NAME
+            _write_json_if_changed(catalog_dir / "model_catalog.generated.json", refreshed_catalog)
+        except Exception:
+            pass
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+
+
+def _run_model_probe_refresh(project_root: Path, model_catalog: dict) -> dict:
+    try:
+        from catalog_system.model_probe import refresh_model_probe_cache
+
+        refresh_model_probe_cache(project_root, model_catalog)
+        return load_model_catalog(force_reload=True)
+    except Exception:
+        return model_catalog
 
 
 def build_skill_catalog(project_root: Path) -> dict:

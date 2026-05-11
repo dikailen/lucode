@@ -43,6 +43,7 @@ class AuditResult:
     remaining_issues: list[str] = field(default_factory=list)
     modifications: list[str] = field(default_factory=list)
     verifications: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     models_used: list[str] = field(default_factory=list)
     files_touched: list[str] = field(default_factory=list)
     needs_replan: bool = False
@@ -58,6 +59,7 @@ def audit_execution(
     rollback_happened: bool = False,
 ) -> AuditResult:
     remaining_issues: list[str] = []
+    warnings: list[str] = []
     modifications: list[str] = []
     verifications: list[str] = []
     models_used = sorted({task.model for task in plan.tasks if task.model})
@@ -101,9 +103,11 @@ def audit_execution(
                     record.output_preview,
                     final_output,
                 ):
-                    remaining_issues.append(
-                        f"任务 {task.id} 的语义验收未满足：{criterion}"
-                    )
+                    message = f"任务 {task.id} 的语义验收未完全确认：{criterion}"
+                    if _should_enforce_semantic_acceptance(task):
+                        remaining_issues.append(message)
+                    else:
+                        warnings.append(message)
 
         if task.expected_outputs and record.status == "completed":
             for expected in task.expected_outputs:
@@ -117,9 +121,11 @@ def audit_execution(
                             f"任务 {task.id} 的预期输出未出现：{needle}"
                         )
                 elif not _criterion_looks_satisfied(expected_text, record.output_preview, final_output):
-                    remaining_issues.append(
-                        f"任务 {task.id} 的预期输出语义未满足：{expected_text}"
-                    )
+                    message = f"任务 {task.id} 的预期输出语义未完全确认：{expected_text}"
+                    if _should_enforce_semantic_acceptance(task):
+                        remaining_issues.append(message)
+                    else:
+                        warnings.append(message)
 
         if "workspace_edit" in task.mcp and record.status == "completed" and not record.verification:
             remaining_issues.append(
@@ -138,6 +144,7 @@ def audit_execution(
         remaining_issues=remaining_issues,
         modifications=modifications,
         verifications=verifications,
+        warnings=warnings,
         models_used=models_used,
         files_touched=files_touched,
         needs_replan=not passed and not rollback_happened,
@@ -159,6 +166,11 @@ def format_final_report(final_output: str, audit: AuditResult) -> str:
         lines.append("验证情况：")
         lines.extend(f"- {item}" for item in audit.verifications)
 
+    if audit.warnings:
+        lines.append("")
+        lines.append("审核提醒：")
+        lines.extend(f"- {item}" for item in audit.warnings)
+
     if audit.remaining_issues:
         lines.append("")
         lines.append("剩余问题：")
@@ -170,6 +182,15 @@ def format_final_report(final_output: str, audit: AuditResult) -> str:
         lines.append(f"- {audit.rollback_message or '已执行回滚。'}")
 
     return "\n".join(lines).strip()
+
+
+def _should_enforce_semantic_acceptance(task) -> bool:
+    mcp_ids = set(getattr(task, "mcp", []) or [])
+    if mcp_ids.intersection({"workspace_edit", "safe_backup", "command_runner"}):
+        return True
+    if getattr(task, "write_intent", None):
+        return True
+    return False
 
 
 def audit_plan_review_failure(review: PlanReview) -> AuditResult:

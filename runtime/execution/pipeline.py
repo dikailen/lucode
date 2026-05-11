@@ -129,6 +129,11 @@ class PipelineRunState:
             if record.id in decision.applied_tasks:
                 record.mcp = sorted(set(record.mcp) | {"code_locator", "project_filesystem_readonly"})
 
+    def record_task_started(self, task: PlannedTask) -> None:
+        record = self._find_task(task.id)
+        if record:
+            record.status = "running"
+
     def record_task_result(self, task: PlannedTask, output: str) -> None:
         record = self._find_task(task.id)
         if not record:

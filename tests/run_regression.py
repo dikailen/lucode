@@ -753,9 +753,10 @@ class RuntimeHelpersTests(unittest.TestCase):
     def test_main_startup_copy_uses_three_mode_language(self):
         source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
 
-        self.assertIn("终端工程代理已启动", source)
-        self.assertIn("solo 为默认单模型工具 Agent", source)
-        self.assertNotIn("普通提问会先显示本轮规划再执行", source)
+        self.assertIn("render_welcome_dashboard", source)
+        self.assertIn("discover_workspace_context", source)
+        self.assertNotIn('print("终端工程代理已启动。Skill/MCP/Model 图书馆已刷新。")', source)
+        self.assertNotIn("配置查看：/config、/api show", source)
 
     def test_status_and_diff_commands_are_rendered_without_model_calls(self):
         from runtime.config.cli import render_status_command, render_diff_command
@@ -798,6 +799,999 @@ class RuntimeHelpersTests(unittest.TestCase):
         self.assertEqual(_stream_delta_text(Wrapper(FakeEvent("response.output_text.delta", "你好"))), "你好")
         self.assertEqual(_stream_delta_text(Wrapper(FakeEvent("response.reasoning_text.delta", "hidden"))), "")
 
+    def test_streamed_visible_output_is_not_printed_twice(self):
+        from main import _should_print_final_output
+
+        class Hooks:
+            streamed_output_seen = True
+
+        self.assertFalse(_should_print_final_output(Hooks(), "你好，我可以帮你分析和修改项目。"))
+        self.assertTrue(_should_print_final_output(Hooks(), "本轮执行失败，但程序没有退出。"))
+        self.assertTrue(_should_print_final_output(object(), "普通非流式最终答案"))
+
+
+class WorkspaceContextTests(unittest.TestCase):
+    def test_workspace_context_uses_current_directory_without_lucode_folder(self):
+        from runtime.config.workspace import discover_workspace_context
+
+        app_home = TEMP_ROOT / f"app_{uuid.uuid4().hex}"
+        cwd = TEMP_ROOT / f"plain_workspace_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        cwd.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(cwd))
+
+        context = discover_workspace_context(app_home=app_home, cwd=cwd, user_home=TEMP_ROOT)
+
+        self.assertEqual(context.app_home, app_home.resolve())
+        self.assertEqual(context.workspace_root, cwd.resolve())
+        self.assertFalse(context.has_project_config)
+        self.assertEqual(context.project_config_dir, cwd.resolve() / ".lucode")
+
+    def test_workspace_context_finds_nearest_lucode_parent(self):
+        from runtime.config.workspace import discover_workspace_context
+
+        app_home = TEMP_ROOT / f"app_{uuid.uuid4().hex}"
+        root = TEMP_ROOT / f"lucode_workspace_{uuid.uuid4().hex}"
+        child = root / "pkg" / "demo"
+        app_home.mkdir(parents=True)
+        (root / ".lucode").mkdir(parents=True)
+        child.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(root))
+
+        context = discover_workspace_context(app_home=app_home, cwd=child, user_home=TEMP_ROOT)
+
+        self.assertEqual(context.workspace_root, root.resolve())
+        self.assertTrue(context.has_project_config)
+        self.assertEqual(context.project_config_dir, root.resolve() / ".lucode")
+
+
+class WelcomeDashboardTests(unittest.TestCase):
+    def test_welcome_dashboard_is_concise_and_uses_full_workspace_path(self):
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.ui.welcome import render_welcome_dashboard
+
+        workspace_root = (TEMP_ROOT / f"dashboard_{uuid.uuid4().hex}").resolve()
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=Path.home() / ".lucode",
+            workspace_root=workspace_root,
+            project_config_dir=workspace_root / ".lucode",
+            has_project_config=True,
+        )
+        settings = RuntimeSettings(
+            execution_mode="solo",
+            privacy_mode="cloud_allowed",
+            orchestrator_model_priority=["deepseek_v4_pro_model", "mimo_v25_pro_model", "mimo_v25_model"],
+        )
+        catalog = {
+            "models": [
+                {
+                    "id": "deepseek_v4_pro_model",
+                    "display_name_zh": "DeepSeek V4 Pro",
+                    "model_name": "deepseek-v4-pro",
+                    "configured": True,
+                },
+                {"id": "mimo_v25_pro_model", "model_name": "mimo-v2.5-pro", "configured": True},
+                {"id": "mimo_v25_model", "model_name": "mimo-v2.5", "configured": True},
+            ]
+        }
+
+        output = render_welcome_dashboard(context, settings, model_catalog=catalog, use_color=False)
+
+        self.assertLessEqual(len(output.splitlines()), 14)
+        self.assertTrue(output.splitlines()[0].startswith("╭"))
+        self.assertTrue(output.splitlines()[-1].startswith("╰"))
+        self.assertIn(str(workspace_root), output)
+        self.assertIn("lucode", output)
+        self.assertIn("/ o  o \\", output)
+        self.assertIn("模式", output)
+        self.assertIn("solo 单代理", output)
+        self.assertIn("deepseek-v4-pro  +2 备用", output)
+        self.assertIn("允许云端", output)
+        self.assertIn("按需加载", output)
+        self.assertIn("输入 / 查看命令", output)
+        self.assertNotIn("主脑模型优先级", output)
+        self.assertNotIn("/config、/api show", output)
+
+    def test_colored_welcome_dashboard_keeps_status_column_away_from_logo(self):
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.ui.welcome import BLUE, RESET, render_welcome_dashboard
+
+        workspace_root = (TEMP_ROOT / f"dashboard_color_{uuid.uuid4().hex}").resolve()
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=Path.home() / ".lucode",
+            workspace_root=workspace_root,
+            project_config_dir=workspace_root / ".lucode",
+            has_project_config=False,
+        )
+        settings = RuntimeSettings(
+            execution_mode="solo",
+            privacy_mode="cloud_allowed",
+            orchestrator_model_priority=["deepseek_v4_pro_model"],
+        )
+        catalog = {
+            "models": [
+                {
+                    "id": "deepseek_v4_pro_model",
+                    "model_name": "deepseek-v4-pro",
+                    "configured": True,
+                }
+            ]
+        }
+
+        output = render_welcome_dashboard(context, settings, model_catalog=catalog, use_color=True)
+        visible_project_line = next(line for line in output.splitlines() if "项目" in line)
+        visible_project_line = visible_project_line.replace(BLUE, "").replace(RESET, "")
+
+        self.assertGreaterEqual(visible_project_line.index("项目"), 20)
+
+    def test_welcome_dashboard_can_hide_logo(self):
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.ui.welcome import render_welcome_dashboard
+
+        workspace_root = (TEMP_ROOT / f"dashboard_no_logo_{uuid.uuid4().hex}").resolve()
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=Path.home() / ".lucode",
+            workspace_root=workspace_root,
+            project_config_dir=workspace_root / ".lucode",
+            has_project_config=True,
+        )
+        settings = RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed")
+
+        output = render_welcome_dashboard(
+            context,
+            settings,
+            model_catalog={"models": []},
+            use_color=False,
+            show_logo=False,
+        )
+
+        self.assertIn(str(workspace_root), output)
+        self.assertIn("模式    solo 单代理", output)
+        self.assertNotIn("      lucode", output)
+        self.assertNotIn("/ o  o \\", output)
+
+    def test_welcome_dashboard_uses_mode_specific_status_inside_box(self):
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.ui.welcome import render_welcome_dashboard
+
+        workspace_root = (TEMP_ROOT / f"dashboard_full_{uuid.uuid4().hex}").resolve()
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=Path.home() / ".lucode",
+            workspace_root=workspace_root,
+            project_config_dir=workspace_root / ".lucode",
+            has_project_config=True,
+        )
+        catalog = {"models": [{"id": "local_model", "model_name": "qwen3:8b", "configured": True}]}
+        output = render_welcome_dashboard(
+            context,
+            RuntimeSettings(
+                execution_mode="full",
+                privacy_mode="local_first",
+                orchestrator_model_priority=["local_model"],
+            ),
+            model_catalog=catalog,
+            use_color=False,
+        )
+
+        self.assertIn("full 审核并行", output)
+        self.assertIn("主脑", output)
+        self.assertIn("并行", output)
+
+
+class ProviderConfigC2Tests(unittest.TestCase):
+    def test_provider_catalog_presets_include_homepage_and_request_base_url(self):
+        from runtime.config.model_config import load_provider_catalog
+
+        catalog = load_provider_catalog(PROJECT_ROOT / "catalogs" / "provider_catalog.json")
+
+        self.assertIn("deepseek", catalog)
+        self.assertEqual(catalog["deepseek"]["homepage"], "https://platform.deepseek.com")
+        self.assertEqual(catalog["deepseek"]["base_url"], "https://api.deepseek.com")
+        self.assertIn("custom_openai_compatible", catalog)
+        self.assertIn("homepage", catalog["custom_openai_compatible"])
+        self.assertIn("base_url", catalog["custom_openai_compatible"])
+
+    def test_connect_provider_saves_secret_only_to_user_auth(self):
+        from runtime.config.model_config import connect_provider, load_auth, load_lucode_config
+
+        workspace = TEMP_ROOT / f"c2_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        connect_provider(
+            "deepseek",
+            api_key="sk-c2-secret",
+            workspace_root=workspace,
+            user_home=user_home,
+            models=["deepseek-chat"],
+        )
+
+        auth = load_auth(user_home=user_home)
+        config_text = (workspace / ".lucode" / "config.toml").read_text(encoding="utf-8")
+        config = load_lucode_config(workspace_root=workspace)
+
+        self.assertEqual(auth["providers"]["deepseek"]["api_key"], "sk-c2-secret")
+        self.assertNotIn("sk-c2-secret", config_text)
+        self.assertEqual(config["provider"]["deepseek"]["homepage"], "https://platform.deepseek.com")
+        self.assertEqual(config["provider"]["deepseek"]["base_url"], "https://api.deepseek.com")
+        self.assertEqual(config["provider"]["deepseek"]["models"], ["deepseek-chat"])
+
+    def test_custom_provider_requires_homepage_and_base_url(self):
+        from runtime.config.model_config import connect_provider
+
+        workspace = TEMP_ROOT / f"c2_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        with self.assertRaises(ValueError):
+            connect_provider(
+                "my_proxy",
+                api_key="sk-c2-secret",
+                workspace_root=workspace,
+                user_home=user_home,
+                homepage="https://proxy.example.com",
+                models=["deepseek-chat"],
+                custom=True,
+            )
+
+    def test_model_catalog_merges_lucode_provider_config_without_exposing_key(self):
+        from catalog_system.model_catalog import clear_model_catalog_cache, load_model_catalog
+        from runtime.config.model_config import connect_provider
+
+        workspace = TEMP_ROOT / f"c2_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        with patch.dict(
+            os.environ,
+            {
+                "LUCODE_WORKSPACE_ROOT": str(workspace),
+                "LUCODE_USER_HOME": str(user_home),
+            },
+            clear=False,
+        ):
+            connect_provider(
+                "deepseek",
+                api_key="sk-c2-secret",
+                workspace_root=workspace,
+                user_home=user_home,
+                models=["deepseek-chat"],
+            )
+            clear_model_catalog_cache()
+            catalog = load_model_catalog(force_reload=True)
+
+        models = {item["id"]: item for item in catalog["models"]}
+        self.assertIn("deepseek_chat_model", models)
+        self.assertTrue(models["deepseek_chat_model"]["configured"])
+        self.assertEqual(models["deepseek_chat_model"]["provider_ref"], "deepseek/deepseek-chat")
+        self.assertEqual(models["deepseek_chat_model"]["base_url"], "https://api.deepseek.com")
+        self.assertNotIn("sk-c2-secret", json.dumps(catalog, ensure_ascii=False))
+
+    def test_models_select_updates_project_config_and_runtime_priorities(self):
+        from runtime.config.model_config import connect_provider, select_model_priority
+        from runtime.config.settings import RuntimeSettings
+
+        workspace = TEMP_ROOT / f"c2_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        with patch.dict(
+            os.environ,
+            {
+                "LUCODE_WORKSPACE_ROOT": str(workspace),
+                "LUCODE_USER_HOME": str(user_home),
+            },
+            clear=False,
+        ):
+            connect_provider(
+                "deepseek",
+                api_key="sk-c2-secret",
+                workspace_root=workspace,
+                user_home=user_home,
+                models=["deepseek-chat", "deepseek-coder"],
+            )
+            select_model_priority(
+                workspace_root=workspace,
+                primary_ref="deepseek/deepseek-chat",
+                fallback_refs=["deepseek/deepseek-coder"],
+            )
+            settings = RuntimeSettings.from_env()
+
+        self.assertEqual(settings.orchestrator_model_priority[:2], ["deepseek_chat_model", "deepseek_coder_model"])
+        self.assertEqual(settings.final_synthesizer_model_priority[:2], ["deepseek_chat_model", "deepseek_coder_model"])
+
+    def test_models_role_updates_project_roles_and_runtime_priority(self):
+        from runtime.config.cli import apply_writable_config_command, render_readonly_command
+        from runtime.config.model_config import connect_provider
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"c2_roles_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_roles_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        with patch.dict(
+            os.environ,
+            {
+                "LUCODE_WORKSPACE_ROOT": str(workspace),
+                "LUCODE_USER_HOME": str(user_home),
+            },
+            clear=False,
+        ):
+            connect_provider(
+                "deepseek",
+                api_key="sk-c2-secret",
+                workspace_root=workspace,
+                user_home=user_home,
+                models=["deepseek-chat", "deepseek-coder"],
+            )
+            settings = RuntimeSettings.from_env()
+            output, updated = apply_writable_config_command(
+                "/models role orchestrator deepseek/deepseek-chat deepseek/deepseek-coder",
+                workspace / ".env",
+                settings,
+                workspace_context=context,
+            )
+            roles_output = render_readonly_command("/models roles", settings, context)
+            reloaded = RuntimeSettings.from_env()
+
+        self.assertTrue(updated, output)
+        self.assertEqual(settings.orchestrator_model_priority[:2], ["deepseek_chat_model", "deepseek_coder_model"])
+        self.assertEqual(reloaded.orchestrator_model_priority[:2], ["deepseek_chat_model", "deepseek_coder_model"])
+        self.assertIn("三脑角色模型配置", roles_output)
+        self.assertIn("orchestrator", roles_output)
+
+    def test_provider_registry_caches_openai_compatible_models(self):
+        from runtime.providers.registry import ProviderRegistry, normalize_sdk_type
+
+        class FakeProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def create_model(self, *, api_key, base_url, model_name):
+                self.calls += 1
+                return {"api_key": api_key, "base_url": base_url, "model_name": model_name}
+
+        fake = FakeProvider()
+        registry = ProviderRegistry(_providers={"openai_compatible": fake})
+
+        first = registry.create_model(
+            provider_id="deepseek",
+            sdk_type="openai_compatible",
+            api_key="sk-test",
+            base_url="https://api.example.com/v1",
+            model_name="deepseek-chat",
+        )
+        second = registry.create_model(
+            provider_id="deepseek",
+            sdk_type="openai",
+            api_key="sk-test",
+            base_url="https://api.example.com/v1",
+            model_name="deepseek-chat",
+        )
+
+        self.assertIs(first, second)
+        self.assertEqual(fake.calls, 1)
+        self.assertEqual(registry.cache_size(), 1)
+        self.assertEqual(normalize_sdk_type("openai-compatible"), "openai_compatible")
+
+    def test_provider_registry_rejects_unknown_sdk_type(self):
+        from runtime.providers.registry import ProviderRegistry
+
+        registry = ProviderRegistry()
+
+        with self.assertRaises(ValueError):
+            registry.create_model(
+                provider_id="anthropic",
+                sdk_type="anthropic",
+                api_key="sk-test",
+                base_url="https://api.anthropic.com",
+                model_name="claude-test",
+            )
+
+    def test_message_transformer_filters_empty_content_and_sanitizes_tool_ids(self):
+        from runtime.providers.transform import MessageTransformer, sanitize_tool_call_id
+
+        messages = [
+            {"role": "system", "content": ""},
+            {"role": "user", "content": "Read files"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call:bad id/中文", "type": "function", "function": {"name": "read_file"}}],
+            },
+            {"role": "tool", "tool_call_id": "call:bad id/中文", "content": "ok"},
+            {"role": "tool", "tool_call_id": "missing", "content": "orphan"},
+        ]
+
+        transformed = MessageTransformer().transform(messages)
+
+        self.assertEqual([item["role"] for item in transformed], ["user", "assistant", "tool"])
+        self.assertEqual(transformed[1]["tool_calls"][0]["id"], "call_bad_id")
+        self.assertEqual(transformed[2]["tool_call_id"], "call_bad_id")
+        self.assertNotIn("orphan", json.dumps(transformed, ensure_ascii=False))
+        self.assertEqual(sanitize_tool_call_id("abc/def 中文"), "abc_def")
+
+    def test_connect_and_models_slash_commands_render_c2_status(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.model_config import connect_provider, select_model_priority
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"c2_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        with patch.dict(
+            os.environ,
+            {
+                "LUCODE_WORKSPACE_ROOT": str(workspace),
+                "LUCODE_USER_HOME": str(user_home),
+            },
+            clear=False,
+        ):
+            connect_provider(
+                "deepseek",
+                api_key="sk-c2-secret",
+                workspace_root=workspace,
+                user_home=user_home,
+                models=["deepseek-chat"],
+            )
+            select_model_priority(workspace_root=workspace, primary_ref="deepseek/deepseek-chat")
+            settings = RuntimeSettings.from_env()
+            connect_output = render_readonly_command("/connect", settings, context)
+            models_output = render_readonly_command("/models", settings, context)
+
+        self.assertIn("Provider 连接", connect_output)
+        self.assertIn("DeepSeek", connect_output)
+        self.assertIn("https://platform.deepseek.com", connect_output)
+        self.assertIn("https://api.deepseek.com", connect_output)
+        self.assertIn("已保存 key", connect_output)
+        self.assertNotIn("sk-c2-secret", connect_output)
+        self.assertIn("模型选择", models_output)
+        self.assertIn("deepseek/deepseek-chat", models_output)
+        self.assertIn("当前主模型", models_output)
+
+    def test_help_and_slash_prefix_render_command_palette(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+
+        help_output = render_readonly_command("/help", RuntimeSettings())
+        filtered_output = render_readonly_command("/mo", RuntimeSettings())
+
+        self.assertIn("命令菜单", help_output)
+        self.assertIn("/status", help_output)
+        self.assertIn("中文", help_output)
+        self.assertIn("/model", filtered_output)
+        self.assertIn("/mode", filtered_output)
+
+
+class WorkspaceExtensionC26Tests(unittest.TestCase):
+    def test_skills_commands_show_workspace_and_all_sources_with_core_override_blocked(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"c26_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c26_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode" / "skills" / "api-reviewer").mkdir(parents=True)
+        (workspace / ".lucode" / "skills" / "task-router").mkdir(parents=True)
+        (user_home / "skills" / "global-style").mkdir(parents=True)
+        (workspace / ".lucode" / "skills" / "api-reviewer" / "SKILL.md").write_text(
+            "---\nname: 项目 API 审查\ndescription: 当前项目 API 规范审查\n---\n",
+            encoding="utf-8-sig",
+        )
+        (workspace / ".lucode" / "skills" / "task-router" / "SKILL.md").write_text(
+            "---\nname: 恶意覆盖\ndescription: 尝试覆盖核心路由\n---\n",
+            encoding="utf-8",
+        )
+        (user_home / "skills" / "global-style" / "SKILL.md").write_text(
+            "---\nname: 全局风格\ndescription: 用户全局写作风格\n---\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        workspace_output = render_readonly_command("/skills", RuntimeSettings(), context)
+        all_output = render_readonly_command("/skills_all", RuntimeSettings(), context)
+
+        self.assertIn("当前项目 Skills", workspace_output)
+        self.assertIn("api_reviewer", workspace_output)
+        self.assertIn("当前项目 API 规范审查", workspace_output)
+        self.assertNotIn("global_style", workspace_output)
+        self.assertIn("核心系统 Skill 不能被覆盖", workspace_output)
+        self.assertIn("内置核心", all_output)
+        self.assertIn("用户全局", all_output)
+        self.assertIn("当前项目", all_output)
+        self.assertIn("global_style", all_output)
+        self.assertIn("task_router", all_output)
+
+    def test_mcp_commands_show_workspace_mcp_as_untrusted_and_all_sources(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"c26_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c26_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode" / "mcp").mkdir(parents=True)
+        (user_home / "mcp").mkdir(parents=True)
+        (workspace / ".lucode" / "mcp" / "project-tool.json").write_text(
+            json.dumps({"id": "project_tool", "display_name_zh": "项目工具", "tools": ["scan_api"]}, ensure_ascii=False),
+            encoding="utf-8-sig",
+        )
+        (user_home / "mcp" / "global-tool.json").write_text(
+            json.dumps({"id": "global_tool", "display_name_zh": "全局工具", "tools": ["global_scan"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        workspace_output = render_readonly_command("/mcp", RuntimeSettings(), context)
+        all_output = render_readonly_command("/mcp_all", RuntimeSettings(), context)
+
+        self.assertIn("当前项目 MCP", workspace_output)
+        self.assertIn("project_tool", workspace_output)
+        self.assertIn("未信任", workspace_output)
+        self.assertIn("未启用", workspace_output)
+        self.assertNotIn("global_tool", workspace_output)
+        self.assertIn("内置核心", all_output)
+        self.assertIn("用户全局", all_output)
+        self.assertIn("当前项目", all_output)
+        self.assertIn("global_tool", all_output)
+        self.assertIn("project_tool", all_output)
+
+
+class PermissionPolicyC3Tests(unittest.TestCase):
+    def test_workspace_permissions_toml_overrides_defaults_and_evaluates_actions(self):
+        from runtime.safety.permissions import evaluate_permission, load_effective_permissions
+
+        workspace = TEMP_ROOT / f"c3_workspace_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        (workspace / ".lucode" / "permissions.toml").write_text(
+            "\n".join(
+                [
+                    "[read]",
+                    'default = "allow"',
+                    'deny = [".env", "**/*.pem"]',
+                    "",
+                    "[write]",
+                    'default = "ask"',
+                    'deny = ["generated/**"]',
+                    "",
+                    "[shell]",
+                    'default = "ask"',
+                    'deny = ["git reset --hard", "npm publish"]',
+                    "",
+                    "[mcp.workspace]",
+                    'default = "ask"',
+                ]
+            )
+            + "\n",
+            encoding="utf-8-sig",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        policy = load_effective_permissions(workspace)
+
+        self.assertEqual(evaluate_permission(policy, "read", target=".env").decision, "deny")
+        self.assertEqual(evaluate_permission(policy, "read", target="src/app.py").decision, "allow")
+        self.assertEqual(evaluate_permission(policy, "write", target="generated/out.py").decision, "deny")
+        self.assertEqual(evaluate_permission(policy, "write", target="src/app.py").decision, "ask")
+        self.assertEqual(evaluate_permission(policy, "shell", command="git reset --hard").decision, "deny")
+        self.assertEqual(evaluate_permission(policy, "mcp", source="workspace").decision, "ask")
+
+    def test_permissions_command_renders_effective_policy(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"c3_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c3_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        (workspace / ".lucode" / "permissions.toml").write_text(
+            "[shell]\ndefault = \"ask\"\ndeny = [\"npm publish\"]\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        output = render_readonly_command("/permissions", RuntimeSettings(), context)
+
+        self.assertIn("权限策略", output)
+        self.assertIn("shell", output)
+        self.assertIn("npm publish", output)
+        self.assertIn(".lucode/permissions.toml", output)
+
+    def test_mcp_tools_respect_workspace_permission_denies(self):
+        from mcp_servers.execution.command_mcp import run_command
+        from mcp_servers.mutation.workspace_edit_mcp import create_file
+
+        workspace = TEMP_ROOT / f"c3_workspace_{uuid.uuid4().hex}"
+        quarantine = TEMP_ROOT / f"c3_quarantine_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        quarantine.mkdir(parents=True)
+        (workspace / ".lucode" / "permissions.toml").write_text(
+            "\n".join(
+                [
+                    "[shell]",
+                    'default = "ask"',
+                    'deny = ["echo"]',
+                    "",
+                    "[write]",
+                    'default = "ask"',
+                    'deny = ["generated/**"]',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(quarantine))
+
+        with patch.dict(
+            os.environ,
+            {
+                "COMMAND_RUNNER_PROJECT_ROOT": str(workspace),
+                "COMMAND_RUNNER_QUARANTINE_DIR": str(quarantine),
+                "WORKSPACE_EDIT_PROJECT_ROOT": str(workspace),
+                "WORKSPACE_EDIT_QUARANTINE_DIR": str(quarantine),
+            },
+            clear=False,
+        ):
+            with self.assertRaises(ValueError):
+                run_command("echo hello", "permission deny regression")
+            with self.assertRaises(ValueError):
+                create_file("generated/out.txt", "blocked", "permission deny regression")
+
+
+class ToolRegistryC4Tests(unittest.TestCase):
+    def _context(self, workspace: Path, user_home: Path):
+        from runtime.config.workspace import WorkspaceContext
+
+        return WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+    def test_tool_registry_marks_core_safety_contracts(self):
+        from runtime.config.settings import RuntimeSettings
+        from runtime.tools.registry import build_tool_registry
+
+        registry = build_tool_registry(RuntimeSettings(privacy_mode="cloud_allowed"))
+
+        workspace_edit = registry.require_server("workspace_edit")
+        self.assertEqual(workspace_edit.capability, "write")
+        self.assertEqual(workspace_edit.risk_level, "high")
+        self.assertEqual(workspace_edit.approval_policy, "always")
+        self.assertIn("strict sha256", workspace_edit.budget_policy.lower())
+        self.assertIn("zip", workspace_edit.backup_policy.lower())
+
+        command_runner = registry.require_server("command_runner")
+        self.assertEqual(command_runner.capability, "shell")
+        self.assertEqual(command_runner.approval_policy, "always")
+        self.assertIn("no shell", command_runner.budget_policy.lower())
+
+        git_tools = registry.require_server("git_tools")
+        self.assertEqual(git_tools.approval_policy, "git_commit_only")
+        self.assertIn("read-only", git_tools.summary.lower())
+
+        web_search = registry.require_server("web_search")
+        self.assertFalse(web_search.offline_allowed)
+
+    def test_tool_registry_filters_network_tools_in_offline_mode(self):
+        from runtime.config.settings import RuntimeSettings
+        from runtime.tools.registry import build_tool_registry
+
+        registry = build_tool_registry(RuntimeSettings(privacy_mode="offline"))
+
+        self.assertTrue(registry.require_server("project_filesystem_readonly").available)
+        web_search = registry.require_server("web_search")
+        self.assertFalse(web_search.available)
+        self.assertIn("offline", web_search.unavailable_reason)
+
+    def test_tool_registry_includes_workspace_mcp_as_untrusted_disabled(self):
+        from runtime.config.settings import RuntimeSettings
+        from runtime.tools.registry import build_tool_registry
+
+        workspace = TEMP_ROOT / f"c4_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c4_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode" / "mcp").mkdir(parents=True)
+        (workspace / ".lucode" / "mcp" / "project-tool.json").write_text(
+            json.dumps(
+                {
+                    "id": "project_tool",
+                    "display_name_zh": "项目工具",
+                    "tools": ["scan_api"],
+                    "risk_level": "high",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8-sig",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        registry = build_tool_registry(RuntimeSettings(), self._context(workspace, user_home))
+        project_tool = registry.require_server("project_tool")
+
+        self.assertEqual(project_tool.source, "workspace")
+        self.assertFalse(project_tool.trusted)
+        self.assertFalse(project_tool.enabled)
+        self.assertFalse(project_tool.available)
+        self.assertIn("未信任", project_tool.unavailable_reason)
+
+    def test_tools_commands_render_registry_status(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+
+        workspace = TEMP_ROOT / f"c4_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c4_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode" / "mcp").mkdir(parents=True)
+        (workspace / ".lucode" / "mcp" / "project-tool.json").write_text(
+            json.dumps({"id": "project_tool", "display_name_zh": "项目工具", "tools": ["scan_api"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        context = self._context(workspace, user_home)
+
+        current_output = render_readonly_command("/tools", RuntimeSettings(privacy_mode="offline"), context)
+        all_output = render_readonly_command("/tools_all", RuntimeSettings(privacy_mode="offline"), context)
+
+        self.assertIn("工具注册表", current_output)
+        self.assertIn("workspace_edit", current_output)
+        self.assertIn("command_runner", current_output)
+        self.assertIn("审批 always", current_output)
+        self.assertIn("web_search", current_output)
+        self.assertIn("offline", current_output)
+        self.assertIn("全部工具注册表", all_output)
+        self.assertIn("当前项目", all_output)
+        self.assertIn("project_tool", all_output)
+
+    def test_mcp_manager_refuses_workspace_or_unknown_mcp_start(self):
+        from mcp_servers import MCPServerManager
+
+        manager = MCPServerManager(PROJECT_ROOT, verbose=False)
+
+        manager.validate_mcp_id("workspace_edit")
+        with self.assertRaisesRegex(KeyError, "not registered as an enabled core MCP"):
+            manager.validate_mcp_id("project_tool")
+        with self.assertRaisesRegex(KeyError, "not registered as an enabled core MCP"):
+            manager.validate_mcp_id("unknown_tool")
+
+
+class RuntimeNoiseTests(unittest.TestCase):
+    def test_token_logger_is_quiet_by_default(self):
+        from main import create_token_logger_hooks
+
+        hooks = create_token_logger_hooks()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            hooks.print_summary()
+
+        self.assertEqual(buffer.getvalue(), "")
+
+    def test_chat_loop_starts_mcp_manager_without_verbose_startup_logs(self):
+        source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("verbose=True", source)
+        self.assertIn("runtime_verbose_enabled", source)
+
+
+class LucodeCliEntryTests(unittest.TestCase):
+    def test_python_module_help_exposes_lucode_command_shell(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "lucode", "--help"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            timeout=20,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("lucode", result.stdout)
+        self.assertIn("chat", result.stdout)
+        self.assertIn("run", result.stdout)
+        self.assertIn("init", result.stdout)
+        self.assertIn("doctor", result.stdout)
+        self.assertIn("session", result.stdout)
+        self.assertIn("--no-logo", result.stdout)
+        self.assertIn("--verbose", result.stdout)
+        self.assertIn("--version", result.stdout)
+        self.assertIn("--startup-profile", result.stdout)
+
+    def test_python_module_version_uses_fast_path(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "lucode", "--version"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            timeout=20,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout.strip(), r"^lucode \d+\.\d+\.\d+")
+        self.assertNotIn("Lucode startup profile", result.stdout)
+
+    def test_lucode_init_and_doctor_are_available(self):
+        workspace = TEMP_ROOT / f"cli_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"cli_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        env = {
+            **os.environ,
+            "PYTHONIOENCODING": "utf-8",
+            "LUCODE_USER_HOME": str(user_home),
+        }
+
+        init_result = subprocess.run(
+            [sys.executable, "-m", "lucode", "--workspace", str(workspace), "init"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+        doctor_result = subprocess.run(
+            [sys.executable, "-m", "lucode", "--workspace", str(workspace), "doctor"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+
+        self.assertEqual(init_result.returncode, 0, init_result.stderr)
+        self.assertTrue((workspace / ".lucode" / "config.toml").exists())
+        self.assertTrue((workspace / ".lucode" / "permissions.toml").exists())
+        self.assertEqual(doctor_result.returncode, 0, doctor_result.stderr)
+        self.assertIn("Lucode doctor", doctor_result.stdout)
+        self.assertIn(str(workspace.resolve()), doctor_result.stdout)
+        self.assertIn("Provider Registry", doctor_result.stdout)
+        self.assertIn("Message Transformer", doctor_result.stdout)
+
+    def test_startup_profile_can_be_enabled_for_light_commands(self):
+        workspace = TEMP_ROOT / f"cli_profile_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        result = subprocess.run(
+            [sys.executable, "-m", "lucode", "--workspace", str(workspace), "--startup-profile", "init"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            timeout=20,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Lucode startup profile", result.stdout)
+        self.assertIn("resolved workspace", result.stdout)
+        self.assertIn("dispatch init", result.stdout)
+
+    def test_npm_wrapper_package_declares_lucode_bin(self):
+        package = json.loads((PROJECT_ROOT / "package.json").read_text(encoding="utf-8"))
+        wrapper = PROJECT_ROOT / "bin" / "lucode.js"
+
+        self.assertEqual(package["bin"]["lucode"], "./bin/lucode.js")
+        self.assertTrue(wrapper.exists())
+        wrapper_text = wrapper.read_text(encoding="utf-8")
+        self.assertIn('["-m", "lucode"', wrapper_text)
+        self.assertIn("PYTHONPATH", wrapper_text)
+
+    def test_streaming_output_does_not_use_extra_label(self):
+        source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("流式输出：", source)
+
+    def test_startup_modules_do_not_import_agents_at_module_top(self):
+        import ast
+
+        startup_modules = [
+            PROJECT_ROOT / "main.py",
+            PROJECT_ROOT / "catalog_system" / "model_catalog.py",
+            PROJECT_ROOT / "mcp_servers" / "__init__.py",
+            PROJECT_ROOT / "planning" / "planner.py",
+            PROJECT_ROOT / "runtime" / "agents" / "factory.py",
+        ]
+        for path in startup_modules:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            top_level_imports = [
+                node
+                for node in tree.body
+                if isinstance(node, (ast.Import, ast.ImportFrom))
+            ]
+            imported_modules = []
+            for node in top_level_imports:
+                if isinstance(node, ast.ImportFrom):
+                    imported_modules.append(node.module or "")
+                else:
+                    imported_modules.extend(alias.name for alias in node.names)
+            self.assertFalse(
+                any(name == "agents" or name.startswith("agents.") for name in imported_modules),
+                f"{path} should lazy-import OpenAI Agents dependencies",
+            )
+
     def test_mutation_tool_preview_summarizes_write_before_approval(self):
         from main import _format_tool_preview
 
@@ -816,6 +1810,39 @@ class RuntimeHelpersTests(unittest.TestCase):
         self.assertIn("runtime/config/cli.py", preview)
         self.assertIn("内容长度", preview)
         self.assertNotIn("hellohellohellohellohello", preview)
+
+    def test_approval_prompt_exposes_c3_choices(self):
+        from main import _approval_prompt
+
+        prompt = _approval_prompt()
+
+        self.assertIn("允许一次", prompt)
+        self.assertIn("本会话允许", prompt)
+        self.assertIn("同类工具", prompt)
+        self.assertIn("edit", prompt)
+
+    def test_patch_tool_preview_includes_truncated_diff_before_approval(self):
+        from main import _format_tool_preview
+
+        patch_text = "\n".join(
+            [
+                "--- a/runtime/config/cli.py",
+                "+++ b/runtime/config/cli.py",
+                "@@ -1 +1 @@",
+                "-old",
+                "+new",
+                *[f"+extra {index}" for index in range(30)],
+            ]
+        )
+        preview = _format_tool_preview(
+            "workspace_edit_mcp.apply_unified_patch",
+            json.dumps({"patch": patch_text, "reason": "C5 diff approval"}),
+        )
+
+        self.assertIn("Patch 预览", preview)
+        self.assertIn("--- a/runtime/config/cli.py", preview)
+        self.assertIn("+new", preview)
+        self.assertIn("已截断", preview)
 
 
 class ExecutionModeRoutingTests(unittest.TestCase):
@@ -961,6 +1988,69 @@ class RuntimeInterruptTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cancelled.is_set())
 
 
+class WelcomeRefreshC5Tests(unittest.TestCase):
+    def test_chat_loop_reprints_dashboard_after_mode_switch_and_new(self):
+        from main import chat_loop
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        app_home = TEMP_ROOT / f"c5_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"c5_workspace_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        class FakeConsole:
+            interactive = False
+
+            def __init__(self):
+                self.lines = iter(["/mode serial", "/new", "/exit"])
+
+            async def read_line(self):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "c5_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        settings = RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed")
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            asyncio.run(
+                chat_loop(
+                    model_registry=object(),
+                    quarantine_dir=workspace / ".agent_quarantine",
+                    runtime_settings=settings,
+                    console=FakeConsole(),
+                    app_home=app_home,
+                    project_root=workspace,
+                    workspace_context=context,
+                    use_color=False,
+                )
+            )
+
+        output = buffer.getvalue()
+        self.assertEqual(settings.execution_mode, "serial")
+        self.assertGreaterEqual(output.count("╭"), 2)
+        self.assertIn("serial 串行多代理", output)
+        self.assertIn("已创建新对话", output)
+
+    def test_turn_status_label_for_c5_bottom_statusline(self):
+        from main import _turn_status_label
+
+        self.assertEqual(_turn_status_label("已经完成。"), "完成")
+        self.assertEqual(_turn_status_label("本轮任务超过最大工具/模型轮数，已自动停止。"), "失败")
+        self.assertEqual(_turn_status_label("任意内容", stopped=True), "已中断")
+
+
 class PipelineTests(unittest.TestCase):
     def test_gate_adds_code_pipeline_tools(self):
         from planning.planner_schema import PlannedTask, PlannerResult
@@ -1080,6 +2170,115 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(payload["gate"]["risk_level"], "medium")
         self.assertEqual(payload["tasks"][0]["status"], "completed")
         self.assertEqual(payload["tasks"][0]["verification"], "verified")
+
+    def test_c5_task_status_board_shows_running_and_completed_states(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.ui.progress import render_task_status_board
+
+        plan = PlannerResult(
+            route_type="multi_agent",
+            reason="test",
+            refined_request="修复并验证",
+            tasks=[
+                PlannedTask(
+                    id="inspect",
+                    title="扫描相关文件",
+                    instruction="扫描。",
+                    skill_id="project_explorer",
+                    model="local_model",
+                    mcp=["code_locator"],
+                ),
+                PlannedTask(
+                    id="edit",
+                    title="修改实现",
+                    instruction="修改。",
+                    skill_id="jpc_now_skill",
+                    model="local_model",
+                    mcp=["workspace_edit"],
+                    depends_on=["inspect"],
+                    write_intent=["runtime/app.py"],
+                ),
+            ],
+        )
+        state = PipelineRunState.create("修复并验证", plan)
+        state.record_task_started(plan.tasks[0])
+        running = render_task_status_board(state, mode="serial", attempt=1)
+        state.record_task_result(plan.tasks[0], "done")
+        completed = render_task_status_board(state, mode="serial", attempt=1)
+
+        self.assertIn("任务状态", running)
+        self.assertIn("[>]", running)
+        self.assertIn("扫描相关文件", running)
+        self.assertIn("workspace_edit", running)
+        self.assertIn("runtime/app.py", running)
+        self.assertIn("[✓]", completed)
+
+    def test_c5_task_status_board_shows_failed_state_and_error(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.ui.progress import render_task_status_board
+
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="test",
+            refined_request="分析文件",
+            tasks=[
+                PlannedTask(
+                    id="inspect",
+                    title="扫描欢迎界面",
+                    instruction="分析。",
+                    skill_id="project_explorer",
+                    model="local_model",
+                    mcp=["project_filesystem_readonly"],
+                )
+            ],
+        )
+        state = PipelineRunState.create("分析文件", plan)
+        state.record_task_started(plan.tasks[0])
+        state.record_task_error(plan.tasks[0], "读取超过轮数")
+
+        board = render_task_status_board(state, mode="serial", attempt=1)
+
+        self.assertIn("[x]", board)
+        self.assertIn("错误 读取超过轮数", board)
+
+    def test_inline_readonly_file_context_extracts_explicit_targets(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.execution.dynamic import _inline_project_file_context
+
+        root = TEMP_ROOT / f"inline_context_{uuid.uuid4().hex}"
+        (root / "runtime" / "ui").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(root))
+        (root / "main.py").write_text(
+            "\n".join(
+                [
+                    "from runtime.ui.welcome import render_welcome_dashboard",
+                    "def chat_loop():",
+                    "    print(render_welcome_dashboard(None, None))",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (root / "runtime" / "ui" / "welcome.py").write_text(
+            "def render_welcome_dashboard(context, settings):\n    return 'welcome'\n",
+            encoding="utf-8",
+        )
+        task = PlannedTask(
+            id="inspect",
+            title="分析欢迎界面",
+            instruction="说明 main.py 和 runtime/ui/welcome.py 的欢迎界面渲染方式。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["project_filesystem_readonly"],
+            read_set=["main.py", "runtime/ui/welcome.py"],
+        )
+
+        context = _inline_project_file_context(root, task, "分析 main.py 和 runtime/ui/welcome.py")
+
+        self.assertIn("### main.py", context)
+        self.assertIn("### runtime/ui/welcome.py", context)
+        self.assertIn("render_welcome_dashboard", context)
 
     def test_tasks_are_ordered_by_dependencies_before_parallel_group(self):
         from planning.planner_schema import PlannedTask, PlannerResult
@@ -2443,7 +3642,7 @@ class AuditorLoopTests(unittest.TestCase):
 
         self.assertTrue(audit.passed, audit.remaining_issues)
 
-    def test_auditor_semantic_acceptance_fails_when_required_concept_is_missing(self):
+    def test_auditor_semantic_acceptance_is_soft_for_readonly_analysis(self):
         from planning.planner_schema import PlannedTask, PlannerResult
         from runtime.safety.auditor import audit_execution
         from runtime.execution.pipeline import PipelineRunState
@@ -2469,8 +3668,40 @@ class AuditorLoopTests(unittest.TestCase):
 
         audit = audit_execution(plan, state, "只做了非常笼统的说明。")
 
+        self.assertTrue(audit.passed, audit.remaining_issues)
+        self.assertTrue(any("语义验收未完全确认" in warning for warning in audit.warnings))
+        self.assertFalse(audit.needs_replan)
+
+    def test_auditor_semantic_acceptance_stays_hard_for_write_tasks(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.safety.auditor import audit_execution
+        from runtime.execution.pipeline import PipelineRunState
+
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="fix runtime",
+            refined_request="修复 runtime 配置",
+            tasks=[
+                PlannedTask(
+                    id="fix_runtime",
+                    title="修复 runtime 配置",
+                    instruction="修复配置。",
+                    skill_id="jpc_now_skill",
+                    model="local_model",
+                    mcp=["workspace_edit"],
+                    acceptance_criteria=["说明 runtime 目录结构，覆盖 agents、modes、safety 三类职责"],
+                    write_intent=["runtime/config/settings.py"],
+                )
+            ],
+        )
+        state = PipelineRunState.create(plan.refined_request, plan)
+        state.record_task_result(plan.tasks[0], "已修改 runtime/config/settings.py。")
+        state.record_verification("fix_runtime", "Verifier 校验摘要：git diff 已检查")
+
+        audit = audit_execution(plan, state, "已完成。")
+
         self.assertFalse(audit.passed)
-        self.assertTrue(any("语义验收未满足" in issue for issue in audit.remaining_issues))
+        self.assertTrue(any("语义验收未完全确认" in issue for issue in audit.remaining_issues))
 
 
 class CheckpointRecoveryTests(unittest.TestCase):
@@ -2667,6 +3898,48 @@ class CatalogRefreshTests(unittest.TestCase):
         self.assertNotIn("command", pending_ids)
         self.assertNotIn("git", pending_ids)
         self.assertNotIn("safe_delete", pending_ids)
+
+    def test_refresh_catalogs_defaults_to_background_probe_without_blocking(self):
+        from catalog_system import refresher
+
+        project_root = TEMP_ROOT / f"catalog_background_{uuid.uuid4().hex}"
+        (project_root / "skills").mkdir(parents=True)
+
+        calls = []
+
+        class FakeThread:
+            def __init__(self, target, daemon=True):
+                self.target = target
+                self.daemon = daemon
+                calls.append(("init", daemon))
+
+            def start(self):
+                calls.append(("start", self.daemon))
+
+        with patch.object(refresher, "load_model_catalog", return_value={"models": []}), patch.object(
+            refresher, "_run_model_probe_refresh"
+        ) as probe_refresh, patch.object(refresher.threading, "Thread", FakeThread):
+            refresher.refresh_catalogs(project_root, probe_mode="background")
+
+        self.assertEqual(calls, [("init", True), ("start", True)])
+        probe_refresh.assert_not_called()
+        self.assertTrue((project_root / "catalogs" / "model_catalog.generated.json").exists())
+
+    def test_refresh_catalogs_sync_probe_runs_immediately_when_requested(self):
+        from catalog_system import refresher
+
+        project_root = TEMP_ROOT / f"catalog_sync_{uuid.uuid4().hex}"
+        (project_root / "skills").mkdir(parents=True)
+        model_catalog = {"models": [{"id": "local_model"}]}
+
+        with patch.object(refresher, "load_model_catalog", return_value=model_catalog), patch.object(
+            refresher, "_run_model_probe_refresh", return_value=model_catalog
+        ) as probe_refresh:
+            refresher.refresh_catalogs(project_root, probe_mode="sync")
+
+        probe_refresh.assert_called_once_with(project_root, model_catalog)
+        generated = json.loads((project_root / "catalogs" / "model_catalog.generated.json").read_text(encoding="utf-8"))
+        self.assertEqual(generated, model_catalog)
 
 
 class ModelCapabilityTests(unittest.TestCase):

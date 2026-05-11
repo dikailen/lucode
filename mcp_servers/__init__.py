@@ -2,9 +2,11 @@ import os
 import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
+from types import SimpleNamespace
 
-from agents.mcp import MCPServerStdio, create_static_tool_filter
+from runtime.agents.sdk import mcp_stdio_class, static_tool_filter_factory
 from runtime.safety.privacy import PrivacyPolicy
+from runtime.tools.registry import build_tool_registry
 
 
 MCP_MODULES = {
@@ -64,10 +66,12 @@ def create_readonly_filesystem_server(
     root_dir: Path,
     name: str,
     budget_profile: dict[str, str] | None = None,
-) -> MCPServerStdio:
+):
     """Create a budgeted read-only filesystem MCP server limited to one directory."""
 
     profile = {**DEFAULT_READONLY_BUDGET_PROFILE, **(budget_profile or {})}
+    MCPServerStdio = mcp_stdio_class()
+    create_static_tool_filter = static_tool_filter_factory()
     return MCPServerStdio(
         name=name,
         params={
@@ -106,9 +110,11 @@ def create_readonly_filesystem_server(
     )
 
 
-def create_safe_delete_server(project_root: Path, quarantine_dir: Path) -> MCPServerStdio:
+def create_safe_delete_server(project_root: Path, quarantine_dir: Path):
     """Create a safe-delete MCP server that always requires user approval."""
 
+    MCPServerStdio = mcp_stdio_class()
+    create_static_tool_filter = static_tool_filter_factory()
     return MCPServerStdio(
         name="safe_delete_mcp",
         params={
@@ -135,13 +141,15 @@ def create_safe_delete_server(project_root: Path, quarantine_dir: Path) -> MCPSe
     )
 
 
-def create_web_search_server(project_root: Path) -> MCPServerStdio:
+def create_web_search_server(project_root: Path):
     """Create a web-search MCP server for current external information lookup."""
 
     approval = "never"
     if PrivacyPolicy.from_env().mode == "offline":
         approval = "always"
 
+    MCPServerStdio = mcp_stdio_class()
+    create_static_tool_filter = static_tool_filter_factory()
     return MCPServerStdio(
         name="web_search_mcp",
         params={
@@ -162,9 +170,11 @@ def create_web_search_server(project_root: Path) -> MCPServerStdio:
     )
 
 
-def create_code_locator_server(project_root: Path) -> MCPServerStdio:
+def create_code_locator_server(project_root: Path):
     """Create a read-only code locator MCP server for scoped code discovery."""
 
+    MCPServerStdio = mcp_stdio_class()
+    create_static_tool_filter = static_tool_filter_factory()
     return MCPServerStdio(
         name="code_locator_mcp",
         params={
@@ -187,9 +197,11 @@ def create_code_locator_server(project_root: Path) -> MCPServerStdio:
     )
 
 
-def create_workspace_edit_server(project_root: Path, quarantine_dir: Path) -> MCPServerStdio:
+def create_workspace_edit_server(project_root: Path, quarantine_dir: Path):
     """Create a workspace editing MCP server. Mutating tools require approval."""
 
+    MCPServerStdio = mcp_stdio_class()
+    create_static_tool_filter = static_tool_filter_factory()
     return MCPServerStdio(
         name="workspace_edit_mcp",
         params={
@@ -222,9 +234,11 @@ def create_workspace_edit_server(project_root: Path, quarantine_dir: Path) -> MC
     )
 
 
-def create_command_runner_server(project_root: Path, quarantine_dir: Path) -> MCPServerStdio:
+def create_command_runner_server(project_root: Path, quarantine_dir: Path):
     """Create a command runner MCP server. Commands require approval."""
 
+    MCPServerStdio = mcp_stdio_class()
+    create_static_tool_filter = static_tool_filter_factory()
     return MCPServerStdio(
         name="command_runner_mcp",
         params={
@@ -245,9 +259,11 @@ def create_command_runner_server(project_root: Path, quarantine_dir: Path) -> MC
     )
 
 
-def create_git_tools_server(project_root: Path, quarantine_dir: Path) -> MCPServerStdio:
+def create_git_tools_server(project_root: Path, quarantine_dir: Path):
     """Create a Git helper MCP server. Read-only tools are allowed; commits require approval."""
 
+    MCPServerStdio = mcp_stdio_class()
+    create_static_tool_filter = static_tool_filter_factory()
     return MCPServerStdio(
         name="git_tools_mcp",
         params={
@@ -294,6 +310,7 @@ class MCPServerManager:
         if mcp_id in self._servers:
             return self._servers[mcp_id]
 
+        self.validate_mcp_id(mcp_id)
         server = self._create_server(mcp_id)
         if self.verbose:
             print(f"启动 MCP：{mcp_id}")
@@ -310,7 +327,16 @@ class MCPServerManager:
     def set_readonly_budget_profile(self, mcp_id: str, profile: dict[str, str]) -> None:
         self._readonly_budget_profiles[mcp_id] = dict(profile)
 
-    def _create_server(self, mcp_id: str) -> MCPServerStdio:
+    def validate_mcp_id(self, mcp_id: str) -> None:
+        registry = build_tool_registry(workspace_context=self._registry_context())
+        registry.validate_core_mcp_start(mcp_id)
+
+    def _registry_context(self):
+        app_home = Path(os.environ.get("LUCODE_APP_HOME") or Path(__file__).resolve().parent.parent).resolve()
+        user_home = Path(os.environ.get("LUCODE_USER_HOME") or Path.home() / ".lucode").resolve()
+        return SimpleNamespace(app_home=app_home, user_home=user_home, workspace_root=self.project_root)
+
+    def _create_server(self, mcp_id: str):
         if mcp_id == "project_filesystem_readonly":
             return create_readonly_filesystem_server(
                 self.project_root,

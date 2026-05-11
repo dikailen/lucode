@@ -8,8 +8,10 @@ from mcp.server.fastmcp import FastMCP
 
 try:
     from mcp_servers.core.operation_log import append_operation_log
+    from runtime.safety.permissions import evaluate_permission, load_effective_permissions
 except ModuleNotFoundError:
     from operation_log import append_operation_log
+    from runtime.safety.permissions import evaluate_permission, load_effective_permissions
 
 
 mcp = FastMCP("command_runner", log_level="ERROR")
@@ -74,6 +76,11 @@ def _validate_command(args: list[str]) -> None:
 
     if any(".." in Path(arg).parts for arg in args[1:] if not arg.startswith("-")):
         raise ValueError("Arguments containing parent-directory traversal are not allowed")
+
+    policy = load_effective_permissions(_project_root())
+    decision = evaluate_permission(policy, "shell", command=" ".join(args))
+    if decision.decision == "deny":
+        raise ValueError(f"Command is denied by permissions.toml: {decision.reason}")
 
 
 def _truncate(value: str, limit: int = 12000) -> str:

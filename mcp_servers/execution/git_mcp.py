@@ -7,8 +7,10 @@ from mcp.server.fastmcp import FastMCP
 
 try:
     from mcp_servers.core.operation_log import append_operation_log
+    from runtime.safety.permissions import evaluate_permission, load_effective_permissions
 except ModuleNotFoundError:
     from operation_log import append_operation_log
+    from runtime.safety.permissions import evaluate_permission, load_effective_permissions
 
 
 mcp = FastMCP("git_tools", log_level="ERROR")
@@ -171,6 +173,9 @@ def git_commit(message: str, reason: str) -> str:
         raise ValueError("message must not be empty")
     if "\n" in message:
         raise ValueError("message must be a single-line commit summary")
+    decision = evaluate_permission(load_effective_permissions(_project_root()), "git", command=f"commit {message}")
+    if decision.decision == "deny":
+        raise ValueError(f"git commit denied by permissions.toml: {decision.reason}")
 
     result = _run_git(["commit", "-m", message], timeout_seconds=60)
     _log_operation(

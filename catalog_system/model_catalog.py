@@ -4,15 +4,16 @@ import re
 from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv
-from agents import AsyncOpenAI, OpenAIChatCompletionsModel
 from catalog_system.model_probe import cached_probe_for_model, model_fingerprint
 from runtime.agents.model_capability import strategy_for_model_info
+from runtime.providers.registry import ProviderRegistry, normalize_sdk_type
 from runtime.safety.privacy import (
     PrivacyPolicy,
     infer_backend_type,
     is_local_backend,
     privacy_level_for_backend,
 )
+from runtime.config.model_config import configured_provider_model_definitions, lucode_config_signature
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -149,6 +150,11 @@ def discover_model_definitions() -> list[dict]:
     definitions = []
     known_ids = set()
     env_keys = _env_keys()
+
+    for item in configured_provider_model_definitions():
+        if item["id"] not in known_ids:
+            definitions.append(item)
+            known_ids.add(item["id"])
 
     for item in KNOWN_MODEL_DEFINITIONS:
         if _known_model_is_registered(item, env_keys):
@@ -364,9 +370,9 @@ def clear_model_catalog_cache() -> None:
 def _build_model_catalog() -> dict:
     models = []
     for item in discover_model_definitions():
-        api_key = _env_first(item.get("api_key_env"), item.get("shared_api_key_env"))
-        base_url = _env_first(item.get("base_url_env"), item.get("shared_base_url_env"))
-        model_name = item.get("model_name_value") or os.getenv(item["model_env"]) or item.get("default_model_name")
+        api_key = item.get("api_key_value") or _env_first(item.get("api_key_env"), item.get("shared_api_key_env"))
+        base_url = item.get("base_url_value") or _env_first(item.get("base_url_env"), item.get("shared_base_url_env"))
+        model_name = item.get("model_name_value") or os.getenv(item.get("model_env") or "") or item.get("default_model_name")
         backend_type = infer_backend_type(
             base_url or "",
             item.get("provider") or "",
@@ -398,8 +404,8 @@ def _build_model_catalog() -> dict:
                 "id": item["id"],
                 "display_name_zh": item["display_name_zh"],
                 "provider": item["provider"],
-                "api_key_env": item["api_key_env"],
-                "base_url_env": item["base_url_env"],
+                "api_key_env": item.get("api_key_env") or "",
+                "base_url_env": item.get("base_url_env") or "",
                 "model_env": item.get("model_env") or "",
                 "configured": configured,
                 "base_url_configured": bool(base_url),
@@ -417,6 +423,9 @@ def _build_model_catalog() -> dict:
                 "execution_strategy": strategy.to_dict(),
                 "shared_config_group": item.get("shared_config_group") or "",
                 "model_alias": item.get("model_alias") or "",
+                "source": item.get("source") or "env",
+                "provider_ref": item.get("provider_ref") or "",
+                "homepage": item.get("homepage") or "",
                 "probe_fingerprint": model_fingerprint(
                     {
                         "id": item["id"],
@@ -425,7 +434,6 @@ def _build_model_catalog() -> dict:
                         "model_name": model_name or "",
                     }
                 ),
-                "source": "env",
                 },
             )
         )
@@ -462,6 +470,7 @@ def _model_catalog_signature() -> tuple:
     return (
         _file_signature(env_file),
         _file_signature(probe_file),
+        lucode_config_signature(),
         env_snapshot,
     )
 
@@ -500,15 +509,16 @@ class ModelRegistry:
 
     def __init__(self):
         self.definitions = {item["id"]: item for item in discover_model_definitions()}
+        self.provider_registry = ProviderRegistry()
 
-    def get_model(self, model_id: str) -> OpenAIChatCompletionsModel:
+    def get_model(self, model_id: str):
         if model_id not in self.definitions:
             raise KeyError(f"Unknown model id: {model_id}")
 
         item = self.definitions[model_id]
-        api_key = _env_first(item.get("api_key_env"), item.get("shared_api_key_env"))
-        base_url = _env_first(item.get("base_url_env"), item.get("shared_base_url_env"))
-        model_name = item.get("model_name_value") or os.getenv(item["model_env"]) or item.get("default_model_name")
+        api_key = item.get("api_key_value") or _env_first(item.get("api_key_env"), item.get("shared_api_key_env"))
+        base_url = item.get("base_url_value") or _env_first(item.get("base_url_env"), item.get("shared_base_url_env"))
+        model_name = item.get("model_name_value") or os.getenv(item.get("model_env") or "") or item.get("default_model_name")
         backend_type = infer_backend_type(
             base_url or "",
             item.get("provider") or "",
@@ -519,14 +529,14 @@ class ModelRegistry:
         if not base_url or not model_name or (not api_key and not is_local):
             raise ValueError(f"Model is not fully configured: {model_id}")
 
-        client = AsyncOpenAI(
+        sdk_type = normalize_sdk_type(item.get("sdk_type") or item.get("compatible_type") or backend_type)
+        return self.provider_registry.create_model(
+            provider_id=item.get("provider") or model_id,
+            sdk_type=sdk_type,
             api_key=api_key or "local-model-no-api-key",
             base_url=base_url,
-        )
-
-        return OpenAIChatCompletionsModel(
-            model=model_name,
-            openai_client=client,
+            model_name=model_name,
+            options=item.get("options") or {},
         )
 
     def get_model_info(self, model_id: str) -> dict:

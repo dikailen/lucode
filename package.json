@@ -1,0 +1,23 @@
+{
+  "name": "lucode",
+  "version": "0.1.0",
+  "description": "Lucode terminal coding agent",
+  "bin": {
+    "lucode": "./bin/lucode.js"
+  },
+  "files": [
+    "bin",
+    "lucode",
+    "runtime",
+    "catalog_system",
+    "catalogs",
+    "mcp_servers",
+    "planning",
+    "skills",
+    "main.py"
+  ],
+  "scripts": {
+    "test": "python -m unittest tests.run_regression"
+  },
+  "license": "UNLICENSED"
+}

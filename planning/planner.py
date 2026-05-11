@@ -1,5 +1,3 @@
-from agents import Agent, Runner
-
 from catalog_system.loader import (
     compact_mcp_catalog_for_prompt,
     compact_permission_policy_for_prompt,
@@ -14,10 +12,12 @@ from planning.planner_schema import (
     parse_refined_request,
     sanitize_text,
 )
+from runtime.agents.sdk import agent_class, runner_class
 from skills.loader import load_skill
 
 
 def build_query_refiner(model):
+    Agent = agent_class()
     return Agent(
         name="query_refiner_agent",
         instructions=load_skill("query_refiner"),
@@ -26,6 +26,7 @@ def build_query_refiner(model):
 
 
 def build_orchestrator_planner(model):
+    Agent = agent_class()
     skill_catalog = compact_skill_catalog_for_prompt()
     mcp_catalog = compact_mcp_catalog_for_prompt()
     permission_policy = compact_permission_policy_for_prompt()
@@ -60,6 +61,7 @@ async def preview_plan(
     """Run query refinement and planner preview without creating execution Agents."""
 
     raw_user_input = sanitize_text(raw_user_input)
+    Runner = runner_class()
     if refiner_enabled:
         refiner = build_query_refiner(refiner_model)
         refiner_result = await Runner.run(refiner, raw_user_input, hooks=hooks)

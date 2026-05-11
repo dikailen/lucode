@@ -49,8 +49,10 @@
       },
       "shared_config_group": "DEEPSEEK",
       "model_alias": "deepseek_v4_flash",
-      "probe_fingerprint": "208b44d97867155f28bceba6a7178db04246c7d5f4091eee74ad801c0a1d9626",
       "source": "env",
+      "provider_ref": "",
+      "homepage": "",
+      "probe_fingerprint": "208b44d97867155f28bceba6a7178db04246c7d5f4091eee74ad801c0a1d9626",
       "probe": {}
     },
     {
@@ -94,8 +96,10 @@
       },
       "shared_config_group": "DEEPSEEK",
       "model_alias": "deepseek_v4_pro",
-      "probe_fingerprint": "b7036f9e7c016140234a0a0f54d3abeb9cb59b94168a5942afb7f322b5621709",
       "source": "env",
+      "provider_ref": "",
+      "homepage": "",
+      "probe_fingerprint": "b7036f9e7c016140234a0a0f54d3abeb9cb59b94168a5942afb7f322b5621709",
       "probe": {}
     },
     {
@@ -136,8 +140,10 @@
       },
       "shared_config_group": "MIMO",
       "model_alias": "mimo_v25",
-      "probe_fingerprint": "fcd40b34087417e6ecb0894381dd9e59fc03a01fcc0f646a3df533891f3d147c",
       "source": "env",
+      "provider_ref": "",
+      "homepage": "",
+      "probe_fingerprint": "fcd40b34087417e6ecb0894381dd9e59fc03a01fcc0f646a3df533891f3d147c",
       "probe": {}
     },
     {
@@ -178,8 +184,10 @@
       },
       "shared_config_group": "MIMO",
       "model_alias": "mimo_v25_pro",
-      "probe_fingerprint": "887e0d4e8402590c3a7ef2a5246bfbd07af214feeadd9a359538471204bb65f8",
       "source": "env",
+      "provider_ref": "",
+      "homepage": "",
+      "probe_fingerprint": "887e0d4e8402590c3a7ef2a5246bfbd07af214feeadd9a359538471204bb65f8",
       "probe": {}
     },
     {
@@ -215,8 +223,10 @@
       },
       "shared_config_group": "",
       "model_alias": "",
-      "probe_fingerprint": "6cec380e58fc928bff4663088e82b2c81500a804b97221e86a974a97947d46d4",
       "source": "env",
+      "provider_ref": "",
+      "homepage": "",
+      "probe_fingerprint": "6cec380e58fc928bff4663088e82b2c81500a804b97221e86a974a97947d46d4",
       "probe": {
         "status": "service_unavailable",
         "supports_basic_chat": false,
@@ -227,12 +237,12 @@
         "service_error": "HTTPConnectionPool(host='localhost', port=11434): Max retries exceeded with url: /api/tags (Caused by NewConnectionError(\"HTTPConnection(host='localhost', port=11434): Failed to establish a new connection: [WinError 10061] 由于目标计算机积极拒绝，无法连接。\"))",
         "model_present": null,
         "service_endpoint": "http://localhost:11434/api/tags",
-        "service_probed_at": 1778263196.110947,
+        "service_probed_at": 1778428226.822047,
         "model_id": "local_model",
         "model_name": "deepseek-r1:7b",
         "backend_type": "ollama",
         "fingerprint": "6cec380e58fc928bff4663088e82b2c81500a804b97221e86a974a97947d46d4",
-        "probed_at": 1778263196.110947,
+        "probed_at": 1778428226.822047,
         "planner_suitable": false,
         "execution_suitable": false
       },

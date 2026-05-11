@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 from collections import defaultdict
 from pathlib import Path
@@ -19,6 +20,7 @@ from runtime.safety.checkpoint import RollbackResult, create_checkpoint, rollbac
 from runtime.config.execution_mode import normalize_execution_mode
 from runtime.memory.flywheel import FlywheelStore
 from runtime.workspace.patch_ledger import PatchProposalLedger
+from runtime.ui.progress import render_runtime_statusline, render_task_status_board
 from runtime.execution.pipeline import (
     PipelineRunState,
     apply_pipeline_gate,
@@ -29,6 +31,47 @@ from runtime.safety.privacy import PrivacyPolicy
 from runtime.safety.repair_loop import build_repair_request, should_retry
 from runtime.workspace.run_workspace import RunWorkspace
 from runtime.config.settings import RuntimeSettings
+
+
+INLINE_READONLY_MCP = {"project_filesystem_readonly", "code_locator", "git_tools"}
+INLINE_FORBIDDEN_MCP = {"workspace_edit", "safe_backup", "command_runner", "web_search"}
+INLINE_TEXT_SUFFIXES = {
+    ".cfg",
+    ".css",
+    ".html",
+    ".ini",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".md",
+    ".py",
+    ".rs",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
+INLINE_IGNORED_PARTS = {
+    ".agent_quarantine",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+}
+INLINE_PATH_PATTERN = re.compile(
+    r"(?:[\w.-]+[\\/])+[\w .@()+\-\[\]]+\.[A-Za-z0-9]{1,8}"
+    r"|(?<![\w.-])[\w.-]+\.(?:cfg|css|html|ini|java|js|json|jsx|md|py|rs|toml|ts|tsx|txt|ya?ml)(?![\w.-])",
+    re.IGNORECASE,
+)
 
 
 async def execute_dynamic_request(
@@ -121,6 +164,7 @@ async def _execute_dynamic_attempt(
     validation = validate_plan(plan, privacy_policy=privacy_policy)
     review = review_plan(plan)
     if show_plan:
+        _print_progress_snapshot(run_state, mode=settings.execution_mode, attempt=attempt, active="规划完成")
         if attempt > 1:
             print(f"========== 第 {attempt} 轮重规划 ==========")
         print(format_execution_plan(refined, plan, validation))
@@ -152,21 +196,67 @@ async def _execute_dynamic_attempt(
 
     if plan.route_type == "single_agent":
         task = plan.tasks[0]
+        if show_plan:
+            run_state.record_task_started(task)
+            _print_progress_snapshot(run_state, mode=settings.execution_mode, attempt=attempt, active=task.title)
         if _can_fast_path_url_search(task):
             output = _run_url_search_fast_path(refined.refined_request, task)
             run_state.record_task_result(task, output)
+            if show_plan:
+                _print_progress_snapshot(run_state, mode=settings.execution_mode, attempt=attempt, active="已完成")
             _record_flywheel_safely(flywheel, run_state)
             audit = audit_execution(plan, run_state, output)
             return format_final_report(output, audit), audit
         if _can_fast_path_git_status(task):
             output = _run_git_status_fast_path(project_root, task)
             run_state.record_task_result(task, output)
+            if show_plan:
+                _print_progress_snapshot(run_state, mode=settings.execution_mode, attempt=attempt, active="已完成")
+            _record_flywheel_safely(flywheel, run_state)
+            audit = audit_execution(plan, run_state, output)
+            return format_final_report(output, audit), audit
+
+        workspace_context = _latest_workspace_context(project_root, task)
+        inline_context = _inline_project_file_context(project_root, task, refined.refined_request)
+        if inline_context:
+            agent = factory.create_direct_answer_agent(
+                task.model,
+                (
+                    "请只基于用户请求、任务说明和提供的项目文件片段完成只读分析；"
+                    "不要声称已经调用工具，不要要求用户再粘贴文件。"
+                ),
+            )
+            try:
+                result = await run_agent(
+                    agent,
+                    _task_prompt(
+                        refined.refined_request,
+                        task.instruction,
+                        workspace_context=f"{workspace_context}\n\n{inline_context}",
+                    ),
+                    hooks,
+                    max_turns=4,
+                )
+            except Exception as exc:
+                run_state.record_task_error(task, exc)
+                if show_plan:
+                    _print_progress_snapshot(
+                        run_state,
+                        mode=settings.execution_mode,
+                        attempt=attempt,
+                        active=f"失败：{task.title}",
+                    )
+                _record_flywheel_safely(flywheel, run_state)
+                raise
+            output = _with_verification_report(project_root, task, str(result.final_output), run_state)
+            run_state.record_task_result(task, output)
+            if show_plan:
+                _print_progress_snapshot(run_state, mode=settings.execution_mode, attempt=attempt, active="已完成")
             _record_flywheel_safely(flywheel, run_state)
             audit = audit_execution(plan, run_state, output)
             return format_final_report(output, audit), audit
 
         agent = await factory.create_task_agent(task)
-        workspace_context = _latest_workspace_context(project_root, task)
         try:
             result = await run_agent(
                 agent,
@@ -176,10 +266,19 @@ async def _execute_dynamic_attempt(
             )
         except Exception as exc:
             run_state.record_task_error(task, exc)
+            if show_plan:
+                _print_progress_snapshot(
+                    run_state,
+                    mode=settings.execution_mode,
+                    attempt=attempt,
+                    active=f"失败：{task.title}",
+                )
             _record_flywheel_safely(flywheel, run_state)
             raise
         output = _with_verification_report(project_root, task, str(result.final_output), run_state)
         run_state.record_task_result(task, output)
+        if show_plan:
+            _print_progress_snapshot(run_state, mode=settings.execution_mode, attempt=attempt, active="已完成")
         _record_flywheel_safely(flywheel, run_state)
         audit = audit_execution(plan, run_state, output)
         return format_final_report(output, audit), audit
@@ -196,6 +295,8 @@ async def _execute_dynamic_attempt(
                 run_agent,
                 run_state,
                 execution_mode=settings.execution_mode,
+                show_progress=show_plan,
+                attempt=attempt,
             )
         finally:
             _record_flywheel_safely(flywheel, run_state)
@@ -221,6 +322,8 @@ async def _run_multi_agent(
     run_agent,
     run_state: PipelineRunState | None = None,
     execution_mode: str = "serial",
+    show_progress: bool = True,
+    attempt: int = 1,
 ):
     workspace = RunWorkspace(project_root)
     run_dir = workspace.create()
@@ -237,23 +340,45 @@ async def _run_multi_agent(
             for batch in batches:
                 if len(batch) == 1:
                     task = batch[0]
-                    title, output = await _run_planned_task(
-                        refined_request, task, project_root, factory, hooks, run_agent, run_state, ledger
-                    )
+                    if show_progress and run_state:
+                        run_state.record_task_started(task)
+                        _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=task.title)
+                    try:
+                        title, output = await _run_planned_task(
+                            refined_request, task, project_root, factory, hooks, run_agent, run_state, ledger
+                        )
+                    except Exception:
+                        if show_progress and run_state:
+                            _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"失败：{task.title}")
+                        raise
                     workspace.write_task_output(task.id, title, output)
+                    if show_progress and run_state:
+                        _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"已完成：{task.title}")
                     continue
 
                 print(_format_parallel_batch_audit(group_id, batch))
-                results = await asyncio.gather(
-                    *(
-                        _run_planned_task(
-                            refined_request, task, project_root, factory, hooks, run_agent, run_state, ledger
+                if show_progress and run_state:
+                    for task in batch:
+                        run_state.record_task_started(task)
+                    active = "并行批次 " + ", ".join(getattr(task, "id", "task") for task in batch)
+                    _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=active)
+                try:
+                    results = await asyncio.gather(
+                        *(
+                            _run_planned_task(
+                                refined_request, task, project_root, factory, hooks, run_agent, run_state, ledger
+                            )
+                            for task in batch
                         )
-                        for task in batch
                     )
-                )
+                except Exception:
+                    if show_progress and run_state:
+                        _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"失败：{active}")
+                    raise
                 for task, (title, output) in zip(batch, results):
                     workspace.write_task_output(task.id, title, output)
+                if show_progress and run_state:
+                    _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"已完成：{active}")
 
         async with create_readonly_filesystem_server(
             run_dir,
@@ -266,9 +391,16 @@ async def _run_multi_agent(
                 "请输出面向用户的最终中文答案。"
             )
             result = await run_agent(synthesizer, synthesis_prompt, hooks, max_turns=10)
+            if show_progress and run_state:
+                _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active="汇总完成")
             return result.final_output
     finally:
         workspace.cleanup()
+
+
+def _print_progress_snapshot(run_state: PipelineRunState, mode: str, attempt: int, active: str = "") -> None:
+    print(render_task_status_board(run_state, mode=mode, attempt=attempt))
+    print(render_runtime_statusline(mode, active=active))
 
 
 def _task_prompt(
@@ -362,6 +494,209 @@ def _latest_workspace_context(project_root: Path, task) -> str:
     if len(changed) > 12:
         lines.append(f"- 其余 {len(changed) - 12} 个改动文件已省略。")
     return "\n".join(lines)
+
+
+def _inline_project_file_context(project_root: Path, task, refined_request: str) -> str:
+    """Inline explicit readonly file targets so simple analysis does not burn MCP turns."""
+
+    if not _should_inline_readonly_file_task(task):
+        return ""
+    paths = _resolve_explicit_project_file_paths(project_root, task, refined_request)
+    if not paths:
+        return ""
+
+    snippets = []
+    query = "\n".join([refined_request, str(getattr(task, "title", "") or ""), str(getattr(task, "instruction", "") or "")])
+    for path in paths[:3]:
+        excerpt = _read_project_file_excerpt(path, query=query)
+        if not excerpt:
+            continue
+        relative = path.relative_to(project_root.resolve()).as_posix()
+        snippets.append(f"### {relative}\n{excerpt}")
+    if not snippets:
+        return ""
+    return "内联只读文件片段：\n" + "\n\n".join(snippets)
+
+
+def _should_inline_readonly_file_task(task) -> bool:
+    mcp = set(getattr(task, "mcp", []) or [])
+    if not (mcp & INLINE_READONLY_MCP):
+        return False
+    if mcp & INLINE_FORBIDDEN_MCP:
+        return False
+    if list(getattr(task, "write_intent", []) or []):
+        return False
+    return True
+
+
+def _resolve_explicit_project_file_paths(project_root: Path, task, refined_request: str) -> list[Path]:
+    texts = [
+        refined_request,
+        str(getattr(task, "title", "") or ""),
+        str(getattr(task, "instruction", "") or ""),
+        " ".join(str(item) for item in list(getattr(task, "read_set", []) or [])),
+    ]
+    raw_candidates = []
+    for item in list(getattr(task, "read_set", []) or []):
+        raw_candidates.append(str(item))
+    for match in INLINE_PATH_PATTERN.findall("\n".join(texts)):
+        raw_candidates.append(str(match))
+
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for candidate in raw_candidates:
+        path = _resolve_project_file_candidate(project_root, candidate)
+        if path is None:
+            continue
+        key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(path)
+        if len(resolved) >= 5:
+            break
+    return resolved
+
+
+def _resolve_project_file_candidate(project_root: Path, candidate: str) -> Path | None:
+    value = str(candidate or "").strip().strip("`'\"“”‘’（）()[]<>，,。；;：:")
+    if not value or "://" in value:
+        return None
+    value = value.replace("\\", "/")
+    while value.startswith("./"):
+        value = value[2:]
+    if not value or any(part == ".." for part in value.split("/")):
+        return None
+
+    root = project_root.resolve()
+    candidate_path = Path(value)
+    direct = (root / candidate_path).resolve() if not candidate_path.is_absolute() else candidate_path.resolve()
+    if _safe_inline_project_file(root, direct):
+        return direct
+
+    if "/" not in value:
+        matches = []
+        try:
+            for path in root.rglob(value):
+                resolved = path.resolve()
+                if _safe_inline_project_file(root, resolved):
+                    matches.append(resolved)
+                    if len(matches) > 1:
+                        break
+        except OSError:
+            return None
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def _safe_inline_project_file(project_root: Path, path: Path) -> bool:
+    try:
+        relative = path.relative_to(project_root)
+    except ValueError:
+        return False
+    if not path.is_file():
+        return False
+    parts = {part.lower() for part in relative.parts}
+    if parts & INLINE_IGNORED_PARTS:
+        return False
+    name = path.name.lower()
+    if name == ".env" or any(marker in name for marker in ["secret", "token", "apikey", "api_key"]):
+        return False
+    return path.suffix.lower() in INLINE_TEXT_SUFFIXES
+
+
+def _read_project_file_excerpt(path: Path, query: str, max_chars: int = 9000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"读取失败：{exc}"
+    lines = text.splitlines()
+    rendered_all = _render_numbered_lines(lines)
+    if len(rendered_all) <= max_chars:
+        return rendered_all
+
+    tokens = _excerpt_query_tokens(query)
+    hit_indexes = []
+    for index, line in enumerate(lines):
+        lowered = line.lower()
+        if any(token in lowered for token in tokens):
+            hit_indexes.append(index)
+
+    if not hit_indexes:
+        excerpt = _render_numbered_lines(lines[:160])
+        return _truncate_excerpt(excerpt, max_chars)
+
+    selected: set[int] = set()
+    for index in hit_indexes[:40]:
+        start = max(index - 6, 0)
+        end = min(index + 7, len(lines))
+        selected.update(range(start, end))
+
+    rendered = []
+    previous = -2
+    used = 0
+    for index in sorted(selected):
+        if index != previous + 1 and rendered:
+            marker = "..."
+            if used + len(marker) + 1 > max_chars:
+                break
+            rendered.append(marker)
+            used += len(marker) + 1
+        line = f"L{index + 1:04d}: {lines[index]}"
+        if used + len(line) + 1 > max_chars:
+            rendered.append("...已截断")
+            break
+        rendered.append(line)
+        used += len(line) + 1
+        previous = index
+    return "\n".join(rendered)
+
+
+def _render_numbered_lines(lines: list[str]) -> str:
+    return "\n".join(f"L{index + 1:04d}: {line}" for index, line in enumerate(lines))
+
+
+def _truncate_excerpt(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 8)].rstrip() + "\n...已截断"
+
+
+def _excerpt_query_tokens(query: str) -> set[str]:
+    lowered = str(query or "").lower()
+    generic_tokens = {
+        "analysis",
+        "analyze",
+        "code",
+        "current",
+        "file",
+        "files",
+        "main",
+        "project",
+        "runtime",
+    }
+    tokens = {
+        token
+        for token in re.findall(r"[a-z_][a-z0-9_]{3,}", lowered)
+        if token not in generic_tokens
+    }
+    tokens.update(
+        [
+            "render_welcome_dashboard",
+            "render_welcome",
+            "welcome",
+            "dashboard",
+            "chat_loop",
+            "/new",
+            "/mode",
+            "runtime_settings",
+        ]
+    )
+    for marker in ["欢迎", "界面", "渲染", "状态栏", "仪表盘", "模式", "配置"]:
+        if marker in lowered:
+            tokens.add(marker)
+    return tokens
 
 
 async def _run_planned_task(

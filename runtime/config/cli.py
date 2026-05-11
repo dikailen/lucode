@@ -1,21 +1,49 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
 from catalog_system.model_catalog import load_model_catalog
 from runtime.config.execution_mode import execution_mode_label_zh
+from runtime.config.model_config import (
+    auth_path,
+    load_auth,
+    load_effective_lucode_config,
+    load_provider_catalog,
+    model_ids_from_refs,
+    model_refs_from_config,
+    project_config_path,
+    provider_has_api_key,
+    select_role_model_priority,
+    select_model_priority,
+)
+from runtime.config.extensions import (
+    render_all_mcp,
+    render_all_skills,
+    render_workspace_mcp,
+    render_workspace_skills,
+)
+from runtime.safety.permissions import render_permission_policy
 from runtime.safety.privacy import PrivacyPolicy
 from runtime.config.settings import RuntimeSettings
+from runtime.tools.registry import render_tool_registry
+from runtime.ui.command_palette import render_command_palette
 
 
-def render_readonly_command(command: str, settings: RuntimeSettings) -> str:
+def render_readonly_command(command: str, settings: RuntimeSettings, workspace_context=None) -> str:
     normalized = (command or "").strip()
     lower = normalized.lower()
 
     if lower == "/config":
         return _render_config(settings)
+    if lower in {"/", "/help", "/?"}:
+        return render_command_palette()
+    if lower.startswith("/") and len(lower) > 1 and not lower.startswith(("/plan", "/diff", "/rollback", "/new", "/stop", "/exit")):
+        menu = render_command_palette(normalized)
+        if "没有匹配命令" not in menu and lower.split()[0] not in _KNOWN_COMMAND_PREFIXES:
+            return menu
     if lower == "/api show":
         return _render_api_show(settings)
     if lower == "/privacy":
@@ -26,11 +54,35 @@ def render_readonly_command(command: str, settings: RuntimeSettings) -> str:
         return _render_model(settings)
     if lower == "/model available":
         return _render_model_available(settings)
+    if lower in {"/connect", "/connect list"}:
+        return _render_connect(workspace_context)
+    if lower in {"/models", "/model select"}:
+        return _render_models(settings, workspace_context)
+    if lower in {"/models roles", "/model roles"}:
+        return _render_model_roles(settings, workspace_context)
+    if lower == "/skills":
+        return render_workspace_skills(workspace_context)
+    if lower == "/skills_all":
+        return render_all_skills(workspace_context)
+    if lower == "/mcp":
+        return render_workspace_mcp(workspace_context)
+    if lower == "/mcp_all":
+        return render_all_mcp(workspace_context)
+    if lower == "/tools":
+        return render_tool_registry(settings, workspace_context, include_all=False)
+    if lower == "/tools_all":
+        return render_tool_registry(settings, workspace_context, include_all=True)
+    if lower == "/permissions":
+        return render_permission_policy(_workspace_root(workspace_context))
+    if lower.startswith("/connect "):
+        return _render_connect_provider_hint(normalized, workspace_context)
+    if lower.startswith("/models ") and not lower.startswith("/models select "):
+        return _render_readonly_switch_hint("/models", normalized.split(maxsplit=1)[1])
     if lower.startswith("/privacy "):
         return _render_readonly_switch_hint("/privacy", normalized.split(maxsplit=1)[1])
     if lower.startswith("/mode "):
         return _render_readonly_switch_hint("/mode", normalized.split(maxsplit=1)[1])
-    if lower.startswith("/model ") and lower != "/model available":
+    if lower.startswith("/model ") and lower not in {"/model available", "/model select"}:
         return _render_readonly_switch_hint("/model", normalized.split(maxsplit=1)[1])
     if lower.startswith("/api "):
         return _render_readonly_switch_hint("/api", normalized.split(maxsplit=1)[1])
@@ -39,6 +91,12 @@ def render_readonly_command(command: str, settings: RuntimeSettings) -> str:
 
 def parse_writable_config_command(command: str) -> tuple[str, str] | None:
     normalized = (command or "").strip()
+    role_match = re.match(r"^/(?:models|model)\s+role\s+([^\s]+)\s+(.+)$", normalized, flags=re.IGNORECASE)
+    if role_match:
+        return ("models_role", f"{role_match.group(1).strip()} {role_match.group(2).strip()}")
+    select_match = re.match(r"^/(?:models|model)\s+select\s+(.+)$", normalized, flags=re.IGNORECASE)
+    if select_match:
+        return ("models_select", select_match.group(1).strip())
     parts = normalized.split()
     if len(parts) != 2:
         return None
@@ -54,16 +112,61 @@ def apply_writable_config_command(
     command: str,
     env_path: Path,
     settings: RuntimeSettings,
+    workspace_context=None,
 ) -> tuple[str, bool]:
     parsed = parse_writable_config_command(command)
     if parsed is None:
         return (
             "无法识别这个配置切换命令。\n"
-            "可用命令：/mode solo、/mode serial、/mode full、/refiner on、/refiner off",
+            "可用命令：/mode solo、/mode serial、/mode full、/refiner on、/refiner off、"
+            "/models select provider/model [fallback...]、/models role <role> provider/model [...]",
             False,
         )
 
     kind, value = parsed
+    if kind == "models_role":
+        try:
+            role, refs = _parse_model_role_value(value)
+            select_role_model_priority(
+                workspace_root=_workspace_root(workspace_context),
+                role=role,
+                refs=refs,
+            )
+            model_ids = model_ids_from_refs(refs)
+            _apply_role_priority_to_settings(settings, role, model_ids)
+        except Exception as exc:
+            return (f"模型角色配置失败：{exc}", False)
+        return (
+            "已更新项目角色模型优先级。\n"
+            f"角色：{role}\n"
+            f"模型顺序：{', '.join(refs)}\n"
+            "配置已写入 .lucode/config.toml，API key 仍只保存在用户级 auth.json。",
+            True,
+        )
+
+    if kind == "models_select":
+        try:
+            primary_ref, fallback_refs = _parse_model_select_value(value)
+            select_model_priority(
+                workspace_root=_workspace_root(workspace_context),
+                primary_ref=primary_ref,
+                fallback_refs=fallback_refs,
+            )
+            model_ids = model_ids_from_refs([primary_ref, *fallback_refs])
+            settings.query_refiner_model_priority = list(model_ids)
+            settings.orchestrator_model_priority = list(model_ids)
+            settings.final_synthesizer_model_priority = list(model_ids)
+        except Exception as exc:
+            return (f"模型选择失败：{exc}", False)
+        fallback_text = "、".join(fallback_refs) if fallback_refs else "无"
+        return (
+            "已更新项目模型优先级。\n"
+            f"当前主模型：{primary_ref}\n"
+            f"Fallback：{fallback_text}\n"
+            "配置已写入 .lucode/config.toml，API key 仍只保存在用户级 auth.json。",
+            True,
+        )
+
     if kind == "mode":
         _set_env_value(env_path, "AGENTS_EXECUTION_MODE", value)
         os.environ["AGENTS_EXECUTION_MODE"] = value
@@ -174,6 +277,166 @@ def _render_api_show(settings: RuntimeSettings) -> str:
     return "\n".join(lines)
 
 
+def _render_connect(workspace_context=None) -> str:
+    provider_catalog = load_provider_catalog()
+    user_home = _user_home(workspace_context)
+    workspace_root = _workspace_root(workspace_context)
+    auth = load_auth(user_home=user_home)
+    config = load_effective_lucode_config(workspace_root=workspace_root, user_home=user_home)
+    configured_providers = config.get("provider") or {}
+    auth_providers = auth.get("providers") or {}
+    connected_ids = sorted(set(configured_providers) | set(auth_providers))
+
+    lines = [
+        "Provider 连接",
+        f"用户凭据：{auth_path(user_home)}",
+        f"项目配置：{project_config_path(workspace_root)}",
+        "",
+        "已连接 Provider",
+    ]
+    if not connected_ids:
+        lines.append("- 无")
+    for provider_id in connected_ids:
+        provider_config = dict(provider_catalog.get(provider_id) or {})
+        provider_config.update(configured_providers.get(provider_id) or {})
+        display_name = provider_config.get("display_name") or provider_id
+        homepage = provider_config.get("homepage") or "未配置"
+        base_url = provider_config.get("base_url") or "未配置"
+        key_state = "本地无需 key" if provider_config.get("local") else (
+            "已保存 key" if provider_has_api_key(provider_id, user_home=user_home) else "未保存 key"
+        )
+        lines.append(f"- {display_name}（{provider_id}） | {key_state}")
+        lines.append(f"  官网：{homepage}")
+        lines.append(f"  请求地址：{base_url}")
+
+    lines.extend(["", "可连接厂商"])
+    for provider_id, item in sorted(provider_catalog.items()):
+        display_name = item.get("display_name") or provider_id
+        homepage = item.get("homepage") or "需自定义"
+        base_url = item.get("base_url") or "需自定义"
+        lines.append(f"- {display_name}（{provider_id}）")
+        lines.append(f"  官网：{homepage}")
+        lines.append(f"  请求地址：{base_url}")
+
+    lines.extend(
+        [
+            "",
+            "命令：lucode connect <provider> --api-key <key>",
+            "自定义中转：lucode connect my_proxy --custom --homepage <官网> --base-url <请求地址> --api-key <key> --model <模型名>",
+            "说明：homepage 只用于展示和控制台入口，模型请求只走 base_url；API key 不写入项目配置。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _render_connect_provider_hint(command: str, workspace_context=None) -> str:
+    parts = command.split(maxsplit=1)
+    provider_id = parts[1].strip() if len(parts) > 1 else ""
+    catalog = load_provider_catalog()
+    item = catalog.get(provider_id.lower())
+    if not item:
+        return "\n".join(
+            [
+                f"Provider：{provider_id}",
+                "未找到内置预设。若这是中转服务，请使用 lucode connect 的 --custom、--homepage 和 --base-url 参数配置。",
+            ]
+        )
+    return "\n".join(
+        [
+            f"Provider：{item.get('display_name') or provider_id}",
+            f"官网：{item.get('homepage') or '未配置'}",
+            f"请求地址：{item.get('base_url') or '未配置'}",
+            f"推荐模型：{', '.join(item.get('models') or []) or '需手动填写'}",
+            "",
+            f"连接命令：lucode connect {provider_id} --api-key <key>",
+            "说明：API key 会写入用户级 auth.json，不会写入当前项目。",
+        ]
+    )
+
+
+def _render_models(settings: RuntimeSettings, workspace_context=None) -> str:
+    user_home = _user_home(workspace_context)
+    workspace_root = _workspace_root(workspace_context)
+    config = load_effective_lucode_config(workspace_root=workspace_root, user_home=user_home)
+    configured_refs = model_refs_from_config(config)
+    catalog = load_model_catalog()
+    models = catalog.get("models", [])
+    model_infos = {item.get("id"): item for item in models}
+    current_ids = list(settings.orchestrator_model_priority or [])
+    current_primary = _model_label(current_ids[0], model_infos) if current_ids else "未设置"
+    current_fallback = [_model_label(model_id, model_infos) for model_id in current_ids[1:]]
+
+    lines = [
+        "模型选择",
+        f"当前主模型：{current_primary}",
+        f"当前 Fallback：{', '.join(current_fallback) if current_fallback else '无'}",
+    ]
+    if configured_refs:
+        lines.append(f"项目配置：{', '.join(configured_refs)}")
+    lines.extend(["", "已连接 Provider 模型"])
+
+    provider_models = [item for item in models if item.get("source") == "lucode_config"]
+    if not provider_models:
+        lines.append("- 无；请先使用 /connect 查看连接方式。")
+    for item in sorted(provider_models, key=lambda model: (model.get("provider") or "", model.get("model_name") or "")):
+        ref = item.get("provider_ref") or f"{item.get('provider')}/{item.get('model_name')}"
+        lines.append(
+            f"- {ref} | "
+            f"{_format_configured(item.get('configured'))} | "
+            f"{_format_availability(item)} | "
+            f"{_format_backend_type(item.get('backend_type'))} | "
+            f"{_format_privacy_level(item.get('privacy_level'))} | "
+            f"工具 {_format_tool_support(item)}"
+        )
+        if item.get("homepage"):
+            lines.append(f"  官网：{item.get('homepage')}")
+        lines.append(f"  请求地址：{_safe_base_url(item)}")
+
+    lines.extend(
+        [
+            "",
+            "切换命令：/models select provider/model [fallback_provider/model...]",
+            "角色命令：/models role orchestrator provider/model [fallback_provider/model...]",
+            "示例：/models select deepseek/deepseek-chat deepseek/deepseek-reasoner",
+            "说明：这里写入的是模型顺序；API key 仍只保存在用户级 auth.json。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _render_model_roles(settings: RuntimeSettings, workspace_context=None) -> str:
+    config = load_effective_lucode_config(
+        workspace_root=_workspace_root(workspace_context),
+        user_home=_user_home(workspace_context),
+    )
+    roles = config.get("roles") or {}
+    lines = [
+        "三脑角色模型配置",
+        "可用角色：query_refiner、orchestrator、final_synthesizer",
+        "",
+        "当前运行时优先级",
+        f"- query_refiner：{', '.join(settings.query_refiner_model_priority) or '未设置'}",
+        f"- orchestrator：{', '.join(settings.orchestrator_model_priority) or '未设置'}",
+        f"- final_synthesizer：{', '.join(settings.final_synthesizer_model_priority) or '未设置'}",
+        "",
+        "项目配置 roles",
+    ]
+    if isinstance(roles, dict) and roles:
+        for role in ["query_refiner", "orchestrator", "final_synthesizer"]:
+            value = roles.get(role)
+            lines.append(f"- {role}：{', '.join(value) if isinstance(value, list) else value or '未配置'}")
+    else:
+        lines.append("- 未配置；默认使用 /models select 的主模型和 fallback。")
+    lines.extend(
+        [
+            "",
+            "写入命令：/models role <role> provider/model [fallback...]",
+            "示例：/models role orchestrator deepseek/deepseek-chat openrouter/openai/gpt-4o",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _render_privacy(settings: RuntimeSettings) -> str:
     policy = PrivacyPolicy(settings.privacy_mode)
     return "\n".join(
@@ -276,6 +539,13 @@ def _render_readonly_switch_hint(command_name: str, value: str) -> str:
                 "当前 /mode 支持直接切换：/mode solo、/mode serial、/mode full。",
             ]
         )
+    if command_name == "/models":
+        return "\n".join(
+            [
+                f"/models 请求：{value}",
+                "查看模型请用 /models；切换主模型请用 /models select provider/model [fallback...]。",
+            ]
+        )
     return "\n".join(
         [
             f"{command_name} 切换请求：{value}",
@@ -345,6 +615,87 @@ def _truncate(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[:limit] + f"\n...[已截断 {len(value) - limit} 字符]"
+
+
+def _parse_model_select_value(value: str) -> tuple[str, list[str]]:
+    refs = [item for item in re.split(r"[\s,]+", str(value or "").strip()) if item]
+    if not refs:
+        raise ValueError("请提供模型引用，例如 deepseek/deepseek-chat。")
+    return refs[0], refs[1:]
+
+
+def _parse_model_role_value(value: str) -> tuple[str, list[str]]:
+    parts = [item for item in re.split(r"[\s,]+", str(value or "").strip()) if item]
+    if len(parts) < 2:
+        raise ValueError("请提供角色和至少一个模型引用，例如 /models role orchestrator deepseek/deepseek-chat。")
+    return parts[0], parts[1:]
+
+
+def _apply_role_priority_to_settings(settings: RuntimeSettings, role: str, model_ids: list[str]) -> None:
+    normalized = str(role or "").strip().lower().replace("-", "_")
+    if normalized in {"refiner", "query_refiner", "前置优化", "前置优化副脑"}:
+        settings.query_refiner_model_priority = list(model_ids)
+    elif normalized in {"planner", "main", "main_brain", "orchestrator", "主脑"}:
+        settings.orchestrator_model_priority = list(model_ids)
+    elif normalized in {"synthesizer", "final", "final_brain", "final_synthesizer", "汇总副脑"}:
+        settings.final_synthesizer_model_priority = list(model_ids)
+
+
+_KNOWN_COMMAND_PREFIXES = {
+    "/",
+    "/?",
+    "/api",
+    "/config",
+    "/connect",
+    "/diff",
+    "/exit",
+    "/help",
+    "/mcp",
+    "/mcp_all",
+    "/mode",
+    "/model",
+    "/models",
+    "/new",
+    "/permissions",
+    "/plan",
+    "/privacy",
+    "/rollback",
+    "/skills",
+    "/skills_all",
+    "/status",
+    "/stop",
+    "/tools",
+    "/tools_all",
+}
+
+
+def _workspace_root(workspace_context=None) -> Path:
+    value = getattr(workspace_context, "workspace_root", None)
+    if value is not None:
+        return Path(value).resolve()
+    env_value = os.environ.get("LUCODE_WORKSPACE_ROOT")
+    if env_value:
+        return Path(env_value).resolve()
+    return Path.cwd().resolve()
+
+
+def _user_home(workspace_context=None) -> Path:
+    value = getattr(workspace_context, "user_home", None)
+    if value is not None:
+        return Path(value).resolve()
+    env_value = os.environ.get("LUCODE_USER_HOME")
+    if env_value:
+        return Path(env_value).resolve()
+    return (Path.home() / ".lucode").resolve()
+
+
+def _model_label(model_id: str, model_infos: dict[str, dict]) -> str:
+    info = model_infos.get(model_id) or {}
+    if info.get("provider_ref"):
+        return str(info["provider_ref"])
+    if info:
+        return _format_model_title(info)
+    return model_id or "未设置"
 
 
 def _split_models(models: list[dict]) -> tuple[list[dict], list[dict]]:
