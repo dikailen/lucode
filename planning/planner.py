@@ -10,8 +10,8 @@ from planning.planner_schema import (
     RefinedRequest,
     parse_planner_result,
     parse_refined_request,
-    sanitize_text,
 )
+from runtime.common.text_utils import sanitize_text
 from runtime.agents.sdk import agent_class, runner_class
 from skills.loader import load_skill
 

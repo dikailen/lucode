@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,9 +26,15 @@ class ExtensionRoots:
 
 
 def extension_roots(workspace_context=None) -> ExtensionRoots:
-    app_home = Path(getattr(workspace_context, "app_home", Path.cwd())).resolve()
-    user_home = Path(getattr(workspace_context, "user_home", Path.home() / ".lucode")).resolve()
-    workspace_root = Path(getattr(workspace_context, "workspace_root", Path.cwd())).resolve()
+    app_home = Path(
+        getattr(workspace_context, "app_home", None) or os.environ.get("LUCODE_APP_HOME") or Path.cwd()
+    ).resolve()
+    user_home = Path(
+        getattr(workspace_context, "user_home", None) or os.environ.get("LUCODE_USER_HOME") or Path.home() / ".lucode"
+    ).resolve()
+    workspace_root = Path(
+        getattr(workspace_context, "workspace_root", None) or os.environ.get("LUCODE_WORKSPACE_ROOT") or Path.cwd()
+    ).resolve()
     return ExtensionRoots(app_home=app_home, user_home=user_home, workspace_root=workspace_root)
 
 
@@ -154,6 +161,7 @@ def _discover_core_mcp(app_home: Path) -> list[dict[str, Any]]:
         item.setdefault("id", _normalize_id(str(item.get("display_name_zh") or "mcp")))
         item.setdefault("display_name_zh", item["id"])
         item.setdefault("tools", [])
+        item.setdefault("prompts", [])
         item["source"] = "core"
         item["trusted"] = True
         item["enabled"] = bool(item.get("implemented", True))
@@ -174,6 +182,7 @@ def _discover_mcp_dir(root: Path, source: str) -> list[dict[str, Any]]:
             "display_name_zh": raw.get("display_name_zh") or raw.get("display_name") or raw.get("name") or mcp_id,
             "summary_zh": raw.get("summary_zh") or raw.get("summary") or "",
             "tools": _as_list(raw.get("tools") or []),
+            "prompts": raw.get("prompts") or [],
             "source": source,
             "path": str(path),
             "risk_level": raw.get("risk_level") or "unknown",
@@ -210,6 +219,9 @@ def _render_mcp_items(items: list[dict[str, Any]]) -> list[str]:
             f"{trusted} | {enabled} | 风险 {item.get('risk_level') or 'unknown'}"
         )
         lines.append(f"  工具：{tools}")
+        prompts = _mcp_prompt_names(item.get("prompts"))
+        if prompts:
+            lines.append(f"  Prompts：{', '.join(prompts)}")
         lines.append(f"  来源：{_source_label(item.get('source'))}")
     return lines
 
@@ -253,6 +265,30 @@ def _as_list(value: Any) -> list[str]:
     if isinstance(value, str):
         return [item.strip() for item in re.split(r"[,;\n]+", value) if item.strip()]
     return []
+
+
+def _mcp_prompt_names(value: Any) -> list[str]:
+    names: list[str] = []
+    if isinstance(value, dict):
+        for key, raw in value.items():
+            if isinstance(raw, dict):
+                name = raw.get("name") or raw.get("id") or key
+            else:
+                name = key
+            normalized = str(name or "").strip()
+            if normalized:
+                names.append(normalized)
+        return names
+    if isinstance(value, list):
+        for raw in value:
+            if isinstance(raw, dict):
+                name = raw.get("name") or raw.get("id") or raw.get("title")
+            else:
+                name = raw
+            normalized = str(name or "").strip()
+            if normalized:
+                names.append(normalized)
+    return names
 
 
 def _normalize_id(value: str) -> str:

@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from runtime.common.text_utils import sanitize_text
+
 
 RouteType = Literal["direct_answer", "single_agent", "multi_agent", "clarify"]
 ACTION_INTENT_MARKERS = (
@@ -37,12 +39,6 @@ ACTION_INTENT_MARKERS = (
     "edit",
     "optimize",
 )
-
-
-def sanitize_text(value: str) -> str:
-    """Remove invalid Unicode surrogate characters before sending text to model APIs."""
-
-    return str(value).encode("utf-8", errors="ignore").decode("utf-8")
 
 
 @dataclass

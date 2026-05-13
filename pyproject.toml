@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lucode"
+version = "0.1.0"
+description = "Lucode terminal coding agent"
+requires-python = ">=3.11"
+dependencies = [
+  "openai-agents>=0.3.0",
+  "prompt_toolkit>=3.0.0",
+  "requests>=2.31",
+]
+license = { text = "UNLICENSED" }
+
+[project.scripts]
+lucode = "lucode.entry:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+  "catalog_system*",
+  "lucode*",
+  "mcp_servers*",
+  "planning*",
+  "runtime*",
+  "skills*",
+]
+
+[tool.setuptools.package-data]
+catalogs = ["*.json", "*.md"]
+skills = ["**/*"]

@@ -1,5 +1,6 @@
 from catalog_system.model_catalog import ModelRegistry
-from planning.planner_schema import PlannedTask, sanitize_text
+from planning.planner_schema import PlannedTask
+from runtime.common.text_utils import sanitize_text
 from runtime.agents.sdk import agent_class
 from skills.loader import load_skill
 

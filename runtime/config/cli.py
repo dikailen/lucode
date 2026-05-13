@@ -27,7 +27,9 @@ from runtime.config.extensions import (
 )
 from runtime.safety.permissions import render_permission_policy
 from runtime.safety.privacy import PrivacyPolicy
+from runtime.hooks import render_tool_event_audit
 from runtime.config.settings import RuntimeSettings
+from runtime.commands.registry import known_command_prefixes
 from runtime.tools.registry import render_tool_registry
 from runtime.ui.command_palette import render_command_palette
 
@@ -39,9 +41,11 @@ def render_readonly_command(command: str, settings: RuntimeSettings, workspace_c
     if lower == "/config":
         return _render_config(settings)
     if lower in {"/", "/help", "/?"}:
-        return render_command_palette()
+        return render_command_palette(workspace_context=workspace_context)
+    if lower in {"/api", "/refiner"}:
+        return render_command_palette(normalized, workspace_context=workspace_context)
     if lower.startswith("/") and len(lower) > 1 and not lower.startswith(("/plan", "/diff", "/rollback", "/new", "/stop", "/exit")):
-        menu = render_command_palette(normalized)
+        menu = render_command_palette(normalized, workspace_context=workspace_context)
         if "没有匹配命令" not in menu and lower.split()[0] not in _KNOWN_COMMAND_PREFIXES:
             return menu
     if lower == "/api show":
@@ -74,6 +78,8 @@ def render_readonly_command(command: str, settings: RuntimeSettings, workspace_c
         return render_tool_registry(settings, workspace_context, include_all=True)
     if lower == "/permissions":
         return render_permission_policy(_workspace_root(workspace_context))
+    if lower in {"/audit", "/hooks"}:
+        return render_tool_event_audit(_workspace_root(workspace_context))
     if lower.startswith("/connect "):
         return _render_connect_provider_hint(normalized, workspace_context)
     if lower.startswith("/models ") and not lower.startswith("/models select "):
@@ -546,6 +552,14 @@ def _render_readonly_switch_hint(command_name: str, value: str) -> str:
                 "查看模型请用 /models；切换主模型请用 /models select provider/model [fallback...]。",
             ]
         )
+    if command_name == "/model" and value in {"solo", "serial", "full"}:
+        return "\n".join(
+            [
+                f"/model 检测到可能的执行模式：{value}",
+                "如果你要切换 solo / serial / full，请使用 /mode 命令。",
+                f"正确命令：/mode {value}",
+            ]
+        )
     return "\n".join(
         [
             f"{command_name} 切换请求：{value}",
@@ -591,6 +605,17 @@ def _git_status_summary(project_root: Path) -> str:
 
 def _run_git(project_root: Path, args: list[str], timeout_seconds: int = 30) -> subprocess.CompletedProcess:
     try:
+        if not project_root.is_dir():
+            return subprocess.CompletedProcess(
+                ["git", *args],
+                1,
+                "",
+                f"workspace is not a directory: {project_root}",
+            )
+    except OSError as exc:
+        return subprocess.CompletedProcess(["git", *args], 1, "", f"workspace is not accessible: {exc}")
+
+    try:
         return subprocess.run(
             ["git", *args],
             cwd=project_root,
@@ -603,6 +628,8 @@ def _run_git(project_root: Path, args: list[str], timeout_seconds: int = 30) -> 
         )
     except FileNotFoundError:
         return subprocess.CompletedProcess(["git", *args], 127, "", "git executable was not found in PATH.")
+    except OSError as exc:
+        return subprocess.CompletedProcess(["git", *args], 1, "", str(exc))
     except subprocess.TimeoutExpired as exc:
         return subprocess.CompletedProcess(["git", *args], 124, exc.stdout or "", "git command timed out.")
 
@@ -641,32 +668,7 @@ def _apply_role_priority_to_settings(settings: RuntimeSettings, role: str, model
         settings.final_synthesizer_model_priority = list(model_ids)
 
 
-_KNOWN_COMMAND_PREFIXES = {
-    "/",
-    "/?",
-    "/api",
-    "/config",
-    "/connect",
-    "/diff",
-    "/exit",
-    "/help",
-    "/mcp",
-    "/mcp_all",
-    "/mode",
-    "/model",
-    "/models",
-    "/new",
-    "/permissions",
-    "/plan",
-    "/privacy",
-    "/rollback",
-    "/skills",
-    "/skills_all",
-    "/status",
-    "/stop",
-    "/tools",
-    "/tools_all",
-}
+_KNOWN_COMMAND_PREFIXES = known_command_prefixes()
 
 
 def _workspace_root(workspace_context=None) -> Path:

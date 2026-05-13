@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from runtime.execution.dynamic import execute_dynamic_request
-
 
 async def run_full_request(
     run_input: str,
@@ -15,6 +13,9 @@ async def run_full_request(
     settings,
     show_plan: bool = True,
 ) -> str:
+    """Compatibility wrapper; FullStrategy calls dynamic execution directly."""
+    from runtime.execution import execute_dynamic_request
+
     return await execute_dynamic_request(
         run_input,
         project_root,
@@ -25,3 +26,6 @@ async def run_full_request(
         show_plan=show_plan,
         settings=settings,
     )
+
+
+__all__ = ["run_full_request"]

@@ -417,6 +417,202 @@ class CommandRunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             run_command("git push", "regression denied command")
 
+    def test_nested_shell_destructive_command_is_denied_by_analyzer(self):
+        from mcp_servers.execution.command_mcp import run_command
+
+        with self.assertRaisesRegex(ValueError, "Command is denied by analyzer"):
+            run_command(
+                'powershell -Command "Remove-Item -Recurse .agent_test_tmp"',
+                "regression nested destructive command",
+            )
+
+
+class CommandAnalyzerTests(unittest.TestCase):
+    def test_command_analyzer_flags_destructive_and_publish_commands(self):
+        from runtime.safety.command_analyzer import analyze_command, render_command_analysis
+
+        delete_analysis = analyze_command('powershell -Command "Remove-Item -Recurse tmp"')
+        self.assertEqual(delete_analysis.risk_level, "critical")
+        self.assertTrue(delete_analysis.should_deny)
+        self.assertTrue(any(finding.category == "nested_shell" for finding in delete_analysis.findings))
+        self.assertTrue(any(finding.category == "destructive" for finding in delete_analysis.findings))
+
+        publish_analysis = analyze_command("npm publish --access public")
+        self.assertEqual(publish_analysis.risk_level, "critical")
+        self.assertTrue(publish_analysis.should_deny)
+        self.assertIn("发布命令", "\n".join(render_command_analysis(publish_analysis)))
+
+    def test_command_analyzer_surfaces_mutating_but_approval_allowed_commands(self):
+        from runtime.safety.command_analyzer import analyze_command
+
+        package_analysis = analyze_command("npm install")
+        self.assertEqual(package_analysis.risk_level, "medium")
+        self.assertFalse(package_analysis.should_deny)
+        self.assertTrue(any(finding.category == "package_manager" for finding in package_analysis.findings))
+
+        network_analysis = analyze_command("curl https://example.com")
+        self.assertEqual(network_analysis.risk_level, "medium")
+        self.assertFalse(network_analysis.should_deny)
+        self.assertTrue(any(finding.category == "network" for finding in network_analysis.findings))
+
+
+class ToolHookEventTests(unittest.TestCase):
+    def test_tool_hook_event_summarizes_command_risk_and_redacts_secrets(self):
+        from runtime.hooks import build_tool_event
+
+        event = build_tool_event(
+            "pre_tool_use",
+            "command_runner.run_command",
+            json.dumps(
+                {
+                    "command": "npm install",
+                    "reason": "verify sk-verysecretvalue should not leak",
+                    "api_key": "sk-verysecretvalue",
+                }
+            ),
+            tool_rule="command",
+        )
+        payload = event.to_dict()
+        rendered = json.dumps(payload, ensure_ascii=False)
+
+        self.assertEqual(payload["event_type"], "pre_tool_use")
+        self.assertEqual(payload["tool_rule"], "command")
+        self.assertEqual(payload["risk"]["risk_level"], "medium")
+        self.assertFalse(payload["risk"]["should_deny"])
+        self.assertIn("package_manager", rendered)
+        self.assertNotIn("sk-verysecretvalue", rendered)
+
+    def test_approval_flow_records_pre_and_post_tool_events(self):
+        import runtime.agent.approval as approval_module
+        from runtime.agent.approval import run_with_approval
+
+        class FakeItem:
+            qualified_name = "command_runner.run_command"
+            name = "run_command"
+            arguments = json.dumps({"command": "npm install", "reason": "hook regression"})
+
+        class FakeState:
+            def __init__(self):
+                self.rejections = []
+
+            def approve(self, item):
+                raise AssertionError("approval should not be called for denied test")
+
+            def reject(self, item, rejection_message=""):
+                self.rejections.append((item, rejection_message))
+
+        class FakeResult:
+            def __init__(self, interruptions=(), state=None):
+                self.interruptions = list(interruptions)
+                self._state = state
+                self.final_output = "done"
+
+            def to_state(self):
+                return self._state
+
+        class FakeSession:
+            async def request_approval(self, prompt):
+                return "no"
+
+        class FakeHooks:
+            def __init__(self):
+                self.tool_events = []
+
+            def record_tool_event(self, event):
+                self.tool_events.append(event)
+
+        state = FakeState()
+        hooks = FakeHooks()
+        calls = []
+
+        async def fake_run_agent_once(agent, run_input, run_hooks, max_turns=20):
+            calls.append(run_input)
+            if len(calls) == 1:
+                return FakeResult([FakeItem()], state)
+            return FakeResult()
+
+        original = approval_module.run_agent_once
+        approval_module.run_agent_once = fake_run_agent_once
+        try:
+            result = asyncio.run(run_with_approval(object(), "input", hooks, session=FakeSession()))
+        finally:
+            approval_module.run_agent_once = original
+
+        self.assertEqual([event.event_type for event in hooks.tool_events], ["pre_tool_use", "post_tool_use"])
+        self.assertEqual(hooks.tool_events[0].risk["risk_level"], "medium")
+        self.assertEqual(hooks.tool_events[1].decision, "rejected")
+        self.assertEqual(hooks.tool_events[1].status, "denied")
+        self.assertEqual(len(state.rejections), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("已拒绝工具调用", result.final_output)
+
+    def test_token_logger_hooks_exposes_internal_tool_event_buffer(self):
+        from runtime.hooks import build_tool_event
+        from runtime.kernel.session import create_token_logger_hooks
+
+        workspace = TEMP_ROOT / f"hook_audit_workspace_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        self.addCleanup(lambda: os.environ.__setitem__("LUCODE_WORKSPACE_ROOT", old_workspace) if old_workspace else os.environ.pop("LUCODE_WORKSPACE_ROOT", None))
+
+        hooks = create_token_logger_hooks(verbose=False)
+        event = build_tool_event(
+            "pre_tool_use",
+            "command_runner.run_command",
+            json.dumps({"command": "npm install", "api_key": "sk-hooksecretvalue"}),
+        )
+
+        hooks.record_tool_event(event)
+
+        self.assertEqual(hooks.tool_events[-1].event_type, "pre_tool_use")
+        self.assertEqual(hooks.tool_events[-1].risk["risk_level"], "medium")
+
+        from runtime.hooks import audit_log_path, load_tool_event_audit, render_tool_event_audit
+
+        self.assertTrue(audit_log_path(workspace).exists())
+        records = load_tool_event_audit(workspace)
+        rendered = render_tool_event_audit(workspace)
+        payload = json.dumps(records, ensure_ascii=False)
+        self.assertEqual(records[-1]["event_type"], "pre_tool_use")
+        self.assertIn("工具审计", rendered)
+        self.assertIn("command_runner.run_command", rendered)
+        self.assertNotIn("sk-hooksecretvalue", payload)
+
+    def test_audit_command_renders_recent_tool_events(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.hooks import append_tool_event_audit, build_tool_event
+
+        workspace = TEMP_ROOT / f"audit_command_workspace_{uuid.uuid4().hex}"
+        app_home = TEMP_ROOT / f"audit_command_app_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"audit_command_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        append_tool_event_audit(
+            build_tool_event("pre_tool_use", "command_runner.run_command", '{"command":"npm install"}'),
+            workspace,
+        )
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        output = render_readonly_command("/audit", RuntimeSettings(), context)
+        hooks_output = render_readonly_command("/hooks", RuntimeSettings(), context)
+
+        self.assertIn("工具审计", output)
+        self.assertIn("command_runner.run_command", output)
+        self.assertIn("风险 medium", output)
+        self.assertEqual(hooks_output, output)
+
 
 class OperationLogTests(unittest.TestCase):
     def setUp(self):
@@ -494,6 +690,7 @@ class OperationLogTests(unittest.TestCase):
     def test_runtime_fast_path_web_search_logs_unified_record(self):
         from planning.planner_schema import PlannedTask
         from runtime.execution import dynamic
+        from runtime.execution import fast_paths
 
         os.environ["AGENTS_OPERATION_LOG_PATH"] = str(self.quarantine_dir / "operations.jsonl")
         task = PlannedTask(
@@ -506,7 +703,7 @@ class OperationLogTests(unittest.TestCase):
         )
 
         with patch.object(
-            dynamic,
+            fast_paths,
             "web_search",
             return_value=json.dumps({"results": [{"url": "https://openai.github.io/openai-agents-python/"}]}),
         ):
@@ -670,7 +867,16 @@ class RuntimeHelpersTests(unittest.TestCase):
             PROJECT_ROOT / "runtime" / "modes" / "full.py",
             PROJECT_ROOT / "runtime" / "common" / "conversation.py",
             PROJECT_ROOT / "runtime" / "execution" / "dynamic.py",
+            PROJECT_ROOT / "runtime" / "execution" / "failure_memory.py",
+            PROJECT_ROOT / "runtime" / "execution" / "fast_paths.py",
+            PROJECT_ROOT / "runtime" / "execution" / "inline_context.py",
+            PROJECT_ROOT / "runtime" / "execution" / "multi_agent_runner.py",
+            PROJECT_ROOT / "runtime" / "execution" / "parallel_scheduler.py",
             PROJECT_ROOT / "runtime" / "execution" / "pipeline.py",
+            PROJECT_ROOT / "runtime" / "execution" / "progress.py",
+            PROJECT_ROOT / "runtime" / "execution" / "single_agent_runner.py",
+            PROJECT_ROOT / "runtime" / "execution" / "solo_runner.py",
+            PROJECT_ROOT / "runtime" / "execution" / "task_runner.py",
             PROJECT_ROOT / "runtime" / "safety" / "auditor.py",
             PROJECT_ROOT / "runtime" / "safety" / "checkpoint.py",
             PROJECT_ROOT / "runtime" / "memory" / "flywheel.py",
@@ -687,6 +893,178 @@ class RuntimeHelpersTests(unittest.TestCase):
         self.assertEqual(parsed[0]["path"], "main.py")
         self.assertEqual(parsed[0]["status"], "已修改")
         self.assertEqual(parsed[1]["status"], "未跟踪")
+
+    def test_dynamic_fast_paths_are_extracted_with_compatibility_imports(self):
+        dynamic_source = (PROJECT_ROOT / "runtime" / "execution" / "dynamic.py").read_text(encoding="utf-8")
+        fast_paths_source = (PROJECT_ROOT / "runtime" / "execution" / "fast_paths.py").read_text(encoding="utf-8")
+
+        self.assertIn("from runtime.execution.fast_paths import", dynamic_source)
+        self.assertNotIn("def _run_git_status_fast_path", dynamic_source)
+        self.assertNotIn("def _run_url_search_fast_path", dynamic_source)
+        self.assertNotIn("from mcp_servers.network.web_search_mcp import web_search", dynamic_source)
+        self.assertNotIn("from mcp_servers.core.operation_log import append_operation_log", dynamic_source)
+        self.assertIn("def _run_git_status_fast_path", fast_paths_source)
+        self.assertIn("def _run_url_search_fast_path", fast_paths_source)
+
+        from runtime.execution.dynamic import _parse_git_status_short as compat_parse
+        from runtime.execution.fast_paths import _parse_git_status_short
+
+        self.assertIs(compat_parse, _parse_git_status_short)
+
+    def test_dynamic_inline_context_is_extracted_with_compatibility_imports(self):
+        dynamic_source = (PROJECT_ROOT / "runtime" / "execution" / "dynamic.py").read_text(encoding="utf-8")
+        inline_context_source = (PROJECT_ROOT / "runtime" / "execution" / "inline_context.py").read_text(encoding="utf-8")
+
+        self.assertIn("from runtime.execution.inline_context import", dynamic_source)
+        self.assertNotIn("def _latest_workspace_context", dynamic_source)
+        self.assertNotIn("def _inline_project_file_context", dynamic_source)
+        self.assertNotIn("INLINE_PATH_PATTERN", dynamic_source)
+        self.assertIn("def _latest_workspace_context", inline_context_source)
+        self.assertIn("def _inline_project_file_context", inline_context_source)
+
+        from runtime.execution.dynamic import _inline_project_file_context as compat_inline
+        from runtime.execution.dynamic import _latest_workspace_context as compat_latest
+        from runtime.execution.inline_context import _inline_project_file_context
+        from runtime.execution.inline_context import _latest_workspace_context
+
+        self.assertIs(compat_inline, _inline_project_file_context)
+        self.assertIs(compat_latest, _latest_workspace_context)
+
+    def test_dynamic_parallel_scheduler_is_extracted_with_compatibility_imports(self):
+        dynamic_source = (PROJECT_ROOT / "runtime" / "execution" / "dynamic.py").read_text(encoding="utf-8")
+        scheduler_source = (
+            PROJECT_ROOT / "runtime" / "execution" / "parallel_scheduler.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("from runtime.execution.parallel_scheduler import", dynamic_source)
+        self.assertNotIn("def _execution_batches_for_mode", dynamic_source)
+        self.assertNotIn("def _write_paths_conflict", dynamic_source)
+        self.assertNotIn("def _format_parallel_batch_audit", dynamic_source)
+        self.assertIn("def _execution_batches_for_mode", scheduler_source)
+        self.assertIn("def _write_paths_conflict", scheduler_source)
+        self.assertIn("def _format_parallel_batch_audit", scheduler_source)
+
+        from runtime.execution.dynamic import _execution_batches_for_mode as compat_batches
+        from runtime.execution.dynamic import _write_paths_conflict as compat_conflict
+        from runtime.execution.parallel_scheduler import _execution_batches_for_mode
+        from runtime.execution.parallel_scheduler import _write_paths_conflict
+
+        self.assertIs(compat_batches, _execution_batches_for_mode)
+        self.assertIs(compat_conflict, _write_paths_conflict)
+
+    def test_dynamic_task_runner_is_extracted_with_compatibility_imports(self):
+        dynamic_source = (PROJECT_ROOT / "runtime" / "execution" / "dynamic.py").read_text(encoding="utf-8")
+        task_runner_source = (PROJECT_ROOT / "runtime" / "execution" / "task_runner.py").read_text(encoding="utf-8")
+
+        self.assertIn("from runtime.execution.task_runner import", dynamic_source)
+        self.assertNotIn("def _run_planned_task", dynamic_source)
+        self.assertNotIn("def _run_direct_answer", dynamic_source)
+        self.assertNotIn("def _task_prompt", dynamic_source)
+        self.assertNotIn("def _with_verification_report", dynamic_source)
+        self.assertNotIn("build_verification_report", dynamic_source)
+        self.assertIn("def _run_planned_task", task_runner_source)
+        self.assertIn("def _run_direct_answer", task_runner_source)
+        self.assertIn("def _task_prompt", task_runner_source)
+        self.assertIn("def _with_verification_report", task_runner_source)
+
+        from runtime.execution.dynamic import _run_planned_task as compat_planned_task
+        from runtime.execution.dynamic import _task_prompt as compat_task_prompt
+        from runtime.execution.task_runner import _run_planned_task
+        from runtime.execution.task_runner import _task_prompt
+
+        self.assertIs(compat_planned_task, _run_planned_task)
+        self.assertIs(compat_task_prompt, _task_prompt)
+
+    def test_dynamic_multi_agent_runner_is_extracted_with_compatibility_imports(self):
+        dynamic_source = (PROJECT_ROOT / "runtime" / "execution" / "dynamic.py").read_text(encoding="utf-8")
+        runner_source = (PROJECT_ROOT / "runtime" / "execution" / "multi_agent_runner.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("from runtime.execution.multi_agent_runner import", dynamic_source)
+        self.assertNotIn("async def _run_multi_agent", dynamic_source)
+        self.assertNotIn("def _ordered_tasks_for_execution", dynamic_source)
+        self.assertNotIn("def _tasks_by_parallel_group", dynamic_source)
+        self.assertNotIn("create_readonly_filesystem_server", dynamic_source)
+        self.assertNotIn("PatchProposalLedger", dynamic_source)
+        self.assertIn("async def _run_multi_agent", runner_source)
+        self.assertIn("def _ordered_tasks_for_execution", runner_source)
+        self.assertIn("def _tasks_by_parallel_group", runner_source)
+
+        from runtime.execution.dynamic import _ordered_tasks_for_execution as compat_ordered
+        from runtime.execution.dynamic import _run_multi_agent as compat_multi_agent
+        from runtime.execution.multi_agent_runner import _ordered_tasks_for_execution
+        from runtime.execution.multi_agent_runner import _run_multi_agent
+
+        self.assertIs(compat_multi_agent, _run_multi_agent)
+        self.assertIs(compat_ordered, _ordered_tasks_for_execution)
+
+    def test_dynamic_failure_memory_is_extracted_with_compatibility_imports(self):
+        dynamic_source = (PROJECT_ROOT / "runtime" / "execution" / "dynamic.py").read_text(encoding="utf-8")
+        failure_source = (PROJECT_ROOT / "runtime" / "execution" / "failure_memory.py").read_text(encoding="utf-8")
+
+        self.assertIn("from runtime.execution.failure_memory import", dynamic_source)
+        self.assertNotIn("def _record_flywheel_safely", dynamic_source)
+        self.assertNotIn("def _record_failure_case_safely", dynamic_source)
+        self.assertNotIn("def _audit_files_touched", dynamic_source)
+        self.assertNotIn("RollbackResult", dynamic_source)
+        self.assertIn("def _record_flywheel_safely", failure_source)
+        self.assertIn("def _record_failure_case_safely", failure_source)
+        self.assertIn("def _audit_files_touched", failure_source)
+
+        from runtime.execution.dynamic import _audit_files_touched as compat_touched
+        from runtime.execution.dynamic import _record_failure_case_safely as compat_record_failure
+        from runtime.execution.failure_memory import _audit_files_touched
+        from runtime.execution.failure_memory import _record_failure_case_safely
+
+        self.assertIs(compat_touched, _audit_files_touched)
+        self.assertIs(compat_record_failure, _record_failure_case_safely)
+
+        audit = type("Audit", (), {"files_touched": ["src\\app.py", "src/app.py", "", None, "tests\\test_app.py"]})()
+
+        self.assertEqual(_audit_files_touched(audit), ["src/app.py", "tests/test_app.py"])
+
+    def test_execution_progress_snapshot_is_shared_with_compatibility_import(self):
+        dynamic_source = (PROJECT_ROOT / "runtime" / "execution" / "dynamic.py").read_text(encoding="utf-8")
+        multi_agent_source = (
+            PROJECT_ROOT / "runtime" / "execution" / "multi_agent_runner.py"
+        ).read_text(encoding="utf-8")
+        progress_source = (PROJECT_ROOT / "runtime" / "execution" / "progress.py").read_text(encoding="utf-8")
+
+        self.assertIn("from runtime.execution.progress import _print_progress_snapshot", dynamic_source)
+        self.assertIn("from runtime.execution.progress import _print_progress_snapshot", multi_agent_source)
+        self.assertNotIn("def _print_progress_snapshot", dynamic_source)
+        self.assertNotIn("def _print_progress_snapshot", multi_agent_source)
+        self.assertNotIn("render_task_status_board", dynamic_source)
+        self.assertNotIn("render_runtime_statusline", dynamic_source)
+        self.assertNotIn("render_task_status_board", multi_agent_source)
+        self.assertNotIn("render_runtime_statusline", multi_agent_source)
+        self.assertIn("def _print_progress_snapshot", progress_source)
+
+        from runtime.execution.dynamic import _print_progress_snapshot as compat_progress
+        from runtime.execution.progress import _print_progress_snapshot
+
+        self.assertIs(compat_progress, _print_progress_snapshot)
+
+    def test_dynamic_single_agent_runner_is_extracted_with_compatibility_imports(self):
+        dynamic_source = (PROJECT_ROOT / "runtime" / "execution" / "dynamic.py").read_text(encoding="utf-8")
+        runner_source = (PROJECT_ROOT / "runtime" / "execution" / "single_agent_runner.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("from runtime.execution.single_agent_runner import _run_single_agent", dynamic_source)
+        self.assertNotIn("agent = await factory.create_task_agent(task)", dynamic_source)
+        self.assertNotIn("workspace_context = _latest_workspace_context", dynamic_source)
+        self.assertNotIn("inline_context = _inline_project_file_context", dynamic_source)
+        self.assertIn("async def _run_single_agent", runner_source)
+        self.assertIn("agent = await factory.create_task_agent(task)", runner_source)
+        self.assertIn("workspace_context = _latest_workspace_context", runner_source)
+        self.assertIn("inline_context = _inline_project_file_context", runner_source)
+
+        from runtime.execution.dynamic import _run_single_agent as compat_single_agent
+        from runtime.execution.single_agent_runner import _run_single_agent
+
+        self.assertIs(compat_single_agent, _run_single_agent)
 
     def test_turn_error_format(self):
         from main import _format_turn_error
@@ -745,6 +1123,186 @@ class RuntimeHelpersTests(unittest.TestCase):
         self.assertIn("current question", prompt)
         self.assertLess(len(prompt), 500)
 
+    def test_compose_recent_context_can_include_resumed_session_summary(self):
+        from runtime.common.conversation import compose_recent_context
+
+        prompt = compose_recent_context(
+            [{"role": "user", "content": "最近一轮"}],
+            "继续做什么？",
+            session_summary="已恢复会话的压缩摘要：旧目标是补 SessionStore。",
+        )
+
+        self.assertIn("已恢复会话的压缩摘要", prompt)
+        self.assertIn("旧目标是补 SessionStore", prompt)
+        self.assertIn("用户：最近一轮", prompt)
+        self.assertIn("本轮用户问题：继续做什么？", prompt)
+
+    def test_context_compactor_folds_old_messages_keeps_tail_and_redacts_secrets(self):
+        from runtime.context.compaction import ContextCompactor
+
+        messages = []
+        for index in range(5):
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"旧目标 {index}: 修改 runtime/session_{index}.py，并检查 token=secret-{index}",
+                }
+            )
+            messages.append({"role": "assistant", "content": f"旧结论 {index}: 已完成第 {index} 步"})
+        messages.extend(
+            [
+                {"role": "user", "content": "最近目标：继续恢复上下文"},
+                {"role": "assistant", "content": "最近回答：会保留原文"},
+            ]
+        )
+
+        result = ContextCompactor(tail_messages=2, max_summary_chars=1200).compact(messages)
+
+        self.assertEqual(result.total_messages, 12)
+        self.assertEqual(result.compacted_messages, 10)
+        self.assertIn("已恢复会话的压缩摘要", result.summary)
+        self.assertIn("runtime/session_4.py", result.summary)
+        self.assertIn("[redacted]", result.summary)
+        self.assertNotIn("secret-", result.summary)
+        self.assertEqual(result.recent_turns[-2]["content"], "最近目标：继续恢复上下文")
+        self.assertEqual(result.recent_turns[-1]["content"], "最近回答：会保留原文")
+
+    def test_tiered_context_compaction_uses_semantic_summary_when_threshold_matches(self):
+        from runtime.context.semantic_compaction import SemanticCompactionConfig, compact_messages_tiered
+
+        calls = []
+
+        async def fake_summarizer(prompt: str) -> str:
+            calls.append(prompt)
+            return "语义摘要：长期目标包含 SEMANTIC-42，风险是继续观察副作用。"
+
+        messages = [
+            {"role": "user", "content": "旧目标：保留 SEMANTIC-42，并检查 token=secret-semantic " + ("x" * 120)},
+            {"role": "assistant", "content": "旧回答：已经记录 SEMANTIC-42"},
+            {"role": "user", "content": "最近目标：继续"},
+            {"role": "assistant", "content": "最近回答：可以"},
+        ]
+
+        result = asyncio.run(
+            compact_messages_tiered(
+                messages,
+                tail_messages=2,
+                config=SemanticCompactionConfig(enabled=True, min_chars=10, max_input_chars=2000),
+                semantic_summarizer=fake_summarizer,
+            )
+        )
+
+        self.assertEqual(result.summary_source, "semantic")
+        self.assertEqual(result.semantic_error, "")
+        self.assertIn("语义摘要", result.summary)
+        self.assertIn("SEMANTIC-42", result.summary)
+        self.assertIn("规则摘要补充", result.summary)
+        self.assertTrue(calls)
+        self.assertIn("旧目标", calls[0])
+        self.assertIn("[redacted]", calls[0])
+        self.assertNotIn("secret-semantic", calls[0])
+        self.assertEqual([turn["content"] for turn in result.recent_turns], ["最近目标：继续", "最近回答：可以"])
+
+    def test_tiered_context_compaction_falls_back_when_semantic_summary_fails(self):
+        from runtime.context.semantic_compaction import SemanticCompactionConfig, compact_messages_tiered
+
+        async def broken_summarizer(prompt: str) -> str:
+            raise RuntimeError("semantic offline")
+
+        messages = [
+            {"role": "user", "content": "旧目标：保留 FALLBACK-42 " + ("x" * 120)},
+            {"role": "assistant", "content": "旧回答：已经记录 FALLBACK-42"},
+            {"role": "user", "content": "最近目标：继续"},
+            {"role": "assistant", "content": "最近回答：可以"},
+        ]
+
+        result = asyncio.run(
+            compact_messages_tiered(
+                messages,
+                tail_messages=2,
+                config=SemanticCompactionConfig(enabled=True, min_chars=10, max_input_chars=2000),
+                semantic_summarizer=broken_summarizer,
+            )
+        )
+
+        self.assertEqual(result.summary_source, "rules")
+        self.assertIn("semantic offline", result.semantic_error)
+        self.assertIn("FALLBACK-42", result.summary)
+        self.assertIn("已恢复会话的压缩摘要", result.summary)
+
+    def test_session_store_writes_jsonl_and_loads_recent_turns(self):
+        from runtime.sessions.store import SessionStore
+
+        workspace = TEMP_ROOT / f"session_store_{uuid.uuid4().hex}"
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        store = SessionStore(workspace)
+
+        session_id = store.start_session()
+        store.append_message(session_id, "user", "记住项目代号是 LUCODE-SESSION")
+        store.append_message(session_id, "assistant", "已记住 LUCODE-SESSION")
+
+        session_file = workspace / ".lucode" / "sessions" / f"{session_id}.jsonl"
+        self.assertTrue(session_file.exists())
+        events = [json.loads(line) for line in session_file.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([event["role"] for event in events if event["type"] == "message"], ["user", "assistant"])
+        self.assertEqual(events[0]["schema_version"], 1)
+
+        turns = store.load_recent_turns(session_id, max_messages=6)
+        self.assertEqual(turns[-2]["content"], "记住项目代号是 LUCODE-SESSION")
+        self.assertEqual(turns[-1]["role"], "assistant")
+
+        summaries = store.list_sessions()
+        self.assertEqual(summaries[0].session_id, session_id)
+        self.assertIn("LUCODE-SESSION", summaries[0].last_user)
+
+    def test_session_store_loads_compacted_resume_context(self):
+        from runtime.sessions.store import SessionStore
+
+        workspace = TEMP_ROOT / f"session_compact_{uuid.uuid4().hex}"
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        store = SessionStore(workspace)
+        session_id = store.start_session()
+        for index in range(4):
+            store.append_message(session_id, "user", f"旧需求 {index}: 记录 ARCHIVE-{index}")
+            store.append_message(session_id, "assistant", f"旧回答 {index}: 已记录")
+        store.append_message(session_id, "user", "最近需求：继续")
+        store.append_message(session_id, "assistant", "最近回答：可以")
+
+        compacted = store.load_compacted_context(session_id, tail_messages=2)
+
+        self.assertIn("ARCHIVE-3", compacted.summary)
+        self.assertEqual(compacted.compacted_messages, 8)
+        self.assertEqual([turn["content"] for turn in compacted.recent_turns], ["最近需求：继续", "最近回答：可以"])
+
+    def test_session_store_loads_tiered_compacted_context_with_semantic_summary(self):
+        from runtime.context.semantic_compaction import SemanticCompactionConfig
+        from runtime.sessions.store import SessionStore
+
+        workspace = TEMP_ROOT / f"session_tiered_{uuid.uuid4().hex}"
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        store = SessionStore(workspace)
+        session_id = store.start_session()
+        store.append_message(session_id, "user", "旧需求：记录 TIERED-42 " + ("x" * 160))
+        store.append_message(session_id, "assistant", "旧回答：已记录")
+        store.append_message(session_id, "user", "最近需求：继续")
+        store.append_message(session_id, "assistant", "最近回答：可以")
+
+        async def fake_summarizer(prompt: str) -> str:
+            return "语义摘要：TIERED-42 是旧会话核心编号。"
+
+        compacted = asyncio.run(
+            store.load_tiered_compacted_context(
+                session_id,
+                tail_messages=2,
+                config=SemanticCompactionConfig(enabled=True, min_chars=10),
+                semantic_summarizer=fake_summarizer,
+            )
+        )
+
+        self.assertEqual(compacted.summary_source, "semantic")
+        self.assertIn("TIERED-42", compacted.summary)
+        self.assertEqual([turn["content"] for turn in compacted.recent_turns], ["最近需求：继续", "最近回答：可以"])
+
     def test_main_reconfigures_stdin_to_utf8_for_piped_chinese_input(self):
         source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
 
@@ -773,6 +1331,19 @@ class RuntimeHelpersTests(unittest.TestCase):
         self.assertIn("Git 工作区", status)
         self.assertIn("Diff 摘要", diff)
         self.assertNotIn("sk-", status + diff)
+
+    def test_status_and_diff_commands_handle_missing_workspace(self):
+        from runtime.config.cli import render_status_command, render_diff_command
+        from runtime.config.settings import RuntimeSettings
+
+        missing_workspace = PROJECT_ROOT / ".agent_test_tmp" / "missing_workspace_for_status"
+        settings = RuntimeSettings(execution_mode="solo", privacy_mode="local_first")
+
+        status = render_status_command(missing_workspace, settings)
+        diff = render_diff_command(missing_workspace, max_chars=2000)
+
+        self.assertIn("Git 工作区：不可用：workspace is not a directory", status)
+        self.assertIn("git diff 不可用：workspace is not a directory", diff)
 
     def test_refiner_command_detector_accepts_only_on_off(self):
         from runtime.config.cli import parse_writable_config_command
@@ -807,6 +1378,7 @@ class RuntimeHelpersTests(unittest.TestCase):
 
         self.assertFalse(_should_print_final_output(Hooks(), "你好，我可以帮你分析和修改项目。"))
         self.assertTrue(_should_print_final_output(Hooks(), "本轮执行失败，但程序没有退出。"))
+        self.assertTrue(_should_print_final_output(Hooks(), "已拒绝工具调用：run_command。"))
         self.assertTrue(_should_print_final_output(object(), "普通非流式最终答案"))
 
 
@@ -848,6 +1420,31 @@ class WorkspaceContextTests(unittest.TestCase):
 
 
 class WelcomeDashboardTests(unittest.TestCase):
+    def test_welcome_dashboard_uses_cat_mascot(self):
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.ui.welcome import MASCOT_LOGO, render_welcome_dashboard
+
+        workspace_root = (TEMP_ROOT / f"dashboard_cat_{uuid.uuid4().hex}").resolve()
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=Path.home() / ".lucode",
+            workspace_root=workspace_root,
+            project_config_dir=workspace_root / ".lucode",
+            has_project_config=True,
+        )
+        output = render_welcome_dashboard(
+            context,
+            RuntimeSettings(execution_mode="solo", privacy_mode="local_first"),
+            model_catalog={"models": []},
+            use_color=False,
+        )
+
+        self.assertIn("/\\_/\\", "\n".join(MASCOT_LOGO))
+        self.assertIn("( o.o )", output)
+        self.assertIn("> ^ <", output)
+        self.assertNotIn("\\_/\\__/\\_/", output)
+
     def test_welcome_dashboard_is_concise_and_uses_full_workspace_path(self):
         from runtime.config.settings import RuntimeSettings
         from runtime.config.workspace import WorkspaceContext
@@ -886,7 +1483,7 @@ class WelcomeDashboardTests(unittest.TestCase):
         self.assertTrue(output.splitlines()[-1].startswith("╰"))
         self.assertIn(str(workspace_root), output)
         self.assertIn("lucode", output)
-        self.assertIn("/ o  o \\", output)
+        self.assertIn("( o.o )", output)
         self.assertIn("模式", output)
         self.assertIn("solo 单代理", output)
         self.assertIn("deepseek-v4-pro  +2 备用", output)
@@ -955,8 +1552,10 @@ class WelcomeDashboardTests(unittest.TestCase):
 
         self.assertIn(str(workspace_root), output)
         self.assertIn("模式    solo 单代理", output)
+        self.assertIn("lucode", output)
         self.assertNotIn("      lucode", output)
-        self.assertNotIn("/ o  o \\", output)
+        self.assertNotIn("( o.o )", output)
+        self.assertNotIn("> ^ <", output)
 
     def test_welcome_dashboard_uses_mode_specific_status_inside_box(self):
         from runtime.config.settings import RuntimeSettings
@@ -1300,12 +1899,396 @@ class ProviderConfigC2Tests(unittest.TestCase):
 
         help_output = render_readonly_command("/help", RuntimeSettings())
         filtered_output = render_readonly_command("/mo", RuntimeSettings())
+        api_output = render_readonly_command("/api", RuntimeSettings())
+        refiner_output = render_readonly_command("/ref", RuntimeSettings())
+        exact_refiner_output = render_readonly_command("/refiner", RuntimeSettings())
 
         self.assertIn("命令菜单", help_output)
         self.assertIn("/status", help_output)
+        self.assertIn("/resume", help_output)
+        self.assertIn("/api show", help_output)
+        self.assertIn("/refiner", help_output)
         self.assertIn("中文", help_output)
         self.assertIn("/model", filtered_output)
         self.assertIn("/mode", filtered_output)
+        self.assertIn("/api show", api_output)
+        self.assertIn("/refiner", refiner_output)
+        self.assertIn("/refiner", exact_refiner_output)
+
+    def test_command_registry_is_structured_for_interactive_palette(self):
+        from runtime.commands.registry import command_specs, known_command_prefixes, search_command_specs
+
+        specs = command_specs()
+        commands = [spec.command for spec in specs]
+        prefixes = known_command_prefixes()
+        resume = next(spec for spec in specs if spec.command == "/resume")
+        select = next(spec for spec in specs if spec.command == "/models select")
+        refiner = next(spec for spec in specs if spec.command == "/refiner")
+
+        self.assertEqual(len(commands), len(set(commands)))
+        self.assertEqual(resume.group, "会话")
+        self.assertIn("last", resume.argument_hint)
+        self.assertTrue(select.writable)
+        self.assertIn("/model select", select.aliases)
+        self.assertTrue(refiner.writable)
+        self.assertIn("/?", prefixes)
+        self.assertIn("/api", prefixes)
+        self.assertIn("/refiner", prefixes)
+        self.assertIn("/models", prefixes)
+        self.assertEqual(search_command_specs("/ref")[0].command, "/refiner")
+
+    def test_slash_completion_items_use_command_registry(self):
+        from runtime.commands.completion import command_completion_items
+
+        items = command_completion_items("/mo")
+        texts = [item.text for item in items]
+        mode = next(item for item in items if item.text == "/mode")
+
+        self.assertIn("/mode", texts)
+        self.assertIn("/model", texts)
+        self.assertIn("/models select", texts)
+        self.assertEqual(mode.display, "/mode")
+        self.assertIn("<solo|serial|full>", mode.meta)
+        self.assertIn("查看或切换", mode.meta)
+        self.assertEqual(mode.start_position, -3)
+        self.assertEqual(command_completion_items("普通任务"), [])
+
+        mode_items = command_completion_items("/mode")
+        mode_texts = [item.text for item in mode_items]
+        self.assertEqual(mode_texts, ["/mode solo", "/mode serial", "/mode full"])
+        self.assertEqual(mode_items[0].start_position, -5)
+        self.assertIn("单代理", mode_items[0].meta)
+
+        serial_items = command_completion_items("/mode s")
+        self.assertEqual([item.text for item in serial_items], ["/mode solo", "/mode serial"])
+        full_items = command_completion_items("/mode f")
+        self.assertEqual([item.text for item in full_items], ["/mode full"])
+
+    def test_slash_completion_refreshes_after_delete(self):
+        from runtime.commands.completion import create_slash_command_key_bindings, should_refresh_slash_completion
+
+        self.assertTrue(should_refresh_slash_completion("/mo"))
+        self.assertTrue(should_refresh_slash_completion("  /mo"))
+        self.assertFalse(should_refresh_slash_completion("普通任务"))
+
+        key_bindings = create_slash_command_key_bindings()
+        if key_bindings is None:
+            return
+        keys = {str(binding.keys[0].value) for binding in key_bindings.bindings if binding.keys}
+        self.assertIn("c-h", keys)
+        self.assertIn("delete", keys)
+
+        class FakeDocument:
+            def __init__(self, text):
+                self.text_before_cursor = text
+
+        class FakeBuffer:
+            selection_state = None
+
+            def __init__(self, text):
+                self.text = text
+                self.started = False
+
+            @property
+            def document(self):
+                return FakeDocument(self.text)
+
+            def delete_before_cursor(self, count=1):
+                self.text = self.text[:-count]
+
+            def start_completion(self, select_first=False):
+                self.started = True
+                self.select_first = select_first
+
+        class FakeEvent:
+            def __init__(self, buffer):
+                self.current_buffer = buffer
+
+        backspace = next(binding for binding in key_bindings.bindings if str(binding.keys[0].value) == "c-h")
+        buffer = FakeBuffer("/mod")
+        backspace.handler(FakeEvent(buffer))
+        self.assertEqual(buffer.text, "/mo")
+        self.assertTrue(buffer.started)
+        self.assertFalse(buffer.select_first)
+
+    def test_slash_prompt_uses_claude_style_menu_config(self):
+        from runtime.commands.completion import slash_prompt_message, slash_prompt_session_kwargs
+        from prompt_toolkit.shortcuts.prompt import CompleteStyle
+
+        kwargs = slash_prompt_session_kwargs()
+
+        self.assertEqual(slash_prompt_message("\n你："), [("class:prompt", "\n> ")])
+        self.assertEqual(kwargs["complete_style"], CompleteStyle.COLUMN)
+        self.assertGreaterEqual(kwargs["reserve_space_for_menu"], 8)
+        self.assertIn("style", kwargs)
+        self.assertIn("key_bindings", kwargs)
+
+    def test_prompt_toolkit_completer_is_optional_and_uses_completion_items(self):
+        from runtime.commands.completion import create_slash_command_completer
+
+        completer = create_slash_command_completer()
+        if completer is None:
+            return
+
+        from prompt_toolkit.document import Document
+
+        completions = list(completer.get_completions(Document("/ref"), None))
+
+        self.assertGreaterEqual(len(completions), 1)
+        self.assertEqual(completions[0].text, "/refiner")
+        self.assertEqual(completions[0].start_position, -4)
+
+    def test_external_command_sources_feed_palette_and_completion(self):
+        from runtime.commands.completion import command_completion_items
+        from runtime.commands.registry import search_command_specs
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"command_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"command_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode" / "commands").mkdir(parents=True)
+        (workspace / ".lucode" / "skills" / "code-auditor").mkdir(parents=True)
+        (user_home / "commands").mkdir(parents=True)
+        (workspace / ".lucode" / "commands" / "api-review.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "description: 审查当前项目 API 设计",
+                    "argument-hint: <文件或目录>",
+                    "allowed-tools: Read, Grep",
+                    "model: deepseek/deepseek-chat",
+                    "disable-model-invocation: true",
+                    "---",
+                    "",
+                    "请审查 API。",
+                ]
+            )
+            + "\n",
+            encoding="utf-8-sig",
+        )
+        (user_home / "commands" / "global-style.md").write_text(
+            "---\ndescription: 用户全局写作风格\n---\n",
+            encoding="utf-8",
+        )
+        (workspace / ".lucode" / "skills" / "code-auditor" / "SKILL.md").write_text(
+            "---\nname: 代码审查\ndescription: 审查项目代码质量\n---\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        api_specs = search_command_specs("/api-r", workspace_context=context)
+        api_spec = next(spec for spec in api_specs if spec.command == "/api-review")
+        completion_items = command_completion_items("/code-a", workspace_context=context)
+        palette = render_readonly_command("/api-r", RuntimeSettings(), context)
+
+        self.assertEqual(api_spec.source, "project")
+        self.assertEqual(api_spec.argument_hint, "<文件或目录>")
+        self.assertEqual(api_spec.allowed_tools, ("Read", "Grep"))
+        self.assertEqual(api_spec.model, "deepseek/deepseek-chat")
+        self.assertTrue(api_spec.disable_model_invocation)
+        self.assertIn("/global-style", [spec.command for spec in search_command_specs("/global", context)])
+        self.assertIn("/code-auditor", [item.text for item in completion_items])
+        self.assertIn("/project-explorer", [spec.command for spec in search_command_specs("/project-ex", context)])
+        self.assertNotIn("/task-router", [spec.command for spec in search_command_specs("/task", context)])
+        self.assertIn("审查当前项目 API 设计", palette)
+
+    def test_mcp_prompt_sources_feed_palette_and_completion(self):
+        from runtime.commands.completion import command_completion_items
+        from runtime.commands.registry import search_command_specs
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.extensions import discover_mcp_layers
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"mcp_prompt_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"mcp_prompt_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode" / "mcp").mkdir(parents=True)
+        (user_home / "mcp").mkdir(parents=True)
+        (workspace / ".lucode" / "mcp" / "project-tools.json").write_text(
+            json.dumps(
+                {
+                    "id": "project-tools",
+                    "display_name_zh": "项目工具",
+                    "tools": ["read_file"],
+                    "prompts": [
+                        {
+                            "name": "review-api",
+                            "description": "审查当前项目 API 设计",
+                            "argument-hint": "<文件或目录>",
+                            "arguments": [
+                                {"name": "target", "required": True},
+                                {"name": "focus", "required": False},
+                            ],
+                            "prompt": "请审查 {{target}}，关注 {{focus}}。原始参数：{{input}}",
+                            "allowed-tools": ["Read", "Grep"],
+                            "model": "deepseek/deepseek-chat",
+                            "disable-model-invocation": True,
+                        },
+                        "quick-summary",
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8-sig",
+        )
+        (user_home / "mcp" / "global-prompts.json").write_text(
+            json.dumps(
+                {
+                    "id": "global-prompts",
+                    "display_name_zh": "全局 MCP",
+                    "prompts": {
+                        "daily-brief": {
+                            "description": "生成今日简报",
+                            "arguments": [
+                                {"name": "date", "required": True},
+                                {"name": "format", "required": False},
+                            ],
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        mcp_layers = discover_mcp_layers(context)
+        review_specs = search_command_specs("/mcp__project_tools__review", context)
+        review = next(spec for spec in review_specs if spec.command == "/mcp__project_tools__review_api")
+        daily = next(
+            spec for spec in search_command_specs("/mcp__global_prompts__daily", context)
+            if spec.command == "/mcp__global_prompts__daily_brief"
+        )
+        completion_items = command_completion_items("/mcp__project_tools", workspace_context=context)
+        palette = render_readonly_command("/mcp__project_tools__review", RuntimeSettings(), context)
+        mcp_output = render_readonly_command("/mcp", RuntimeSettings(), context)
+
+        self.assertEqual(mcp_layers["workspace"][0]["prompts"][0]["name"], "review-api")
+        self.assertEqual(review.group, "MCP Prompt")
+        self.assertEqual(review.source, "workspace_mcp_prompt")
+        self.assertEqual(review.argument_hint, "<文件或目录>")
+        self.assertEqual(review.allowed_tools, ("Read", "Grep"))
+        self.assertEqual(review.model, "deepseek/deepseek-chat")
+        self.assertTrue(review.disable_model_invocation)
+        self.assertEqual(review.metadata["kind"], "mcp_prompt")
+        self.assertFalse(review.metadata["trusted"])
+        self.assertFalse(review.metadata["enabled"])
+        self.assertEqual(daily.argument_hint, "<date> [format]")
+        self.assertIn("/mcp__project_tools__review_api", [item.text for item in completion_items])
+        self.assertIn("/mcp__project_tools__quick_summary", [item.text for item in completion_items])
+        self.assertIn("审查当前项目 API 设计", palette)
+        self.assertIn("Prompts", mcp_output)
+        self.assertIn("review-api", mcp_output)
+
+    def test_mcp_prompt_invocation_expands_to_task_input_without_trusting_mcp(self):
+        from runtime.commands.invocation import resolve_mcp_prompt_invocation
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"mcp_invocation_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"mcp_invocation_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode" / "mcp").mkdir(parents=True)
+        (workspace / ".lucode" / "mcp" / "project-tools.json").write_text(
+            json.dumps(
+                {
+                    "id": "project-tools",
+                    "display_name_zh": "项目工具",
+                    "prompts": [
+                        {
+                            "name": "review-api",
+                            "description": "审查当前项目 API 设计",
+                            "arguments": [
+                                {"name": "target", "required": True},
+                                {"name": "focus", "required": False},
+                            ],
+                            "prompt": "请审查 {{target}}，关注 {{focus}}。原始参数：{{input}}",
+                            "allowed-tools": ["Read", "Grep"],
+                            "model": "deepseek/deepseek-chat",
+                            "disable-model-invocation": True,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8-sig",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        invocation = resolve_mcp_prompt_invocation(
+            "/mcp__project_tools__review_api src/api.py 安全",
+            context,
+        )
+
+        self.assertIsNotNone(invocation)
+        self.assertEqual(invocation.command, "/mcp__project_tools__review_api")
+        self.assertIn("MCP Prompt 命令：/mcp__project_tools__review_api", invocation.expanded_input)
+        self.assertIn("MCP：项目工具", invocation.expanded_input)
+        self.assertIn("状态：未信任，未启用", invocation.expanded_input)
+        self.assertIn("不要绕过现有权限、信任和审批流程", invocation.expanded_input)
+        self.assertIn("Prompt 建议工具：Read, Grep", invocation.expanded_input)
+        self.assertIn("Prompt 建议模型：deepseek/deepseek-chat", invocation.expanded_input)
+        self.assertIn("disable-model-invocation=true", invocation.expanded_input)
+        self.assertIn("请审查 src/api.py，关注 安全。原始参数：src/api.py 安全", invocation.expanded_input)
+        self.assertIsNone(resolve_mcp_prompt_invocation("/mcp__project_tools__review", context))
+
+    def test_prompt_toolkit_tty_gate_is_safe_for_non_interactive_pipes(self):
+        from lucode.shell.input_adapter import should_enable_prompt_toolkit
+
+        class FakeStream:
+            def __init__(self, is_tty):
+                self._is_tty = is_tty
+
+            def isatty(self):
+                return self._is_tty
+
+        self.assertFalse(
+            should_enable_prompt_toolkit(
+                FakeStream(False),
+                FakeStream(True),
+                prompt_toolkit_available=True,
+                env={},
+            )
+        )
+        self.assertFalse(
+            should_enable_prompt_toolkit(
+                FakeStream(True),
+                FakeStream(True),
+                prompt_toolkit_available=True,
+                env={"LUCODE_DISABLE_PROMPT_TOOLKIT": "1"},
+            )
+        )
+        self.assertTrue(
+            should_enable_prompt_toolkit(
+                FakeStream(True),
+                FakeStream(True),
+                prompt_toolkit_available=True,
+                env={},
+            )
+        )
 
 
 class WorkspaceExtensionC26Tests(unittest.TestCase):
@@ -1638,7 +2621,7 @@ class RuntimeNoiseTests(unittest.TestCase):
         self.assertEqual(buffer.getvalue(), "")
 
     def test_chat_loop_starts_mcp_manager_without_verbose_startup_logs(self):
-        source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
+        source = (PROJECT_ROOT / "lucode" / "shell" / "chat_loop.py").read_text(encoding="utf-8")
 
         self.assertNotIn("verbose=True", source)
         self.assertIn("runtime_verbose_enabled", source)
@@ -1725,8 +2708,61 @@ class LucodeCliEntryTests(unittest.TestCase):
         self.assertEqual(doctor_result.returncode, 0, doctor_result.stderr)
         self.assertIn("Lucode doctor", doctor_result.stdout)
         self.assertIn(str(workspace.resolve()), doctor_result.stdout)
+        self.assertIn("Python 来源", doctor_result.stdout)
+        self.assertIn("Python 环境", doctor_result.stdout)
+        self.assertIn("OpenAI Agents SDK", doctor_result.stdout)
         self.assertIn("Provider Registry", doctor_result.stdout)
         self.assertIn("Message Transformer", doctor_result.stdout)
+
+    def test_lucode_session_lists_persisted_jsonl_sessions(self):
+        from runtime.sessions.store import SessionStore
+
+        workspace = TEMP_ROOT / f"cli_session_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"cli_session_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        store = SessionStore(workspace)
+        session_id = store.start_session()
+        store.append_message(session_id, "user", "持久会话 smoke")
+        store.append_message(session_id, "assistant", "session ok")
+
+        result = subprocess.run(
+            [sys.executable, "-m", "lucode", "--workspace", str(workspace), "session"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "LUCODE_USER_HOME": str(user_home)},
+            timeout=20,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("最近会话", result.stdout)
+        self.assertIn(session_id[:16], result.stdout)
+        self.assertIn("持久会话 smoke", result.stdout)
+
+    def test_python_environment_label_prefers_current_conda_prefix(self):
+        import lucode.entry as entry
+
+        old_prefix = entry.sys.prefix
+        old_base_prefix = getattr(entry.sys, "base_prefix", old_prefix)
+        old_conda_default = os.environ.get("CONDA_DEFAULT_ENV")
+        try:
+            entry.sys.prefix = r"D:\develop\Data_anaconda2024\envs\agents-demo"
+            entry.sys.base_prefix = r"D:\develop\Data_anaconda2024"
+            os.environ["CONDA_DEFAULT_ENV"] = "base"
+
+            self.assertEqual(entry._python_environment_label(), "conda: agents-demo")
+        finally:
+            entry.sys.prefix = old_prefix
+            entry.sys.base_prefix = old_base_prefix
+            if old_conda_default is None:
+                os.environ.pop("CONDA_DEFAULT_ENV", None)
+            else:
+                os.environ["CONDA_DEFAULT_ENV"] = old_conda_default
 
     def test_startup_profile_can_be_enabled_for_light_commands(self):
         workspace = TEMP_ROOT / f"cli_profile_{uuid.uuid4().hex}"
@@ -1758,6 +2794,396 @@ class LucodeCliEntryTests(unittest.TestCase):
         wrapper_text = wrapper.read_text(encoding="utf-8")
         self.assertIn('["-m", "lucode"', wrapper_text)
         self.assertIn("PYTHONPATH", wrapper_text)
+        self.assertIn("LUCODE_PYTHON", wrapper_text)
+        self.assertIn("CONDA_PREFIX", wrapper_text)
+        self.assertIn("pythonCandidates", wrapper_text)
+        self.assertIn("无法启动 Lucode", wrapper_text)
+
+    def test_npm_package_manifest_includes_product_assets(self):
+        package = json.loads((PROJECT_ROOT / "package.json").read_text(encoding="utf-8"))
+        files = set(package.get("files") or [])
+
+        required = {
+            "README.md",
+            "pyproject.toml",
+            ".env.example",
+            "bin",
+            "lucode",
+            "runtime",
+            "catalog_system",
+            "catalogs",
+            "mcp_servers",
+            "planning",
+            "skills",
+            "main.py",
+        }
+
+        self.assertLessEqual(required, files)
+        self.assertIn("!**/__pycache__/**", files)
+        self.assertIn("!**/*.pyc", files)
+        self.assertIn("!lucode.egg-info/**", files)
+        self.assertIn("pack:dry", package.get("scripts", {}))
+
+    def test_readme_documents_quick_start_and_conda_python(self):
+        readme = PROJECT_ROOT / "README.md"
+
+        self.assertTrue(readme.exists())
+        text = readme.read_text(encoding="utf-8")
+
+        self.assertIn("Lucode", text)
+        self.assertIn("快速开始", text)
+        self.assertIn("LUCODE_PYTHON", text)
+        self.assertIn("agents-demo", text)
+        self.assertIn("lucode doctor", text)
+        self.assertIn("lucode run", text)
+
+    def test_pyproject_declares_installable_lucode_package(self):
+        import tomllib
+
+        pyproject = PROJECT_ROOT / "pyproject.toml"
+        package = json.loads((PROJECT_ROOT / "package.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(pyproject.exists())
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+
+        self.assertEqual(data["project"]["name"], "lucode")
+        self.assertEqual(data["project"]["version"], package["version"])
+        self.assertEqual(data["project"]["scripts"]["lucode"], "lucode.entry:main")
+        self.assertIn(">=3.11", data["project"]["requires-python"])
+        self.assertTrue(
+            any(str(item).startswith("openai-agents") for item in data["project"]["dependencies"])
+        )
+        self.assertTrue(
+            any(str(item).startswith("prompt_toolkit") for item in data["project"]["dependencies"])
+        )
+
+    def test_lucode_run_uses_kernel_facade_boundary(self):
+        source = (PROJECT_ROOT / "lucode" / "entry.py").read_text(encoding="utf-8")
+
+        self.assertIn("from runtime.kernel import KernelFacade", source)
+        self.assertIn("KernelFacade(context).run_once", source)
+        self.assertNotIn("from main import create_token_logger_hooks, run_with_approval", source)
+        self.assertNotIn("from mcp_servers import MCPServerManager", source)
+
+    def test_lucode_run_does_not_reprint_streamed_output(self):
+        from types import SimpleNamespace
+        import lucode.entry as entry
+        import runtime.kernel as kernel
+
+        calls = []
+
+        class FakeResponse:
+            final_output = "solo runner smoke ok"
+            output_already_printed = True
+
+            def print_summary(self):
+                calls.append("summary")
+
+        class FakeKernelFacade:
+            def __init__(self, context):
+                calls.append(("init", context))
+
+            async def run_once(self, prompt, **kwargs):
+                calls.append(("run_once", prompt, kwargs))
+                return FakeResponse()
+
+        original = kernel.KernelFacade
+        kernel.KernelFacade = FakeKernelFacade
+        try:
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                result = asyncio.run(entry._handle_run(SimpleNamespace(prompt=["solo", "task"]), object()))
+        finally:
+            kernel.KernelFacade = original
+
+        self.assertEqual(result, 0)
+        self.assertNotIn("solo runner smoke ok", buffer.getvalue())
+        self.assertIn("summary", calls)
+
+    def test_lucode_run_prints_unstreamed_output_once(self):
+        from types import SimpleNamespace
+        import lucode.entry as entry
+        import runtime.kernel as kernel
+
+        class FakeResponse:
+            final_output = "plain result"
+            output_already_printed = False
+
+            def print_summary(self):
+                return None
+
+        class FakeKernelFacade:
+            def __init__(self, context):
+                self.context = context
+
+            async def run_once(self, prompt, **kwargs):
+                return FakeResponse()
+
+        original = kernel.KernelFacade
+        kernel.KernelFacade = FakeKernelFacade
+        try:
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                result = asyncio.run(entry._handle_run(SimpleNamespace(prompt=["plain", "task"]), object()))
+        finally:
+            kernel.KernelFacade = original
+
+        self.assertEqual(result, 0)
+        self.assertEqual(buffer.getvalue().count("plain result"), 1)
+
+    def test_kernel_response_print_summary_keeps_cli_decoupled_from_hooks(self):
+        from runtime.kernel import KernelResponse
+
+        calls = []
+        response = KernelResponse(final_output="ok", _summary_printer=lambda: calls.append("summary"))
+
+        response.print_summary()
+
+        self.assertEqual(calls, ["summary"])
+
+    def test_kernel_response_tracks_streamed_output(self):
+        from runtime.kernel import KernelResponse
+
+        streamed = KernelResponse(final_output="ok", output_already_printed=True)
+        plain = KernelResponse(final_output="ok")
+
+        self.assertTrue(streamed.output_already_printed)
+        self.assertFalse(plain.output_already_printed)
+
+    def test_kernel_facade_uses_strategy_factory_boundary(self):
+        source = (PROJECT_ROOT / "runtime" / "kernel" / "__init__.py").read_text(encoding="utf-8")
+        strategies_source = (PROJECT_ROOT / "runtime" / "kernel" / "strategies" / "__init__.py").read_text(encoding="utf-8")
+
+        self.assertIn("create_execution_strategy", source)
+        self.assertIn("ExecutionContext", source)
+        self.assertNotIn("from runtime.modes", source)
+        self.assertIn("runtime_route_for_input", strategies_source)
+        self.assertIn("normalize_execution_mode", strategies_source)
+
+    def test_kernel_strategy_factory_selects_mode_strategy(self):
+        from runtime.kernel.strategies import create_execution_strategy
+
+        self.assertEqual(
+            create_execution_strategy(routing_input="解释项目结构", execution_mode="solo").mode_name,
+            "solo",
+        )
+        self.assertEqual(
+            create_execution_strategy(routing_input="解释项目结构", execution_mode="serial").mode_name,
+            "serial",
+        )
+        self.assertEqual(
+            create_execution_strategy(routing_input="解释项目结构", execution_mode="full").mode_name,
+            "full",
+        )
+
+    def test_serial_and_full_strategies_bypass_modes_wrappers(self):
+        from types import SimpleNamespace
+        import runtime.execution as public_execution
+        from runtime.kernel.strategies.base import ExecutionContext
+        from runtime.kernel.strategies.full import FullStrategy
+        from runtime.kernel.strategies.serial import SerialStrategy
+
+        serial_source = (PROJECT_ROOT / "runtime" / "kernel" / "strategies" / "serial.py").read_text(
+            encoding="utf-8"
+        )
+        full_source = (PROJECT_ROOT / "runtime" / "kernel" / "strategies" / "full.py").read_text(encoding="utf-8")
+        self.assertNotIn("runtime.modes", serial_source)
+        self.assertNotIn("runtime.modes", full_source)
+        self.assertNotIn("runtime.execution.dynamic", serial_source)
+        self.assertNotIn("runtime.execution.dynamic", full_source)
+        self.assertIn("from runtime.execution import execute_dynamic_request", serial_source)
+        self.assertIn("from runtime.execution import execute_dynamic_request", full_source)
+        self.assertIn("execute_dynamic_request", serial_source)
+        self.assertIn("execute_dynamic_request", full_source)
+
+        calls = []
+
+        async def fake_execute_dynamic_request(
+            run_input,
+            project_root,
+            model_registry,
+            mcp_manager,
+            hooks,
+            run_agent,
+            show_plan=False,
+            settings=None,
+        ):
+            calls.append((run_input, project_root, run_agent, show_plan, settings.execution_mode))
+            return f"ok:{settings.execution_mode}"
+
+        original = public_execution.execute_dynamic_request
+        public_execution.execute_dynamic_request = fake_execute_dynamic_request
+        try:
+            common = {
+                "model_registry": object(),
+                "mcp_manager": object(),
+                "hooks": object(),
+                "run_agent": object(),
+            }
+            serial_context = ExecutionContext(
+                request=SimpleNamespace(user_input="serial task", workspace_root=PROJECT_ROOT, show_plan=False),
+                settings=SimpleNamespace(execution_mode="serial"),
+                **common,
+            )
+            full_context = ExecutionContext(
+                request=SimpleNamespace(user_input="full task", workspace_root=PROJECT_ROOT, show_plan=True),
+                settings=SimpleNamespace(execution_mode="full"),
+                **common,
+            )
+
+            self.assertEqual(asyncio.run(SerialStrategy().execute(serial_context)), "ok:serial")
+            self.assertEqual(asyncio.run(FullStrategy().execute(full_context)), "ok:full")
+        finally:
+            public_execution.execute_dynamic_request = original
+
+        self.assertEqual(
+            [(call[0], call[1], call[3], call[4]) for call in calls],
+            [
+                ("serial task", PROJECT_ROOT, False, "serial"),
+                ("full task", PROJECT_ROOT, True, "full"),
+            ],
+        )
+
+    def test_solo_strategy_bypasses_modes_wrapper(self):
+        from types import SimpleNamespace
+        import runtime.execution.solo_runner as solo_runner
+        from runtime.kernel.strategies.base import ExecutionContext
+        from runtime.kernel.strategies.solo import SoloStrategy
+
+        solo_source = (PROJECT_ROOT / "runtime" / "kernel" / "strategies" / "solo.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("runtime.modes", solo_source)
+        self.assertIn("from runtime.execution.solo_runner import run_solo_request", solo_source)
+
+        calls = []
+
+        async def fake_run_solo_request(run_input, model_registry, mcp_manager, hooks, run_agent, settings=None):
+            calls.append((run_input, model_registry, mcp_manager, hooks, run_agent, settings.execution_mode))
+            return "solo:ok"
+
+        original = solo_runner.run_solo_request
+        solo_runner.run_solo_request = fake_run_solo_request
+        try:
+            context = ExecutionContext(
+                request=SimpleNamespace(user_input="solo task", workspace_root=PROJECT_ROOT, show_plan=False),
+                model_registry=object(),
+                mcp_manager=object(),
+                hooks=object(),
+                run_agent=object(),
+                settings=SimpleNamespace(execution_mode="solo"),
+            )
+
+            self.assertEqual(asyncio.run(SoloStrategy().execute(context)), "solo:ok")
+        finally:
+            solo_runner.run_solo_request = original
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "solo task")
+        self.assertEqual(calls[0][5], "solo")
+
+    def test_solo_mode_remains_compatibility_wrapper(self):
+        from runtime.execution.solo_runner import (
+            SOLO_READONLY_BUDGET_PROFILE as runner_budget_profile,
+            _solo_mcp_ids_for_input as runner_mcp_ids_for_input,
+            run_solo_request as runner_run_solo_request,
+        )
+        from runtime.modes.solo import (
+            SOLO_READONLY_BUDGET_PROFILE,
+            _solo_mcp_ids_for_input,
+            run_solo_request,
+        )
+
+        solo_source = (PROJECT_ROOT / "runtime" / "modes" / "solo.py").read_text(encoding="utf-8")
+        self.assertIn("Compatibility wrapper", solo_source)
+        self.assertIn("from runtime.execution.solo_runner import", solo_source)
+        self.assertNotIn("AgentFactory", solo_source)
+        self.assertNotIn("PrivacyPolicy", solo_source)
+        self.assertNotIn("def _solo_mcp_ids_for_input", solo_source)
+        self.assertNotIn("async def run_solo_request", solo_source)
+        self.assertIs(run_solo_request, runner_run_solo_request)
+        self.assertIs(_solo_mcp_ids_for_input, runner_mcp_ids_for_input)
+        self.assertIs(SOLO_READONLY_BUDGET_PROFILE, runner_budget_profile)
+
+    def test_serial_and_full_modes_remain_compatibility_wrappers(self):
+        from types import SimpleNamespace
+        import runtime.execution as public_execution
+        from runtime.modes.full import run_full_request
+        from runtime.modes.serial import run_serial_request
+
+        serial_source = (PROJECT_ROOT / "runtime" / "modes" / "serial.py").read_text(encoding="utf-8")
+        full_source = (PROJECT_ROOT / "runtime" / "modes" / "full.py").read_text(encoding="utf-8")
+        self.assertIn("Compatibility wrapper", serial_source)
+        self.assertIn("Compatibility wrapper", full_source)
+        self.assertNotIn("runtime.execution.dynamic", serial_source)
+        self.assertNotIn("runtime.execution.dynamic", full_source)
+        self.assertIn("from runtime.execution import execute_dynamic_request", serial_source)
+        self.assertIn("from runtime.execution import execute_dynamic_request", full_source)
+        self.assertIn('__all__ = ["run_serial_request"]', serial_source)
+        self.assertIn('__all__ = ["run_full_request"]', full_source)
+
+        calls = []
+
+        async def fake_execute_dynamic_request(
+            run_input,
+            project_root,
+            model_registry,
+            mcp_manager,
+            hooks,
+            run_agent,
+            show_plan=False,
+            settings=None,
+        ):
+            calls.append((run_input, show_plan, settings.execution_mode))
+            return f"wrapper:{settings.execution_mode}"
+
+        original = public_execution.execute_dynamic_request
+        public_execution.execute_dynamic_request = fake_execute_dynamic_request
+        try:
+            self.assertEqual(
+                asyncio.run(
+                    run_serial_request(
+                        "serial wrapper",
+                        PROJECT_ROOT,
+                        object(),
+                        object(),
+                        object(),
+                        object(),
+                        settings=SimpleNamespace(execution_mode="serial"),
+                        show_plan=False,
+                    )
+                ),
+                "wrapper:serial",
+            )
+            self.assertEqual(
+                asyncio.run(
+                    run_full_request(
+                        "full wrapper",
+                        PROJECT_ROOT,
+                        object(),
+                        object(),
+                        object(),
+                        object(),
+                        settings=SimpleNamespace(execution_mode="full"),
+                        show_plan=True,
+                    )
+                ),
+                "wrapper:full",
+            )
+        finally:
+            public_execution.execute_dynamic_request = original
+
+        self.assertEqual(calls, [("serial wrapper", False, "serial"), ("full wrapper", True, "full")])
+
+    def test_runtime_execution_package_exposes_public_entrypoint(self):
+        import runtime.execution as public_execution
+
+        source = (PROJECT_ROOT / "runtime" / "execution" / "__init__.py").read_text(encoding="utf-8")
+
+        self.assertTrue(callable(public_execution.execute_dynamic_request))
+        self.assertIn('__all__ = ["execute_dynamic_request"]', source)
+        self.assertIn("async def execute_dynamic_request", source)
+        self.assertIn("from runtime.execution.dynamic import execute_dynamic_request", source)
 
     def test_streaming_output_does_not_use_extra_label(self):
         source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
@@ -1792,6 +3218,36 @@ class LucodeCliEntryTests(unittest.TestCase):
                 f"{path} should lazy-import OpenAI Agents dependencies",
             )
 
+    def test_main_lazy_loads_agent_runtime_compat_exports(self):
+        import ast
+
+        tree = ast.parse((PROJECT_ROOT / "main.py").read_text(encoding="utf-8"))
+        top_level_modules = [
+            node.module or ""
+            for node in tree.body
+            if isinstance(node, ast.ImportFrom)
+        ]
+
+        self.assertNotIn("runtime.agent.approval", top_level_modules)
+        self.assertNotIn("runtime.agent.runner", top_level_modules)
+        self.assertIn("lucode.shell.turn_display", top_level_modules)
+
+    def test_main_delegates_chat_loop_to_shell_module(self):
+        main_source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
+        shell_source = (PROJECT_ROOT / "lucode" / "shell" / "chat_loop.py").read_text(encoding="utf-8")
+        slash_source = (PROJECT_ROOT / "lucode" / "shell" / "slash_commands.py").read_text(encoding="utf-8")
+
+        self.assertIn("from lucode.shell.chat_loop import chat_loop as shell_chat_loop", main_source)
+        self.assertNotIn("parse_writable_config_command", main_source)
+        self.assertNotIn("KernelFacade", main_source)
+        self.assertIn("async def chat_loop(", shell_source)
+        self.assertIn("from lucode.shell.slash_commands import handle_slash_command", shell_source)
+        self.assertNotIn("parse_writable_config_command", shell_source)
+        self.assertIn("KernelFacade", shell_source)
+        self.assertIn("async def handle_slash_command(", slash_source)
+        self.assertIn("parse_writable_config_command", slash_source)
+        self.assertIn("_handle_plan_command", slash_source)
+
     def test_mutation_tool_preview_summarizes_write_before_approval(self):
         from main import _format_tool_preview
 
@@ -1816,6 +3272,8 @@ class LucodeCliEntryTests(unittest.TestCase):
 
         prompt = _approval_prompt()
 
+        self.assertIn("y=yes", prompt)
+        self.assertIn("n=no", prompt)
         self.assertIn("允许一次", prompt)
         self.assertIn("本会话允许", prompt)
         self.assertIn("同类工具", prompt)
@@ -1843,6 +3301,19 @@ class LucodeCliEntryTests(unittest.TestCase):
         self.assertIn("--- a/runtime/config/cli.py", preview)
         self.assertIn("+new", preview)
         self.assertIn("已截断", preview)
+
+    def test_command_tool_preview_includes_risk_analysis_before_approval(self):
+        from main import _format_tool_preview
+
+        preview = _format_tool_preview(
+            "command_runner.run_command",
+            json.dumps({"command": "npm install", "reason": "verify command risk preview"}),
+        )
+
+        self.assertIn("执行预览", preview)
+        self.assertIn("命令风险分析", preview)
+        self.assertIn("风险等级：medium", preview)
+        self.assertIn("包管理命令", preview)
 
 
 class ExecutionModeRoutingTests(unittest.TestCase):
@@ -1989,6 +3460,495 @@ class RuntimeInterruptTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WelcomeRefreshC5Tests(unittest.TestCase):
+    def test_chat_loop_slash_commands_do_not_enter_kernel_facade(self):
+        import lucode.shell.chat_loop as chat_loop_module
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        app_home = TEMP_ROOT / f"c5_slash_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"c5_slash_workspace_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        kernel_calls = []
+
+        class FakeKernelFacade:
+            def __init__(self, context):
+                kernel_calls.append(context)
+
+        class FakeConsole:
+            interactive = False
+
+            def __init__(self):
+                self.lines = iter(["/status", "/help", "/exit"])
+
+            async def read_line(self):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "c5_slash_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        settings = RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed")
+
+        buffer = io.StringIO()
+        with patch.object(chat_loop_module, "KernelFacade", FakeKernelFacade):
+            with contextlib.redirect_stdout(buffer):
+                asyncio.run(
+                    chat_loop_module.chat_loop(
+                        model_registry=object(),
+                        quarantine_dir=workspace / ".agent_quarantine",
+                        runtime_settings=settings,
+                        console=FakeConsole(),
+                        app_home=app_home,
+                        project_root=workspace,
+                        workspace_context=context,
+                        use_color=False,
+                    )
+                )
+
+        output = buffer.getvalue()
+        self.assertEqual(kernel_calls, [])
+        self.assertIn("运行状态", output)
+        self.assertIn("命令菜单", output)
+        self.assertIn("已退出", output)
+
+    def test_chat_loop_expands_mcp_prompt_command_before_kernel_facade(self):
+        import lucode.shell.chat_loop as chat_loop_module
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        app_home = TEMP_ROOT / f"c5_mcp_prompt_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"c5_mcp_prompt_workspace_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        (workspace / ".lucode" / "mcp").mkdir(parents=True)
+        (workspace / ".lucode" / "mcp" / "project-tools.json").write_text(
+            json.dumps(
+                {
+                    "id": "project-tools",
+                    "display_name_zh": "项目工具",
+                    "prompts": [
+                        {
+                            "name": "review-api",
+                            "description": "审查 API",
+                            "arguments": [{"name": "target", "required": True}],
+                            "prompt": "请审查 {{target}}。",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8-sig",
+        )
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        calls = []
+
+        class FakeResponse:
+            final_output = "mcp prompt expanded"
+            mcp_ids_used = []
+            output_already_printed = False
+
+        class FakeKernelFacade:
+            def __init__(self, context):
+                calls.append(("init", context))
+
+            async def run_once(self, prompt, **kwargs):
+                calls.append(("run_once", prompt, kwargs))
+                return FakeResponse()
+
+        class FakeConsole:
+            interactive = False
+
+            def __init__(self):
+                self.lines = iter(["/mcp__project_tools__review_api src/api.py", "/exit"])
+
+            async def read_line(self):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "c5_mcp_prompt_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        settings = RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed")
+
+        buffer = io.StringIO()
+        with patch.object(chat_loop_module, "KernelFacade", FakeKernelFacade):
+            with contextlib.redirect_stdout(buffer):
+                asyncio.run(
+                    chat_loop_module.chat_loop(
+                        model_registry=object(),
+                        quarantine_dir=workspace / ".agent_quarantine",
+                        runtime_settings=settings,
+                        console=FakeConsole(),
+                        app_home=app_home,
+                        project_root=workspace,
+                        workspace_context=context,
+                        use_color=False,
+                    )
+                )
+
+        output = buffer.getvalue()
+        _, prompt, kwargs = calls[1]
+        self.assertIn("已展开 MCP Prompt：/mcp__project_tools__review_api", output)
+        self.assertIn("MCP Prompt 命令：/mcp__project_tools__review_api", prompt)
+        self.assertIn("请审查 src/api.py。", prompt)
+        self.assertIn("安全边界", prompt)
+        self.assertEqual(kwargs["routing_input"], prompt)
+
+    def test_chat_loop_delegates_regular_turn_to_kernel_facade(self):
+        import lucode.shell.chat_loop as chat_loop_module
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        app_home = TEMP_ROOT / f"c5_kernel_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"c5_kernel_workspace_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        calls = []
+
+        class FakeResponse:
+            final_output = "fake kernel output"
+            mcp_ids_used = ["workspace_edit"]
+
+        class FakeKernelFacade:
+            def __init__(self, context):
+                calls.append(("init", context))
+
+            async def run_once(self, prompt, **kwargs):
+                calls.append(("run_once", prompt, kwargs))
+                return FakeResponse()
+
+        class FakeConsole:
+            interactive = False
+
+            def __init__(self):
+                self.lines = iter(["普通任务", "/exit"])
+
+            async def read_line(self):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "c5_kernel_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        settings = RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed")
+        model_registry = object()
+
+        buffer = io.StringIO()
+        with patch.object(chat_loop_module, "KernelFacade", FakeKernelFacade):
+            with contextlib.redirect_stdout(buffer):
+                asyncio.run(
+                    chat_loop_module.chat_loop(
+                        model_registry=model_registry,
+                        quarantine_dir=workspace / ".agent_quarantine",
+                        runtime_settings=settings,
+                        console=FakeConsole(),
+                        app_home=app_home,
+                        project_root=workspace,
+                        workspace_context=context,
+                        use_color=False,
+                    )
+                )
+
+        output = buffer.getvalue()
+        self.assertEqual(calls[0], ("init", context))
+        _, prompt, kwargs = calls[1]
+        self.assertIn("普通任务", prompt)
+        self.assertEqual(kwargs["routing_input"], "普通任务")
+        self.assertIs(kwargs["settings"], settings)
+        self.assertIs(kwargs["model_registry"], model_registry)
+        self.assertIsNotNone(kwargs["approval_session"])
+        self.assertIsNotNone(kwargs["hooks"])
+        self.assertFalse(kwargs["verbose_runtime"])
+        self.assertIn("fake kernel output", output)
+        self.assertIn("工具 workspace_edit", output)
+
+    def test_chat_loop_resume_restores_jsonl_recent_context(self):
+        import lucode.shell.chat_loop as chat_loop_module
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        app_home = TEMP_ROOT / f"resume_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"resume_workspace_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        prompts = []
+
+        class FakeResponse:
+            mcp_ids_used = []
+            output_already_printed = False
+
+            def __init__(self, output):
+                self.final_output = output
+
+        class FakeKernelFacade:
+            def __init__(self, context):
+                self.context = context
+
+            async def run_once(self, prompt, **kwargs):
+                prompts.append(prompt)
+                return FakeResponse("已记住 LUCODE-SESSION" if len(prompts) == 1 else "代号是 LUCODE-SESSION")
+
+        class FirstConsole:
+            interactive = False
+
+            def __init__(self):
+                self.lines = iter(["记住项目代号是 LUCODE-SESSION", "/exit"])
+
+            async def read_line(self):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+        class ResumeConsole:
+            interactive = False
+
+            def __init__(self):
+                self.lines = iter(["/resume last", "刚刚的项目代号是什么", "/exit"])
+
+            async def read_line(self):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "resume_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        settings = RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed")
+
+        with patch.object(chat_loop_module, "KernelFacade", FakeKernelFacade):
+            with contextlib.redirect_stdout(io.StringIO()):
+                asyncio.run(
+                    chat_loop_module.chat_loop(
+                        model_registry=object(),
+                        quarantine_dir=workspace / ".agent_quarantine",
+                        runtime_settings=settings,
+                        console=FirstConsole(),
+                        app_home=app_home,
+                        project_root=workspace,
+                        workspace_context=context,
+                        use_color=False,
+                    )
+                )
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                asyncio.run(
+                    chat_loop_module.chat_loop(
+                        model_registry=object(),
+                        quarantine_dir=workspace / ".agent_quarantine",
+                        runtime_settings=settings,
+                        console=ResumeConsole(),
+                        app_home=app_home,
+                        project_root=workspace,
+                        workspace_context=context,
+                        use_color=False,
+                    )
+                )
+
+        self.assertIn("已恢复会话", buffer.getvalue())
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("以下是最近几轮对话", prompts[1])
+        self.assertIn("LUCODE-SESSION", prompts[1])
+        self.assertIn("本轮用户问题：刚刚的项目代号是什么", prompts[1])
+
+    def test_chat_loop_resume_injects_compacted_long_session_context(self):
+        import lucode.shell.chat_loop as chat_loop_module
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.sessions.store import SessionStore
+
+        app_home = TEMP_ROOT / f"resume_compact_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"resume_compact_workspace_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        store = SessionStore(workspace)
+        session_id = store.start_session()
+        for index in range(5):
+            store.append_message(session_id, "user", f"旧目标 {index}: 保留 ARCHIVE-{index}")
+            store.append_message(session_id, "assistant", f"旧回答 {index}: 已处理")
+        store.append_message(session_id, "user", "最近目标：TAIL-CONTEXT")
+        store.append_message(session_id, "assistant", "最近回答：TAIL-ANSWER")
+
+        prompts = []
+
+        class FakeResponse:
+            final_output = "resume compact ok"
+            mcp_ids_used = []
+            output_already_printed = False
+
+        class FakeKernelFacade:
+            def __init__(self, context):
+                self.context = context
+
+            async def run_once(self, prompt, **kwargs):
+                prompts.append(prompt)
+                return FakeResponse()
+
+        class ResumeConsole:
+            interactive = False
+
+            def __init__(self):
+                self.lines = iter(["/resume last", "继续刚才的长期会话", "/exit"])
+
+            async def read_line(self):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "resume_compact_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        settings = RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed")
+
+        with patch.object(chat_loop_module, "KernelFacade", FakeKernelFacade):
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                asyncio.run(
+                    chat_loop_module.chat_loop(
+                        model_registry=object(),
+                        quarantine_dir=workspace / ".agent_quarantine",
+                        runtime_settings=settings,
+                        console=ResumeConsole(),
+                        app_home=app_home,
+                        project_root=workspace,
+                        workspace_context=context,
+                        use_color=False,
+                    )
+                )
+
+        self.assertIn("已折叠", buffer.getvalue())
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("已恢复会话的压缩摘要", prompts[0])
+        self.assertIn("ARCHIVE-4", prompts[0])
+        self.assertIn("用户：最近目标：TAIL-CONTEXT", prompts[0])
+        self.assertIn("本轮用户问题：继续刚才的长期会话", prompts[0])
+
+    def test_chat_loop_resume_can_inject_semantic_compaction_summary(self):
+        import lucode.shell.chat_loop as chat_loop_module
+        import lucode.shell.slash_commands as slash_module
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.context.compaction import CompactedContext
+        from runtime.sessions.store import SessionStore
+
+        app_home = TEMP_ROOT / f"resume_semantic_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"resume_semantic_workspace_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        store = SessionStore(workspace)
+        session_id = store.start_session()
+        store.append_message(session_id, "user", "旧目标：SEMANTIC-RESUME-42")
+        store.append_message(session_id, "assistant", "旧回答：已记录")
+
+        prompts = []
+
+        async def fake_compact_messages_tiered(messages, **kwargs):
+            return CompactedContext(
+                summary="以下是已恢复会话的语义压缩摘要。\n- SEMANTIC-RESUME-42 是旧会话核心编号。",
+                recent_turns=[{"role": "user", "content": "最近目标：TAIL"}],
+                total_messages=2,
+                compacted_messages=1,
+                summary_source="semantic",
+            )
+
+        class FakeResponse:
+            final_output = "semantic resume ok"
+            mcp_ids_used = []
+            output_already_printed = False
+
+        class FakeKernelFacade:
+            def __init__(self, context):
+                self.context = context
+
+            async def run_once(self, prompt, **kwargs):
+                prompts.append(prompt)
+                return FakeResponse()
+
+        class ResumeConsole:
+            interactive = False
+
+            def __init__(self):
+                self.lines = iter(["/resume last", "继续语义恢复", "/exit"])
+
+            async def read_line(self):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "resume_semantic_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        settings = RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed")
+
+        with patch.object(chat_loop_module, "KernelFacade", FakeKernelFacade):
+            with patch.object(slash_module, "compact_messages_tiered", fake_compact_messages_tiered):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    asyncio.run(
+                        chat_loop_module.chat_loop(
+                            model_registry=object(),
+                            quarantine_dir=workspace / ".agent_quarantine",
+                            runtime_settings=settings,
+                            console=ResumeConsole(),
+                            app_home=app_home,
+                            project_root=workspace,
+                            workspace_context=context,
+                            use_color=False,
+                        )
+                    )
+
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("语义压缩摘要", prompts[0])
+        self.assertIn("SEMANTIC-RESUME-42", prompts[0])
+        self.assertIn("用户：最近目标：TAIL", prompts[0])
+
     def test_chat_loop_reprints_dashboard_after_mode_switch_and_new(self):
         from main import chat_loop
         from runtime.config.settings import RuntimeSettings
@@ -2048,6 +4008,7 @@ class WelcomeRefreshC5Tests(unittest.TestCase):
 
         self.assertEqual(_turn_status_label("已经完成。"), "完成")
         self.assertEqual(_turn_status_label("本轮任务超过最大工具/模型轮数，已自动停止。"), "失败")
+        self.assertEqual(_turn_status_label("已拒绝工具调用：run_command。"), "已拒绝")
         self.assertEqual(_turn_status_label("任意内容", stopped=True), "已中断")
 
 
@@ -5421,6 +7382,7 @@ class ReadonlyCliConfigTests(unittest.TestCase):
         settings = RuntimeSettings(execution_mode="solo")
         output = render_readonly_command("/mode", settings)
         switch_hint = render_readonly_command("/mode solo", settings)
+        model_typo_hint = render_readonly_command("/model serial", settings)
 
         self.assertIn("执行模式状态", output)
         self.assertIn("当前模式：单模型工具 Agent", output)
@@ -5428,6 +7390,7 @@ class ReadonlyCliConfigTests(unittest.TestCase):
         self.assertNotIn("auto：", output)
         self.assertIn("可以读写文件、联网、跑命令和测试", output)
         self.assertIn("支持直接切换", switch_hint)
+        self.assertIn("正确命令：/mode serial", model_typo_hint)
 
 
 class WritableCliConfigTests(unittest.TestCase):

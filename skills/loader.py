@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from planning.planner_schema import sanitize_text
+from runtime.common.text_utils import sanitize_text
 from skills.registry import SKILLS
 
 

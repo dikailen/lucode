@@ -8,9 +8,11 @@ from mcp.server.fastmcp import FastMCP
 
 try:
     from mcp_servers.core.operation_log import append_operation_log
+    from runtime.safety.command_analyzer import analyze_command
     from runtime.safety.permissions import evaluate_permission, load_effective_permissions
 except ModuleNotFoundError:
     from operation_log import append_operation_log
+    from runtime.safety.command_analyzer import analyze_command
     from runtime.safety.permissions import evaluate_permission, load_effective_permissions
 
 
@@ -63,6 +65,10 @@ def _parse_command(command: str) -> list[str]:
 
 def _validate_command(args: list[str]) -> None:
     lowered = [arg.lower() for arg in args]
+    analysis = analyze_command(" ".join(args))
+    if analysis.should_deny:
+        raise ValueError(f"Command is denied by analyzer: {analysis.blocking_summary}")
+
     if any(item in DENIED_SHELL_OPERATORS for item in lowered):
         raise ValueError("Shell chaining, pipes, and redirection are not allowed")
 

@@ -20,13 +20,13 @@ BOX_VERTICAL = "\u2502"
 
 MASCOT_LOGO = [
     "      lucode",
-    "   \\  \\    /  /",
-    "    \\_/\\__/\\_/",
-    "      / o  o \\",
-    "     /   __   \\",
-    "      \\_/  \\_/",
-    "        \\__/",
+    "      /\\_/\\",
+    "     ( o.o )",
+    "      > ^ <",
+    "     /     \\",
+    "    (_|   |_)",
 ]
+COMPACT_BRAND = "lucode"
 
 
 def render_welcome_dashboard(
@@ -40,7 +40,8 @@ def render_welcome_dashboard(
 
     catalog = model_catalog if model_catalog is not None else load_model_catalog()
     color_enabled = _color_enabled(use_color)
-    logo = [_blue(line, color_enabled) for line in MASCOT_LOGO] if show_logo else []
+    logo_lines = MASCOT_LOGO if show_logo else [COMPACT_BRAND]
+    logo = [_blue(line, color_enabled) for line in logo_lines]
     status = _status_lines(workspace, settings, catalog)
     width = max((_display_width(line) for line in logo), default=0) + (LOGO_STATUS_GAP if logo else 0)
 

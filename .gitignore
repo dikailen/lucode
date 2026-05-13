@@ -4,3 +4,7 @@ __pycache__/
 .agent_runs/
 .agent_cache/
 .agent_test_tmp/
+*.egg-info/
+build/
+dist/
+*.pyc

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.metadata
+import importlib.util
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -106,8 +109,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    import sys
-
     argv = list(sys.argv[1:] if argv is None else argv)
     fast_result = fast_dispatch(argv)
     if fast_result is not None:
@@ -199,59 +200,16 @@ def _export_context(context, args=None) -> None:
 
 
 async def _handle_run(args, context) -> int:
-    from catalog_system.model_catalog import ModelRegistry
-    from mcp_servers import MCPServerManager
-    from main import create_token_logger_hooks, run_with_approval
-    from runtime.config.execution_mode import runtime_route_for_input
-    from runtime.config.settings import RuntimeSettings
-    from runtime.modes.full import run_full_request
-    from runtime.modes.serial import run_serial_request
-    from runtime.modes.solo import run_solo_request
+    from runtime.kernel import KernelFacade
 
     prompt = " ".join(args.prompt or []).strip()
     if not prompt:
         print("请在 lucode run 后输入任务，例如：lucode run \"解释项目结构\"")
         return 2
-    settings = RuntimeSettings.from_env()
-    hooks = create_token_logger_hooks()
-    quarantine_dir = context.workspace_root / ".agent_quarantine"
-    model_registry = ModelRegistry()
-    route = runtime_route_for_input(prompt, settings.execution_mode)
-    async with MCPServerManager(context.workspace_root, quarantine_dir, verbose=False) as mcp_manager:
-        run_agent = lambda agent, turn_input, turn_hooks, max_turns=20: run_with_approval(
-            agent,
-            turn_input,
-            turn_hooks,
-            session=None,
-            max_turns=max_turns,
-        )
-        if route == "solo":
-            output = await run_solo_request(prompt, model_registry, mcp_manager, hooks, run_agent, settings=settings)
-        elif settings.execution_mode == "full":
-            output = await run_full_request(
-                prompt,
-                context.workspace_root,
-                model_registry,
-                mcp_manager,
-                hooks,
-                run_agent,
-                settings=settings,
-                show_plan=True,
-            )
-        else:
-            output = await run_serial_request(
-                prompt,
-                context.workspace_root,
-                model_registry,
-                mcp_manager,
-                hooks,
-                run_agent,
-                settings=settings,
-                show_plan=True,
-            )
-    if output:
-        print(output)
-    hooks.print_summary()
+    response = await KernelFacade(context).run_once(prompt, show_plan=True)
+    if response.final_output and not getattr(response, "output_already_printed", False):
+        print(response.final_output)
+    response.print_summary()
     return 0
 
 
@@ -324,7 +282,10 @@ def _handle_doctor(context) -> int:
         f"USER_HOME：{context.user_home}",
         f"WORKSPACE_ROOT：{context.workspace_root}",
         f".lucode：{'已发现' if context.has_project_config else '未初始化'}",
-        f"Python：{os.sys.executable}",
+        f"Python：{sys.executable}",
+        f"Python 来源：{_python_source_label()}",
+        f"Python 环境：{_python_environment_label()}",
+        f"OpenAI Agents SDK：{_agents_sdk_status()}",
         f"Git：{shutil.which('git') or '未找到'}",
         f"ripgrep：{shutil.which('rg') or '未找到，可继续使用 PowerShell 搜索'}",
         f"Provider 预设：{len(provider_catalog)} 个",
@@ -339,6 +300,50 @@ def _handle_doctor(context) -> int:
     return 0
 
 
+def _python_source_label() -> str:
+    configured = os.environ.get("LUCODE_PYTHON")
+    if configured:
+        try:
+            if Path(configured).resolve() == Path(sys.executable).resolve():
+                return "LUCODE_PYTHON"
+        except Exception:
+            pass
+        return f"当前进程（LUCODE_PYTHON={configured}）"
+    if os.environ.get("PYTHON"):
+        return "PYTHON"
+    return "当前进程"
+
+
+def _python_environment_label() -> str:
+    prefix = Path(sys.prefix).resolve()
+    parts = list(prefix.parts)
+    lowered = [part.lower() for part in parts]
+    if "envs" in lowered:
+        index = lowered.index("envs")
+        if index + 1 < len(parts):
+            return f"conda: {parts[index + 1]}"
+    conda_env = os.environ.get("CONDA_DEFAULT_ENV")
+    if conda_env:
+        return f"conda: {conda_env}"
+    if Path(getattr(sys, "base_prefix", sys.prefix)).resolve() != prefix:
+        return f"venv: {prefix.name}"
+    return "system/base"
+
+
+def _agents_sdk_status() -> str:
+    try:
+        spec = importlib.util.find_spec("agents")
+    except Exception:
+        spec = None
+    if spec is None:
+        return f"缺失（请运行：\"{sys.executable}\" -m pip install openai-agents）"
+    try:
+        version = importlib.metadata.version("openai-agents")
+    except importlib.metadata.PackageNotFoundError:
+        version = "版本未知"
+    return f"已安装（openai-agents {version}）"
+
+
 def _handle_readonly(command: str, context) -> int:
     from runtime.config.cli import render_readonly_command
     from runtime.config.settings import RuntimeSettings
@@ -348,9 +353,9 @@ def _handle_readonly(command: str, context) -> int:
 
 
 def _handle_session(context) -> int:
-    print("会话管理")
-    print(f"会话目录：{context.workspace_root / '.lucode' / 'sessions'}")
-    print("当前版本支持 /new 清空上下文、/rollback 回滚最近一轮修改；持久会话恢复接口已预留。")
+    from runtime.sessions import SessionStore, render_session_list
+
+    print(render_session_list(SessionStore(context.workspace_root), limit=10))
     return 0
 
 

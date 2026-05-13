@@ -6,6 +6,9 @@
     "lucode": "./bin/lucode.js"
   },
   "files": [
+    "README.md",
+    "pyproject.toml",
+    ".env.example",
     "bin",
     "lucode",
     "runtime",
@@ -14,10 +17,14 @@
     "mcp_servers",
     "planning",
     "skills",
-    "main.py"
+    "main.py",
+    "!**/__pycache__/**",
+    "!**/*.pyc",
+    "!lucode.egg-info/**"
   ],
   "scripts": {
-    "test": "python -m unittest tests.run_regression"
+    "test": "python -m unittest tests.run_regression",
+    "pack:dry": "npm pack --dry-run --json"
   },
   "license": "UNLICENSED"
 }
