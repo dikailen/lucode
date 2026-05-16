@@ -4,7 +4,7 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 from types import SimpleNamespace
 
-from runtime.agents.sdk import mcp_stdio_class, static_tool_filter_factory
+from runtime.agents.sdk import mcp_stdio_class, mcp_streamable_http_class, static_tool_filter_factory
 from runtime.safety.privacy import PrivacyPolicy
 from runtime.tools.registry import build_tool_registry
 
@@ -40,6 +40,16 @@ DEFAULT_READONLY_BUDGET_PROFILE = {
 
 def _env_value(name: str, default: str) -> str:
     return os.environ.get(name) or default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def _safe_mcp_env(values: dict[str, str]) -> dict[str, str]:
@@ -167,6 +177,56 @@ def create_web_search_server(project_root: Path):
         require_approval=approval,
         cache_tools_list=True,
         client_session_timeout_seconds=30,
+    )
+
+
+def create_context7_docs_server(project_root: Path):
+    """Create a hosted Context7 MCP server for current library documentation lookup."""
+
+    headers = {}
+    api_key = os.environ.get("CONTEXT7_API_KEY")
+    if api_key:
+        headers["CONTEXT7_API_KEY"] = api_key
+
+    MCPServerStreamableHttp = mcp_streamable_http_class()
+    create_static_tool_filter = static_tool_filter_factory()
+    return MCPServerStreamableHttp(
+        name="context7_docs_mcp",
+        params={
+            "url": os.environ.get("CONTEXT7_MCP_URL") or "https://mcp.context7.com/mcp",
+            "headers": headers,
+            "timeout": _env_float("CONTEXT7_MCP_TIMEOUT_SECONDS", 30.0),
+            "sse_read_timeout": _env_float("CONTEXT7_MCP_SSE_TIMEOUT_SECONDS", 30.0),
+        },
+        tool_filter=create_static_tool_filter(
+            allowed_tool_names=["resolve-library-id", "query-docs"],
+        ),
+        require_approval="never",
+        cache_tools_list=True,
+        client_session_timeout_seconds=_env_float("CONTEXT7_MCP_SESSION_TIMEOUT_SECONDS", 30.0),
+        max_retry_attempts=int(_env_value("CONTEXT7_MCP_MAX_RETRY_ATTEMPTS", "1")),
+    )
+
+
+def create_grep_code_search_server(project_root: Path):
+    """Create Vercel Grep's hosted MCP server for public GitHub code search."""
+
+    MCPServerStreamableHttp = mcp_streamable_http_class()
+    create_static_tool_filter = static_tool_filter_factory()
+    return MCPServerStreamableHttp(
+        name="grep_code_search_mcp",
+        params={
+            "url": os.environ.get("GREP_MCP_URL") or "https://mcp.grep.app",
+            "timeout": _env_float("GREP_MCP_TIMEOUT_SECONDS", 45.0),
+            "sse_read_timeout": _env_float("GREP_MCP_SSE_TIMEOUT_SECONDS", 45.0),
+        },
+        tool_filter=create_static_tool_filter(
+            allowed_tool_names=["searchGitHub"],
+        ),
+        require_approval="never",
+        cache_tools_list=True,
+        client_session_timeout_seconds=_env_float("GREP_MCP_SESSION_TIMEOUT_SECONDS", 45.0),
+        max_retry_attempts=int(_env_value("GREP_MCP_MAX_RETRY_ATTEMPTS", "1")),
     )
 
 
@@ -353,6 +413,10 @@ class MCPServerManager:
             return create_safe_delete_server(self.project_root, self.quarantine_dir)
         if mcp_id == "web_search":
             return create_web_search_server(self.project_root)
+        if mcp_id == "context7_docs":
+            return create_context7_docs_server(self.project_root)
+        if mcp_id == "grep_code_search":
+            return create_grep_code_search_server(self.project_root)
         if mcp_id == "code_locator":
             return create_code_locator_server(self.project_root)
         if mcp_id == "workspace_edit":

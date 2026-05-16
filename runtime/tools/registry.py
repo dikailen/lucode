@@ -121,6 +121,22 @@ CORE_SERVER_METADATA: dict[str, dict[str, Any]] = {
         "backup_policy": "none",
         "model_requirement": "tool-capable model with network permission",
     },
+    "context7_docs": {
+        "capability": "docs",
+        "offline_allowed": False,
+        "budget_policy": "remote MCP timeout and narrow library-query budget",
+        "log_policy": "remote docs lookup metadata only; no project file mutation",
+        "backup_policy": "none",
+        "model_requirement": "tool-capable model with network permission",
+    },
+    "grep_code_search": {
+        "capability": "code_search",
+        "offline_allowed": False,
+        "budget_policy": "remote MCP timeout and narrow public GitHub query budget",
+        "log_policy": "remote public code search metadata only; no project file mutation",
+        "backup_policy": "none",
+        "model_requirement": "tool-capable model with network permission",
+    },
 }
 
 

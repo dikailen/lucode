@@ -77,7 +77,8 @@ class AgentFactory:
         return "\n\n## 本次任务契约\n" + "\n".join(lines)
 
     def _tool_budget(self, task: PlannedTask) -> str:
-        if "web_search" not in task.mcp:
+        remote_lookup = {"context7_docs", "grep_code_search"}.intersection(task.mcp)
+        if "web_search" not in task.mcp and not remote_lookup:
             if "code_locator" in task.mcp and "project_filesystem_readonly" in task.mcp:
                 command_budget = ""
                 if "command_runner" in task.mcp:
@@ -105,6 +106,17 @@ class AgentFactory:
                     "- 如果用户拒绝审批或审批不可用，不要重复请求同一命令，直接说明无法执行。"
                 )
             return ""
+
+        if remote_lookup and "web_search" not in task.mcp:
+            lines = [
+                "\n\n## 本次工具预算",
+            ]
+            if "context7_docs" in task.mcp:
+                lines.append("- Context7：先用 `resolve-library-id` 解析库名，再用 `query-docs` 查询文档；每个工具最多调用 1 次。")
+            if "grep_code_search" in task.mcp:
+                lines.append("- Grep：`searchGitHub` 最多调用 2 次；优先使用具体代码片段、repo、path 或 language 过滤，避免过宽查询。")
+            lines.append("- 查询内容会发送到外部远程 MCP；不要提交 API key、密码、私有代码或未公开业务信息。")
+            return "\n".join(lines)
 
         text = f"{task.title}\n{task.instruction}".lower()
         url_only = any(
@@ -155,6 +167,16 @@ class AgentFactory:
             )
         if "web_search" in mcp:
             lines.append("- web_search 可用工具：web_search、web_fetch。最多搜索 2 次；web_fetch 最多读取 3 个网页。")
+        if "context7_docs" in mcp:
+            lines.append(
+                "- context7_docs 可用工具：resolve-library-id、query-docs。"
+                "用于公开库文档查询；不要把私有代码、密钥或未公开业务信息发给 Context7。"
+            )
+        if "grep_code_search" in mcp:
+            lines.append(
+                "- grep_code_search 可用工具：searchGitHub。"
+                "用于公开 GitHub 代码片段搜索；查询要尽量具体，可加 repo/path/language 过滤以避免超时。"
+            )
         if "workspace_edit" in mcp:
             lines.append(
                 "- workspace_edit 可用工具：create_file、write_file、replace_in_file、apply_unified_patch、delete_file。"

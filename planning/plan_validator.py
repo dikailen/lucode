@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from catalog_system.loader import load_mcp_catalog, load_skill_catalog
 from catalog_system.model_catalog import load_model_catalog
 from planning.planner_schema import PlannerResult
-from runtime.safety.privacy import PrivacyPolicy
+from runtime.safety.privacy import NETWORK_MCP_IDS, PrivacyPolicy
 
 
 @dataclass
@@ -96,7 +96,7 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
             if task.skill_id not in allowed_for_skills:
                 errors.append(f"MCP {mcp_id} 未授权给 skill {task.skill_id}")
 
-            if mcp_id == "web_search" and privacy_policy.mode == "offline":
+            if mcp_id in NETWORK_MCP_IDS and privacy_policy.mode == "offline":
                 if privacy_policy.mcp_allowed(mcp_id):
                     warnings.append(privacy_policy.mcp_warning(mcp_id))
                 else:

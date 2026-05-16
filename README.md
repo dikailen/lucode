@@ -1,8 +1,24 @@
 # Lucode
 
+## 快速开始
+
+```powershell
+conda activate agents-demo
+python -m pip install -e .
+lucode doctor
+lucode run "Lucode OK"
+```
+
+如果通过 npm 入口启动，但实际运行依赖 conda 里的 Python，请设置 `LUCODE_PYTHON`：
+
+```powershell
+$env:LUCODE_PYTHON = "D:\develop\Data_anaconda2024\envs\agents-demo\python.exe"
+lucode doctor
+```
+
 > 中文优先、本地优先、模型中立的多 Agent 终端编码助手
 
-Lucode 是一个运行在终端里的多 Agent 编码代理，支持单 Agent / 串行多 Agent / 并行多 Agent 三种执行模式，内置 7 个 MCP 工具服务器、8 个技能模块、模型能力探测、Git 检查点回滚、SHA256 文件安全校验等特性。
+Lucode 是一个运行在终端里的多 Agent 编码代理，支持单 Agent / 串行多 Agent / 并行多 Agent 三种执行模式，内置 10 个 MCP 工具服务器、8 个技能模块、模型能力探测、Git 检查点回滚、SHA256 文件安全校验等特性。
 
 > **⚠️ 当前版本：V1.0 实验版**
 >
@@ -36,17 +52,20 @@ Lucode 是一个运行在终端里的多 Agent 编码代理，支持单 Agent / 
 
 启动时自动探测本地模型的 tools/function calling 能力，缓存结果供下次使用。
 
-### 7 个 MCP 工具服务器
+### 10 个 MCP 工具服务器
 
 | MCP 服务器 | 功能 |
 |------------|------|
 | `project_filesystem_readonly` | 预算限制的只读文件系统访问 |
+| `skills_filesystem_readonly` | Skills 目录只读访问，用于创建和优化技能 |
 | `code_locator` | BM25 + AST 符号索引 + SQLite 调用图，精准定位代码 |
 | `workspace_edit` | 文件创建/写入/替换/补丁/删除，带 SHA256 安全校验 |
 | `safe_backup` | 删除前自动 zip 备份到隔离区 |
 | `command_runner` | 安全的本地命令执行（禁用 shell、内置拒绝列表） |
 | `git_tools` | Git status/diff/log/commit（commit 需用户审批） |
 | `web_search` | 联网搜索，结果按来源优先级排序：官方文档 > GitHub > 社区文章 |
+| `context7_docs` | Context7 官方远程 MCP，检索公开库文档和代码示例 |
+| `grep_code_search` | Vercel Grep 官方远程 MCP，搜索公开 GitHub 代码片段 |
 
 ### 多层安全防护
 

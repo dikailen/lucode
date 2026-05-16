@@ -205,6 +205,61 @@
         "中文润色",
         "不需要时效性的信息"
       ]
+    },
+    {
+      "id": "context7_docs",
+      "display_name_zh": "Context7 文档检索工具",
+      "summary_zh": "连接 Context7 官方远程 MCP，按库名解析 Context7 library ID，并查询最新库文档与代码示例；适合查框架、SDK、库 API 的用法，不适合发送私有代码或密钥。",
+      "tools": [
+        "resolve-library-id",
+        "query-docs"
+      ],
+      "allowed_for_skills": [
+        "jpc_now_skill",
+        "project_explorer",
+        "skill_creator"
+      ],
+      "approval_required": false,
+      "side_effects": "external_network_request_to_context7",
+      "risk_level": "medium",
+      "implemented": true,
+      "use_when": [
+        "需要最新库文档",
+        "需要框架 API 示例",
+        "用户明确要求使用 Context7"
+      ],
+      "avoid_when": [
+        "查询项目私有代码",
+        "用户提供了密钥或敏感信息",
+        "普通本地文件分析"
+      ]
+    },
+    {
+      "id": "grep_code_search",
+      "display_name_zh": "Grep GitHub 代码搜索工具",
+      "summary_zh": "连接 Vercel Grep 官方远程 MCP，在公开 GitHub 仓库中搜索真实代码片段；适合查开源项目写法、API 调用样例和仓库内代码模式，不适合搜索私有代码。",
+      "tools": [
+        "searchGitHub"
+      ],
+      "allowed_for_skills": [
+        "jpc_now_skill",
+        "project_explorer",
+        "skill_creator"
+      ],
+      "approval_required": false,
+      "side_effects": "external_network_request_to_grep",
+      "risk_level": "medium",
+      "implemented": true,
+      "use_when": [
+        "需要 GitHub 公开代码示例",
+        "需要搜索真实项目写法",
+        "用户明确要求使用 Grep 或 GitHub 代码搜索"
+      ],
+      "avoid_when": [
+        "搜索私有仓库代码",
+        "用户提供了密钥或敏感信息",
+        "只需要普通网页搜索"
+      ]
     }
   ],
   "future_memory_interface": {

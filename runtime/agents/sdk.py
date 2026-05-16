@@ -81,6 +81,16 @@ def mcp_stdio_class():
     return MCPServerStdio
 
 
+def mcp_streamable_http_class():
+    ensure_tracing_disabled()
+    try:
+        from agents.mcp import MCPServerStreamableHttp
+    except ModuleNotFoundError:
+        return _FallbackMCPServerStreamableHttp
+
+    return MCPServerStreamableHttp
+
+
 def static_tool_filter_factory():
     ensure_tracing_disabled()
     try:
@@ -131,6 +141,12 @@ class _FallbackMCPServerStdio:
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
+
+
+class _FallbackMCPServerStreamableHttp(_FallbackMCPServerStdio):
+    """Construction-only remote MCP replacement for tests when Agents SDK is absent."""
+
+    pass
 
 
 def _fallback_static_tool_filter(**kwargs):

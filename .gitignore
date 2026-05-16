@@ -1,5 +1,6 @@
 .env
 __pycache__/
+.lucode/
 .agent_quarantine/
 .agent_runs/
 .agent_cache/

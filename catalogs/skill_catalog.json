@@ -73,7 +73,9 @@
         "command_runner",
         "git_tools",
         "safe_backup",
-        "web_search"
+        "web_search",
+        "context7_docs",
+        "grep_code_search"
       ],
       "good_for": [
         "编写代码",
@@ -131,7 +133,9 @@
         "workspace_edit",
         "git_tools",
         "safe_backup",
-        "web_search"
+        "web_search",
+        "context7_docs",
+        "grep_code_search"
       ],
       "good_for": [
         "项目结构分析",
@@ -187,7 +191,9 @@
         "command_runner",
         "git_tools",
         "safe_backup",
-        "web_search"
+        "web_search",
+        "context7_docs",
+        "grep_code_search"
       ],
       "good_for": [
         "创建 skill",

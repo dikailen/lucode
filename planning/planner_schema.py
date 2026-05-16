@@ -313,6 +313,8 @@ def _fallback_no_tool_model_direct_answer(raw: str, skill_id: str) -> PlannerRes
 
 
 def _normalize_planner_result(result: PlannerResult, fallback_user_input: str = "") -> PlannerResult:
+    _extract_internal_synthesizer_task(result)
+
     for task in result.tasks:
         task.model = _normalize_model_reference(task.model, task.skill_id)
 
@@ -351,6 +353,8 @@ def _normalize_planner_result(result: PlannerResult, fallback_user_input: str = 
     if result.route_type == "single_agent" and _needs_web_search(web_search_text):
         _preserve_web_search_constraints(result, fallback_user_input)
 
+    _preserve_remote_lookup_constraints(result, fallback_user_input)
+
     if result.route_type == "multi_agent":
         if not result.needs_synthesis:
             result.needs_synthesis = True
@@ -361,6 +365,104 @@ def _normalize_planner_result(result: PlannerResult, fallback_user_input: str = 
                 "保留关键信息，不要编造未出现的事实。"
             )
     return result
+
+
+def _extract_internal_synthesizer_task(result: PlannerResult) -> None:
+    synthesizer_tasks = [task for task in result.tasks if task.skill_id == "final_synthesizer"]
+    if not synthesizer_tasks:
+        return
+
+    remaining_tasks = [task for task in result.tasks if task.skill_id != "final_synthesizer"]
+    if remaining_tasks:
+        result.tasks = remaining_tasks
+        if len(result.tasks) > 1:
+            result.route_type = "multi_agent"
+            result.needs_synthesis = True
+        else:
+            result.route_type = "single_agent"
+            result.needs_synthesis = False
+        if result.needs_synthesis and not result.synthesis_instruction.strip():
+            result.synthesis_instruction = synthesizer_tasks[-1].instruction or (
+                "请读取所有任务输出，合并结论并检查是否满足用户需求。"
+            )
+        if not result.needs_synthesis:
+            result.synthesis_instruction = ""
+    else:
+        result.tasks = []
+        result.needs_synthesis = False
+        result.synthesis_instruction = ""
+        result.route_type = "direct_answer"
+        if not result.direct_answer_instruction:
+            result.direct_answer_instruction = (
+                synthesizer_tasks[-1].instruction
+                or "主脑错误地只规划了内部汇总任务。请直接根据用户问题给出简洁回答。"
+            )
+
+
+def _preserve_remote_lookup_constraints(result: PlannerResult, fallback_user_input: str) -> None:
+    raw = str(fallback_user_input or "")
+    needs_context7 = _needs_context7_docs(raw)
+    needs_grep = _needs_grep_code_search(raw)
+    if not needs_context7 and not needs_grep:
+        return
+
+    requested_mcps = []
+    if needs_context7:
+        requested_mcps.append("context7_docs")
+    if needs_grep:
+        requested_mcps.append("grep_code_search")
+
+    if result.route_type == "direct_answer":
+        model = _fallback_model_for_skill("project_explorer", requires_tools=True) or _default_model_for_skill("project_explorer")
+        result.route_type = "single_agent"
+        result.reason = (result.reason + " 已根据用户明确远程 MCP 检索需求改为工具路线。").strip()
+        result.direct_answer_instruction = ""
+        result.tasks = [
+            PlannedTask(
+                id="remote_lookup_task",
+                title="远程 MCP 检索公开资料",
+                instruction=(
+                    "用户明确要求使用远程 MCP 查询公开文档或公开 GitHub 代码。"
+                    "请只提交非敏感查询词；如果工具超时，说明限制并给出可复试的更窄查询建议。"
+                    f"用户请求：{result.refined_request or raw}"
+                ),
+                skill_id="project_explorer",
+                model=model,
+                mcp=requested_mcps,
+                parallel_group=1,
+                acceptance_criteria=["返回远程 MCP 查询结果，或说明远程服务失败原因"],
+                expected_outputs=["文档摘要、代码片段链接或结构化失败原因"],
+                risk_notes="远程 MCP 会把查询词发送到外部服务；不得提交密钥、私有代码或未公开业务信息。",
+            )
+        ]
+        result.needs_synthesis = False
+        result.synthesis_instruction = ""
+        return
+
+    if result.route_type not in {"single_agent", "multi_agent"}:
+        return
+
+    for task in result.tasks:
+        if task.skill_id not in {"project_explorer", "jpc_now_skill", "skill_creator"}:
+            continue
+        task_text = f"{task.title}\n{task.instruction}"
+        task_mcps = []
+        if _needs_context7_docs(task_text):
+            task_mcps.append("context7_docs")
+        if _needs_grep_code_search(task_text):
+            task_mcps.append("grep_code_search")
+        if not task_mcps:
+            task_mcps = list(requested_mcps)
+        if task_mcps != requested_mcps:
+            task.mcp = [mcp_id for mcp_id in task.mcp if mcp_id not in requested_mcps or mcp_id in task_mcps]
+        for mcp_id in task_mcps:
+            if mcp_id not in task.mcp:
+                task.mcp.append(mcp_id)
+        task.write_intent = []
+        task.mcp = [mcp_id for mcp_id in task.mcp if mcp_id != "workspace_edit"]
+        note = "用户请求明确需要远程公开文档/代码检索；已补充 Context7/Grep MCP，并移除编辑意图。"
+        if note not in task.risk_notes:
+            task.risk_notes = (task.risk_notes + " " + note).strip()
 
 
 def _preserve_web_search_constraints(result: PlannerResult, fallback_user_input: str) -> None:
@@ -457,6 +559,22 @@ def _has_explicit_web_search_command(text: str) -> bool:
         return True
     return bool(
         re.search(r"\b(search|find|look up|browse)\b.{0,60}\b(web|internet|official|docs?|documentation|links?|urls?|latest)\b", text)
+    )
+
+
+def _needs_context7_docs(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return "context7" in lowered or "context 7" in lowered
+
+
+def _needs_grep_code_search(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if "mcp.grep.app" in lowered or "grep by vercel" in lowered:
+        return True
+    return bool(
+        ("grep" in lowered and "github" in lowered)
+        or ("github" in lowered and re.search(r"\b(code|snippet|example|pattern|search)\b", lowered))
+        or ("公开代码" in lowered and ("github" in lowered or "搜索" in lowered))
     )
 
 

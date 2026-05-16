@@ -93,7 +93,15 @@ def _requires_serial_execution(task) -> bool:
     if "workspace_edit" in task.mcp and not _normalized_write_intent(task):
         return True
     for mcp_id in task.mcp:
-        if mcp_id not in {"workspace_edit", "project_filesystem_readonly", "code_locator", "web_search", "git_tools"}:
+        if mcp_id not in {
+            "workspace_edit",
+            "project_filesystem_readonly",
+            "code_locator",
+            "web_search",
+            "context7_docs",
+            "grep_code_search",
+            "git_tools",
+        }:
             return True
     return False
 

@@ -20,6 +20,8 @@ READONLY_MCP_IDS = ["project_filesystem_readonly", "code_locator", "git_tools"]
 EDIT_MCP_IDS = ["workspace_edit", "safe_backup"]
 COMMAND_MCP_IDS = ["command_runner"]
 WEB_MCP_IDS = ["web_search"]
+CONTEXT7_MCP_IDS = ["context7_docs"]
+GREP_MCP_IDS = ["grep_code_search"]
 
 READ_MARKERS = [
     "分析",
@@ -116,6 +118,18 @@ WEB_MARKERS = [
     "latest",
     "official docs",
 ]
+CONTEXT7_MARKERS = [
+    "context7",
+    "context 7",
+]
+GREP_MARKERS = [
+    "grep by vercel",
+    "mcp.grep.app",
+    "github code",
+    "github snippets",
+    "code snippets",
+    "公开代码",
+]
 
 NO_EDIT_MARKERS = [
     "不要修改",
@@ -158,7 +172,9 @@ def _solo_mcp_ids_for_input(user_input: str, settings: RuntimeSettings) -> list[
         _contains_any(text, COMMAND_MARKERS) or _contains_any_word(text, COMMAND_WORD_MARKERS)
     ) and not command_blocked
     wants_web = _contains_any(text, WEB_MARKERS)
-    wants_read = wants_edit or wants_command or wants_web or _contains_any(text, READ_MARKERS)
+    wants_context7 = _contains_any(text, CONTEXT7_MARKERS)
+    wants_grep = _contains_any(text, GREP_MARKERS) or ("grep" in text and "github" in text)
+    wants_read = wants_edit or wants_command or wants_web or wants_context7 or wants_grep or _contains_any(text, READ_MARKERS)
 
     mcp_ids: list[str] = []
     if wants_read:
@@ -169,6 +185,10 @@ def _solo_mcp_ids_for_input(user_input: str, settings: RuntimeSettings) -> list[
         mcp_ids.extend(COMMAND_MCP_IDS)
     if wants_web and settings.privacy_mode != "offline" and PrivacyPolicy(settings.privacy_mode).allows_network_tools:
         mcp_ids.extend(WEB_MCP_IDS)
+    if wants_context7 and settings.privacy_mode != "offline" and PrivacyPolicy(settings.privacy_mode).allows_network_tools:
+        mcp_ids.extend(CONTEXT7_MCP_IDS)
+    if wants_grep and settings.privacy_mode != "offline" and PrivacyPolicy(settings.privacy_mode).allows_network_tools:
+        mcp_ids.extend(GREP_MCP_IDS)
 
     return _dedupe(mcp_ids)
 

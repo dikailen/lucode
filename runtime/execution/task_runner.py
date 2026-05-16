@@ -3,7 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from planning.planner_schema import PlannerResult
-from runtime.execution.fast_paths import _is_url_only_task
+from runtime.execution.fast_paths import (
+    _can_fast_path_mcp_catalog_count,
+    _can_fast_path_readme_mcp_count,
+    _is_url_only_task,
+    _run_mcp_catalog_count_fast_path,
+    _run_readme_mcp_count_fast_path,
+)
 from runtime.execution.inline_context import _latest_workspace_context
 from runtime.execution.pipeline import PipelineRunState, build_verification_report
 from runtime.workspace.patch_ledger import PatchProposalLedger
@@ -42,6 +48,14 @@ async def _run_planned_task(
 ) -> tuple[str, str]:
     if ledger:
         ledger.record_proposal(task, task.instruction)
+    fast_path_output = _readonly_fast_path_output(project_root, task)
+    if fast_path_output is not None:
+        output = _with_verification_report(project_root, task, fast_path_output, run_state)
+        if run_state:
+            run_state.record_task_result(task, output)
+        if ledger:
+            ledger.record_task_status(task.id, "completed", output)
+        return task.title, output
     agent = await factory.create_task_agent(task)
     dependency_context = _dependency_context_for_task(task, _task_output_map(run_state))
     workspace_context = _latest_workspace_context(project_root, task)
@@ -64,6 +78,14 @@ async def _run_planned_task(
     if ledger:
         ledger.record_task_status(task.id, "completed", output)
     return task.title, output
+
+
+def _readonly_fast_path_output(project_root: Path, task) -> str | None:
+    if _can_fast_path_mcp_catalog_count(task):
+        return _run_mcp_catalog_count_fast_path(project_root, task)
+    if _can_fast_path_readme_mcp_count(task):
+        return _run_readme_mcp_count_fast_path(project_root, task)
+    return None
 
 
 def _with_verification_report(project_root: Path, task, output: str, run_state: PipelineRunState | None = None) -> str:

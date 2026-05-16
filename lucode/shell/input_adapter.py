@@ -40,6 +40,12 @@ def should_enable_prompt_toolkit(
     return _is_tty(stdin) and _is_tty(stdout)
 
 
+def prompt_mouse_support_enabled(env=None) -> bool:
+    env = os.environ if env is None else env
+    value = str(env.get("LUCODE_PROMPT_MOUSE_SUPPORT", "")).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 class StdinConsoleAdapter:
     """Single-reader stdin adapter so runtime stop/approval won't compete for input()."""
 
@@ -120,7 +126,7 @@ class StdinConsoleAdapter:
                 self._main_prompt_session = PromptSession(
                     completer=create_slash_command_completer(),
                     complete_while_typing=True,
-                    mouse_support=True,
+                    mouse_support=prompt_mouse_support_enabled(),
                     **slash_prompt_session_kwargs(),
                 )
             session = self._main_prompt_session

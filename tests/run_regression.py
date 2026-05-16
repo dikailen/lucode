@@ -719,6 +719,49 @@ class OperationLogTests(unittest.TestCase):
         self.assertFalse(record["approval"]["required"])
         self.assertIn("OpenAI Agents SDK", record["params_summary"]["query"])
 
+    def test_runtime_fast_path_counts_mcp_catalog_and_readme_mcp_section(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.execution.fast_paths import (
+            _run_mcp_catalog_count_fast_path,
+            _run_readme_mcp_count_fast_path,
+        )
+
+        workspace = TEMP_ROOT / f"mcp_count_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        (workspace / "mcp_catalog.json").write_text(
+            json.dumps({"mcp_servers": [{"id": "one"}, {"id": "two"}]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (workspace / "README.md").write_text(
+            "### 2 个 MCP 工具服务器\n\n"
+            "| MCP 服务器 | 功能 |\n"
+            "|------------|------|\n"
+            "| `one` | A |\n"
+            "| `two` | B |\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        os.environ["AGENTS_OPERATION_LOG_PATH"] = str(self.quarantine_dir / "operations.jsonl")
+        task = PlannedTask(
+            id="count",
+            title="统计 mcp_catalog.json 和 README MCP 数量",
+            instruction="Count MCP servers.",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["project_filesystem_readonly"],
+        )
+
+        try:
+            catalog_output = _run_mcp_catalog_count_fast_path(workspace, task)
+            readme_output = _run_readme_mcp_count_fast_path(workspace, task)
+        finally:
+            os.environ.pop("AGENTS_OPERATION_LOG_PATH", None)
+
+        self.assertIn("共有 2 个", catalog_output)
+        self.assertIn("列出 2 个", readme_output)
+        self.assertEqual(self._records()[-2]["tool"], "runtime_fast_path.mcp_catalog_count")
+        self.assertEqual(self._records()[-1]["tool"], "runtime_fast_path.readme_mcp_count")
+
 
 class SafeDeleteTests(unittest.TestCase):
     def setUp(self):
@@ -840,6 +883,77 @@ class WebSearchRankingTests(unittest.TestCase):
         self.assertEqual(payload["results"][0]["source_provider"], "fake_provider")
         self.assertIn("retrieved_at", payload["results"][0])
         self.assertIn("source_priority", payload)
+
+    def test_web_search_merges_github_repository_search_for_popular_skill_queries(self):
+        from mcp_servers.network import web_search_mcp
+
+        class FakeProvider:
+            provider_id = "fake_provider"
+            provider_label = "Fake Provider"
+
+            def search(self, query, max_results, timeout):
+                return web_search_mcp.SearchProviderResponse(
+                    provider_id=self.provider_id,
+                    provider_label=self.provider_label,
+                    results=[
+                        {
+                            "title": "Generic article",
+                            "url": "https://example.com/claude-skills",
+                            "snippet": "article",
+                        }
+                    ],
+                )
+
+        github_response = web_search_mcp.SearchProviderResponse(
+            provider_id="github_repositories",
+            provider_label="GitHub Repository Search API",
+            results=[
+                {
+                    "title": "subinium/awesome-claude-code",
+                    "url": "https://github.com/subinium/awesome-claude-code",
+                    "snippet": "Curated list (12000 stars, Markdown, updated 2026-05-01)",
+                    "stars": 12000,
+                }
+            ],
+        )
+
+        with patch.object(web_search_mcp, "_get_search_provider", return_value=FakeProvider()):
+            with patch.object(web_search_mcp.GitHubRepositorySearchProvider, "search", return_value=github_response):
+                payload = json.loads(web_search_mcp.web_search("搜索 GitHub 热门 Claude skill", max_results=3))
+
+        self.assertEqual(payload["results"][0]["url"], "https://github.com/subinium/awesome-claude-code")
+        self.assertEqual(payload["results"][0]["source_provider"], "github_repositories")
+        self.assertIn("github_repositories", json.dumps(payload["auxiliary_providers"], ensure_ascii=False))
+
+    def test_github_repository_query_normalizes_chinese_popular_terms(self):
+        from mcp_servers.network.web_search_mcp import (
+            _github_relevance_score,
+            _github_repo_query,
+            _looks_like_github_repository_search,
+        )
+
+        query = _github_repo_query("搜索 GitHub 热门 Claude skill 仓库链接")
+
+        self.assertIn("Claude skill", query)
+        self.assertIn("in:name,description,readme", query)
+        self.assertNotIn("热门", query)
+        self.assertNotIn("popular", _github_repo_query("GitHub popular Claude skill repositories"))
+        self.assertTrue(_looks_like_github_repository_search("搜索 GitHub 热门 Claude skill", []))
+        relevant = _github_relevance_score(
+            "GitHub popular Claude skill MCP repositories",
+            "anthropics/skills",
+            "https://github.com/anthropics/skills",
+            "Public repository for Agent Skills",
+            stars=10000,
+        )
+        generic = _github_relevance_score(
+            "GitHub popular Claude skill MCP repositories",
+            "vinta/awesome-python",
+            "https://github.com/vinta/awesome-python",
+            "An opinionated list of Python libraries and tools",
+            stars=300000,
+        )
+        self.assertGreater(relevant, generic)
 
     def test_api_search_provider_without_key_returns_structured_error(self):
         from mcp_servers.network import web_search_mcp
@@ -2256,7 +2370,7 @@ class ProviderConfigC2Tests(unittest.TestCase):
         self.assertIsNone(resolve_mcp_prompt_invocation("/mcp__project_tools__review", context))
 
     def test_prompt_toolkit_tty_gate_is_safe_for_non_interactive_pipes(self):
-        from lucode.shell.input_adapter import should_enable_prompt_toolkit
+        from lucode.shell.input_adapter import prompt_mouse_support_enabled, should_enable_prompt_toolkit
 
         class FakeStream:
             def __init__(self, is_tty):
@@ -2289,6 +2403,8 @@ class ProviderConfigC2Tests(unittest.TestCase):
                 env={},
             )
         )
+        self.assertFalse(prompt_mouse_support_enabled({}))
+        self.assertTrue(prompt_mouse_support_enabled({"LUCODE_PROMPT_MOUSE_SUPPORT": "1"}))
 
 
 class WorkspaceExtensionC26Tests(unittest.TestCase):
@@ -2526,6 +2642,12 @@ class ToolRegistryC4Tests(unittest.TestCase):
 
         web_search = registry.require_server("web_search")
         self.assertFalse(web_search.offline_allowed)
+        context7 = registry.require_server("context7_docs")
+        self.assertEqual(context7.capability, "docs")
+        self.assertFalse(context7.offline_allowed)
+        grep = registry.require_server("grep_code_search")
+        self.assertEqual(grep.capability, "code_search")
+        self.assertFalse(grep.offline_allowed)
 
     def test_tool_registry_filters_network_tools_in_offline_mode(self):
         from runtime.config.settings import RuntimeSettings
@@ -2537,6 +2659,8 @@ class ToolRegistryC4Tests(unittest.TestCase):
         web_search = registry.require_server("web_search")
         self.assertFalse(web_search.available)
         self.assertIn("offline", web_search.unavailable_reason)
+        self.assertFalse(registry.require_server("context7_docs").available)
+        self.assertFalse(registry.require_server("grep_code_search").available)
 
     def test_tool_registry_includes_workspace_mcp_as_untrusted_disabled(self):
         from runtime.config.settings import RuntimeSettings
@@ -2603,10 +2727,25 @@ class ToolRegistryC4Tests(unittest.TestCase):
         manager = MCPServerManager(PROJECT_ROOT, verbose=False)
 
         manager.validate_mcp_id("workspace_edit")
+        manager.validate_mcp_id("context7_docs")
+        manager.validate_mcp_id("grep_code_search")
         with self.assertRaisesRegex(KeyError, "not registered as an enabled core MCP"):
             manager.validate_mcp_id("project_tool")
         with self.assertRaisesRegex(KeyError, "not registered as an enabled core MCP"):
             manager.validate_mcp_id("unknown_tool")
+
+    def test_remote_mcp_servers_are_streamable_http_with_static_filters(self):
+        from mcp_servers import create_context7_docs_server, create_grep_code_search_server
+
+        context7 = create_context7_docs_server(PROJECT_ROOT)
+        grep = create_grep_code_search_server(PROJECT_ROOT)
+
+        context7_params = vars(context7.params) if hasattr(context7.params, "__dict__") else context7.params
+        grep_params = vars(grep.params) if hasattr(grep.params, "__dict__") else grep.params
+        self.assertEqual(context7_params["url"], "https://mcp.context7.com/mcp")
+        self.assertEqual(grep_params["url"], "https://mcp.grep.app")
+        self.assertIn("context7", context7.name)
+        self.assertIn("grep", grep.name)
 
 
 class RuntimeNoiseTests(unittest.TestCase):
@@ -4952,6 +5091,27 @@ class SoloModeTests(unittest.TestCase):
 
         self.assertNotIn("web_search", mcp_ids)
 
+    def test_solo_selects_remote_mcp_for_context7_and_grep_requests(self):
+        from runtime.modes.solo import _solo_mcp_ids_for_input
+        from runtime.config.settings import RuntimeSettings
+
+        settings = RuntimeSettings(privacy_mode="cloud_allowed")
+        context_ids = _solo_mcp_ids_for_input("Use Context7 to query FastAPI docs", settings)
+        grep_ids = _solo_mcp_ids_for_input("Search GitHub code snippets with Grep by Vercel", settings)
+
+        self.assertIn("context7_docs", context_ids)
+        self.assertIn("grep_code_search", grep_ids)
+
+    def test_solo_offline_filters_remote_mcp_tools(self):
+        from runtime.modes.solo import _solo_mcp_ids_for_input
+        from runtime.config.settings import RuntimeSettings
+
+        settings = RuntimeSettings(privacy_mode="offline")
+        mcp_ids = _solo_mcp_ids_for_input("Use Context7 and Grep by Vercel to search GitHub code", settings)
+
+        self.assertNotIn("context7_docs", mcp_ids)
+        self.assertNotIn("grep_code_search", mcp_ids)
+
 
 class PlannerSchemaN3Tests(unittest.TestCase):
     def test_parse_planner_result_supports_task_execution_contract_fields(self):
@@ -5799,6 +5959,19 @@ class FailureMemoryTests(unittest.TestCase):
 
 
 class CatalogRefreshTests(unittest.TestCase):
+    def test_mcp_catalog_builder_keeps_hosted_remote_mcp_entries(self):
+        from catalog_system.refresher import build_mcp_catalog, build_skill_catalog
+
+        mcp_catalog = build_mcp_catalog(PROJECT_ROOT)
+        mcp_ids = {item["id"] for item in mcp_catalog["mcp_servers"]}
+        self.assertIn("context7_docs", mcp_ids)
+        self.assertIn("grep_code_search", mcp_ids)
+
+        skill_catalog = build_skill_catalog(PROJECT_ROOT)
+        project_explorer = next(item for item in skill_catalog["skills"] if item["id"] == "project_explorer")
+        self.assertIn("context7_docs", project_explorer["allowed_mcp"])
+        self.assertIn("grep_code_search", project_explorer["allowed_mcp"])
+
     def test_skill_catalog_discovers_added_skill_folder(self):
         from catalog_system.refresher import build_skill_catalog
 
@@ -6554,6 +6727,36 @@ class ModelBackendPrivacyTests(unittest.TestCase):
         validation = validate_plan(plan, privacy_policy=PrivacyPolicy.from_env())
         self.assertTrue(validation.valid, validation.errors)
         self.assertTrue(any("offline" in warning and "web_search" in warning for warning in validation.warnings))
+
+    def test_offline_remote_mcp_warns_without_blocking_local_model_plan(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from planning.plan_validator import validate_plan
+        from runtime.safety.privacy import PrivacyPolicy
+
+        os.environ["AGENTS_PRIVACY_MODE"] = "offline"
+        os.environ["MODEL_LOCAL_BASE_URL"] = "http://localhost:11434/v1"
+        os.environ["MODEL_LOCAL_MODEL"] = "qwen3:8b"
+        os.environ["MODEL_LOCAL_BACKEND"] = "ollama"
+
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="user explicitly asked for remote MCP docs",
+            refined_request="use context7 and grep",
+            tasks=[
+                PlannedTask(
+                    id="remote",
+                    title="Remote lookup",
+                    instruction="Use public remote MCP lookup.",
+                    skill_id="project_explorer",
+                    model="local_model",
+                    mcp=["context7_docs", "grep_code_search"],
+                )
+            ],
+        )
+        validation = validate_plan(plan, privacy_policy=PrivacyPolicy.from_env())
+        self.assertTrue(validation.valid, validation.errors)
+        self.assertTrue(any("context7_docs" in warning for warning in validation.warnings))
+        self.assertTrue(any("grep_code_search" in warning for warning in validation.warnings))
 
     def test_offline_web_search_can_be_blocked_by_policy(self):
         from planning.planner_schema import PlannedTask, PlannerResult
@@ -7469,6 +7672,10 @@ class LocalModelPlannerCompatibilityTests(unittest.TestCase):
             "MODEL_LOCAL_BACKEND",
             "MODEL_LOCAL_DISPLAY_NAME",
             "MODEL_LOCAL_PROVIDER",
+            "MODEL_CLOUD_API_KEY",
+            "MODEL_CLOUD_BASE_URL",
+            "MODEL_CLOUD_MODEL",
+            "MODEL_CLOUD_BACKEND",
         ]:
             os.environ.pop(key, None)
 
@@ -7548,6 +7755,120 @@ class LocalModelPlannerCompatibilityTests(unittest.TestCase):
         self.assertEqual(plan.tasks[0].model, "local_model")
         validation = validate_plan(plan, privacy_policy=PrivacyPolicy.from_env())
         self.assertTrue(validation.valid, validation.errors)
+
+    def test_explicit_context7_and_grep_requests_are_promoted_to_remote_mcp_task(self):
+        from planning.planner_schema import parse_planner_result
+
+        os.environ["AGENTS_PRIVACY_MODE"] = "cloud_allowed"
+        os.environ["MODEL_CLOUD_API_KEY"] = "cloud-key"
+        os.environ["MODEL_CLOUD_BASE_URL"] = "https://api.example.com/v1"
+        os.environ["MODEL_CLOUD_MODEL"] = "tool-model"
+        os.environ["MODEL_CLOUD_BACKEND"] = "openai_compatible"
+
+        plan = parse_planner_result(
+            '{"route_type":"direct_answer","reason":"simple","refined_request":"Use Context7 and Grep by Vercel"}',
+            fallback_user_input="Use Context7 docs for FastAPI and search GitHub code snippets with Grep by Vercel.",
+        )
+
+        self.assertEqual(plan.route_type, "single_agent")
+        self.assertEqual(plan.tasks[0].skill_id, "project_explorer")
+        self.assertIn("context7_docs", plan.tasks[0].mcp)
+        self.assertIn("grep_code_search", plan.tasks[0].mcp)
+        self.assertNotIn("workspace_edit", plan.tasks[0].mcp)
+
+    def test_remote_lookup_constraints_are_applied_per_task(self):
+        from planning.planner_schema import parse_planner_result
+
+        os.environ["AGENTS_PRIVACY_MODE"] = "cloud_allowed"
+        os.environ["MODEL_CLOUD_API_KEY"] = "cloud-key"
+        os.environ["MODEL_CLOUD_BASE_URL"] = "https://api.example.com/v1"
+        os.environ["MODEL_CLOUD_MODEL"] = "tool-model"
+        os.environ["MODEL_CLOUD_BACKEND"] = "openai_compatible"
+
+        raw_plan = json.dumps(
+            {
+                "route_type": "multi_agent",
+                "reason": "parallel remote lookup",
+                "refined_request": "Use Context7 and Grep by Vercel",
+                "needs_synthesis": True,
+                "synthesis_instruction": "Combine.",
+                "tasks": [
+                    {
+                        "id": "grep",
+                        "title": "Use Grep by Vercel",
+                        "instruction": "Search GitHub code snippets.",
+                        "skill_id": "project_explorer",
+                        "model": "cloud_model",
+                        "mcp": ["context7_docs", "grep_code_search"],
+                    },
+                    {
+                        "id": "context7",
+                        "title": "Use Context7",
+                        "instruction": "Query library docs.",
+                        "skill_id": "project_explorer",
+                        "model": "cloud_model",
+                        "mcp": ["context7_docs", "grep_code_search"],
+                    },
+                ],
+            }
+        )
+
+        plan = parse_planner_result(raw_plan, fallback_user_input="Use Context7 and Grep by Vercel.")
+
+        self.assertEqual(plan.tasks[0].mcp, ["grep_code_search"])
+        self.assertEqual(plan.tasks[1].mcp, ["context7_docs"])
+
+    def test_internal_final_synthesizer_task_is_converted_to_synthesis_step(self):
+        from planning.plan_validator import validate_plan
+        from planning.planner_schema import parse_planner_result
+
+        os.environ["AGENTS_PRIVACY_MODE"] = "cloud_allowed"
+        os.environ["MODEL_CLOUD_API_KEY"] = "cloud-key"
+        os.environ["MODEL_CLOUD_BASE_URL"] = "https://api.example.com/v1"
+        os.environ["MODEL_CLOUD_MODEL"] = "tool-model"
+        os.environ["MODEL_CLOUD_BACKEND"] = "openai_compatible"
+
+        raw_plan = json.dumps(
+            {
+                "route_type": "multi_agent",
+                "reason": "needs summary",
+                "refined_request": "compare two counts",
+                "tasks": [
+                    {
+                        "id": "a",
+                        "title": "Count catalog",
+                        "instruction": "Count catalog.",
+                        "skill_id": "project_explorer",
+                        "model": "cloud_model",
+                        "mcp": ["project_filesystem_readonly"],
+                    },
+                    {
+                        "id": "b",
+                        "title": "Count readme",
+                        "instruction": "Count readme.",
+                        "skill_id": "project_explorer",
+                        "model": "cloud_model",
+                        "mcp": ["project_filesystem_readonly"],
+                    },
+                    {
+                        "id": "summary",
+                        "title": "Summarize",
+                        "instruction": "Compare counts.",
+                        "skill_id": "final_synthesizer",
+                        "model": "cloud_model",
+                        "mcp": [],
+                        "depends_on": ["a", "b"],
+                    },
+                ],
+            }
+        )
+
+        plan = parse_planner_result(raw_plan, fallback_user_input="compare two counts")
+
+        self.assertEqual([task.skill_id for task in plan.tasks], ["project_explorer", "project_explorer"])
+        self.assertTrue(plan.needs_synthesis)
+        self.assertIn("Compare counts", plan.synthesis_instruction)
+        self.assertTrue(validate_plan(plan).valid)
 
     def test_tool_task_avoids_local_model_without_tool_support_when_cloud_allowed(self):
         from planning.planner_schema import parse_planner_result

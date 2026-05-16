@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 
 PRIVACY_MODES = {"offline", "local_first", "cloud_allowed"}
-NETWORK_MCP_IDS = {"web_search"}
+NETWORK_MCP_IDS = {"web_search", "context7_docs", "grep_code_search"}
 CLOUD_BACKENDS = {"openai", "openai_compatible"}
 LOCAL_BACKENDS = {"ollama", "llama_cpp"}
 OFFLINE_NETWORK_POLICY = {"warn", "block"}

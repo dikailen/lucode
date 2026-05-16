@@ -51,6 +51,76 @@ def _can_fast_path_git_status(task) -> bool:
     return wants_status and not asks_commit
 
 
+def _can_fast_path_mcp_catalog_count(task) -> bool:
+    text = f"{task.title}\n{task.instruction}".lower()
+    wants_count = any(marker in text for marker in ["count", "统计", "数量"])
+    return "mcp_catalog.json" in text and wants_count and not getattr(task, "write_intent", None)
+
+
+def _can_fast_path_readme_mcp_count(task) -> bool:
+    text = f"{task.title}\n{task.instruction}".lower()
+    wants_count = any(marker in text for marker in ["count", "统计", "数量"])
+    return "readme" in text and "mcp" in text and wants_count and not getattr(task, "write_intent", None)
+
+
+def _run_mcp_catalog_count_fast_path(project_root: Path, task) -> str:
+    catalog_path = project_root / "mcp_catalog.json"
+    if not catalog_path.exists():
+        catalog_path = project_root / "catalogs" / "mcp_catalog.json"
+    payload = json.loads(catalog_path.read_text(encoding="utf-8"))
+    servers = payload.get("mcp_servers") or []
+    output = (
+        f"mcp_catalog.json 中共有 {len(servers)} 个 MCP 服务器。\n"
+        "服务器 ID：" + ", ".join(str(item.get("id") or "") for item in servers if item.get("id"))
+    )
+    _log_runtime_fast_path(
+        project_root,
+        tool="mcp_catalog_count",
+        action="count_mcp_servers",
+        task=task,
+        params={"task_id": getattr(task, "id", ""), "path": str(catalog_path), "count": len(servers)},
+        status="success",
+        result_summary=output,
+    )
+    return output
+
+
+def _run_readme_mcp_count_fast_path(project_root: Path, task) -> str:
+    readme_path = project_root / "README.md"
+    text = readme_path.read_text(encoding="utf-8")
+    count = 0
+    ids = []
+    in_section = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("### ") and "MCP" in stripped and "工具服务器" in stripped:
+            in_section = True
+            continue
+        if in_section and stripped.startswith("### "):
+            break
+        if in_section and stripped.startswith("| `"):
+            parts = stripped.split("|")
+            if len(parts) >= 2:
+                server_id = parts[1].strip().strip("`")
+                if server_id and server_id != "MCP 服务器":
+                    ids.append(server_id)
+                    count += 1
+    output = (
+        f"README.md 的 MCP 工具服务器章节列出 {count} 个 MCP 服务器。\n"
+        "服务器 ID：" + ", ".join(ids)
+    )
+    _log_runtime_fast_path(
+        project_root,
+        tool="readme_mcp_count",
+        action="count_readme_mcp_servers",
+        task=task,
+        params={"task_id": getattr(task, "id", ""), "path": str(readme_path), "count": count},
+        status="success",
+        result_summary=output,
+    )
+    return output
+
+
 def _run_git_status_fast_path(project_root: Path, task) -> str:
     print("执行优化：git 只读状态查询直接调用 git status，避免模型二次返场。")
     result = subprocess.run(

@@ -13,6 +13,7 @@ from mcp.server.fastmcp import FastMCP
 
 DEFAULT_TIMEOUT = int(os.environ.get("WEB_SEARCH_TIMEOUT_SECONDS", "15"))
 DEFAULT_MAX_RESULTS = int(os.environ.get("WEB_SEARCH_MAX_RESULTS", "5"))
+DEFAULT_GITHUB_RESULTS = int(os.environ.get("WEB_SEARCH_GITHUB_RESULTS", "5"))
 OFFICIAL_DOC_HOSTS = {
     "platform.openai.com",
     "developers.openai.com",
@@ -155,6 +156,60 @@ class SerpApiSearchProvider(SearchProvider):
         return SearchProviderResponse(self.provider_id, self.provider_label, results=results)
 
 
+class GitHubRepositorySearchProvider(SearchProvider):
+    provider_id = "github_repositories"
+    provider_label = "GitHub Repository Search API"
+
+    def search(self, query: str, max_results: int, timeout: int) -> SearchProviderResponse:
+        params = {
+            "q": _github_repo_query(query),
+            "sort": "stars",
+            "order": "desc",
+            "per_page": max(1, min(int(max_results or DEFAULT_GITHUB_RESULTS), 10)),
+        }
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "lucode-web-search",
+        }
+        token = str(os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_API_TOKEN") or "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        response = requests.get(
+            "https://api.github.com/search/repositories",
+            params=params,
+            headers=headers,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        results = []
+        for item in payload.get("items", []):
+            full_name = item.get("full_name") or item.get("name") or ""
+            stars = item.get("stargazers_count")
+            language = item.get("language") or "unknown"
+            pushed_at = item.get("pushed_at") or ""
+            description = item.get("description") or ""
+            meta = []
+            if isinstance(stars, int):
+                meta.append(f"{stars} stars")
+            if language:
+                meta.append(str(language))
+            if pushed_at:
+                meta.append(f"updated {pushed_at[:10]}")
+            snippet = f"{description} ({', '.join(meta)})" if meta else description
+            results.append(
+                {
+                    "title": full_name,
+                    "url": item.get("html_url") or "",
+                    "snippet": snippet,
+                    "stars": stars,
+                    "language": language,
+                    "updated_at": pushed_at,
+                }
+            )
+        return SearchProviderResponse(self.provider_id, self.provider_label, results=results)
+
+
 def _get_search_provider() -> SearchProvider:
     provider_id = str(os.environ.get("WEB_SEARCH_PROVIDER") or "duckduckgo_html").strip().lower()
     if provider_id in {"", "duckduckgo", "duckduckgo_html", "ddg"}:
@@ -192,6 +247,101 @@ def _browser_headers() -> dict[str, str]:
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
         )
     }
+
+
+def _github_repo_query(query: str) -> str:
+    cleaned = str(query or "").strip()
+    replacements = [
+        ("site:github.com", ""),
+        ("github.com", ""),
+        ("GitHub", ""),
+        ("github", ""),
+        ("popular", ""),
+        ("best", ""),
+        ("awesome", ""),
+        ("热门", ""),
+        ("排行", ""),
+        ("搜索", ""),
+        ("链接", ""),
+        ("仓库", ""),
+        ("repository", ""),
+        ("repositories", ""),
+        ("repo", ""),
+        ("repos", ""),
+    ]
+    for old, new in replacements:
+        cleaned = cleaned.replace(old, new)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        cleaned = "claude code skill mcp"
+    return f"{cleaned} in:name,description,readme"
+
+
+def _looks_like_github_repository_search(query: str, domains: list[str]) -> bool:
+    text = str(query or "").lower()
+    if any(domain in {"github.com", "github"} for domain in domains):
+        return True
+    githubish = "github" in text or "github.com" in text
+    repoish = any(word in text for word in ["repo", "repository", "repositories", "stars", "popular", "awesome"])
+    chinese_repoish = any(word in str(query or "") for word in ["热门", "仓库", "排行", "星标", "收藏"])
+    mcp_or_skill = any(word in text for word in ["skill", "skills", "mcp", "plugin", "plugins", "claude", "opencode", "codex"])
+    return (githubish and (repoish or chinese_repoish or mcp_or_skill)) or (chinese_repoish and mcp_or_skill)
+
+
+def _meaningful_search_terms(query: str) -> list[str]:
+    text = str(query or "").lower()
+    raw_terms = re.findall(r"[a-z0-9][a-z0-9_\-]{1,}|\b[a-z]\b", text)
+    stop_words = {
+        "github",
+        "github.com",
+        "popular",
+        "best",
+        "awesome",
+        "repository",
+        "repositories",
+        "repo",
+        "repos",
+        "search",
+        "link",
+        "links",
+        "top",
+        "hot",
+    }
+    terms = []
+    for term in raw_terms:
+        normalized = term.strip("-_")
+        if not normalized or normalized in stop_words:
+            continue
+        if normalized not in terms:
+            terms.append(normalized)
+    chinese_terms = []
+    original = str(query or "")
+    for term in ["claude", "opencode", "codex", "skill", "skills", "mcp", "插件", "技能"]:
+        if term in original.lower() and term not in terms and term not in chinese_terms:
+            chinese_terms.append(term)
+    return [*terms, *chinese_terms]
+
+
+def _github_relevance_score(query: str, title: str, url: str, snippet: str = "", stars=None) -> int:
+    terms = _meaningful_search_terms(query)
+    if not terms:
+        return 0
+    title_url = f"{title} {url}".lower()
+    body = str(snippet or "").lower()
+    score = 0
+    for term in terms:
+        if term in title_url:
+            score += 40
+        elif term in body:
+            score += 12
+        else:
+            score -= 20
+    try:
+        if stars is not None:
+            score += min(int(stars) // 1000, 30)
+    except (TypeError, ValueError):
+        pass
+    return score
 
 
 def _now_iso() -> str:
@@ -282,7 +432,16 @@ def _domain_allowed(url: str, allowed_domains: list[str]) -> bool:
     return any(host == domain or host.endswith("." + domain) for domain in allowed_domains)
 
 
-def _result_score(query: str, url: str, title: str, domains: list[str]) -> int:
+def _result_score(
+    query: str,
+    url: str,
+    title: str,
+    domains: list[str],
+    *,
+    snippet: str = "",
+    source_provider: str = "",
+    stars=None,
+) -> int:
     host = urlparse(url).netloc.lower()
     path = urlparse(url).path.lower()
     text = f"{query} {title} {url}".lower()
@@ -315,6 +474,8 @@ def _result_score(query: str, url: str, title: str, domains: list[str]) -> int:
         score += 25
     if "openai-agents-python" in url or "agents sdk" in title.lower():
         score += 20
+    if source_provider == "github_repositories":
+        score += _github_relevance_score(query, title, url, snippet=snippet, stars=stars)
 
     return score
 
@@ -399,29 +560,51 @@ def web_search(query: str, max_results: int = DEFAULT_MAX_RESULTS, domains: list
             indent=2,
         )
 
+    provider_responses = [provider_response]
+    github_error = ""
+    if _looks_like_github_repository_search(query, domains):
+        try:
+            github_response = GitHubRepositorySearchProvider().search(
+                query,
+                max_results=max(max_results * 3, DEFAULT_GITHUB_RESULTS),
+                timeout=DEFAULT_TIMEOUT,
+            )
+            provider_responses.insert(0, github_response)
+        except requests.RequestException as exc:
+            github_error = f"github repository search failed: {exc}"
+
     seen = set()
     candidates = []
-    for item in provider_response.results:
-        url = item.get("url", "")
-        if url in seen or not _domain_allowed(url, domains):
-            continue
-        seen.add(url)
-        title = item.get("title", "")
-        tier = _source_tier(query, url, title)
-        candidates.append(
-            {
-                **item,
-                "url": url,
-                "title": title,
-                "source_tier": tier,
-                "source_score": _tier_score(tier),
-                "source_provider": provider_response.provider_id,
-                "retrieved_at": retrieved_at,
-            }
-        )
+    for response_item in provider_responses:
+        for item in response_item.results:
+            url = item.get("url", "")
+            if url in seen or not _domain_allowed(url, domains):
+                continue
+            seen.add(url)
+            title = item.get("title", "")
+            tier = _source_tier(query, url, title)
+            candidates.append(
+                {
+                    **item,
+                    "url": url,
+                    "title": title,
+                    "source_tier": tier,
+                    "source_score": _tier_score(tier),
+                    "source_provider": response_item.provider_id,
+                    "retrieved_at": retrieved_at,
+                }
+            )
 
     candidates.sort(
-        key=lambda item: _result_score(query, item["url"], item["title"], domains),
+        key=lambda item: _result_score(
+            query,
+            item["url"],
+            item["title"],
+            domains,
+            snippet=item.get("snippet", ""),
+            source_provider=item.get("source_provider", ""),
+            stars=item.get("stars"),
+        ),
         reverse=True,
     )
     results = candidates[:max_results]
@@ -432,11 +615,16 @@ def web_search(query: str, max_results: int = DEFAULT_MAX_RESULTS, domains: list
             "domains": domains,
             "source_provider": provider_response.provider_id,
             "source_provider_label": provider_response.provider_label,
+            "auxiliary_providers": [
+                {"id": item.provider_id, "label": item.provider_label}
+                for item in provider_responses
+                if item.provider_id != provider_response.provider_id
+            ],
             "retrieved_at": retrieved_at,
             "results": results,
             "source_priority": "official_docs > official_github > documentation > package_registry > github > general > community",
             "note": "Search results should be verified by opening primary sources when precision matters.",
-            "error": provider_response.error,
+            "error": provider_response.error or github_error,
         },
         ensure_ascii=False,
         indent=2,
