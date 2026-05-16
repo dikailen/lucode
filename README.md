@@ -1,4 +1,4 @@
-# Lucode
+# Lucode V1.0
 
 ## 快速开始
 
