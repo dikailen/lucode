@@ -590,6 +590,7 @@ class RuntimeCommandSession:
         self.console = console
         self.timeout_seconds = timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
         self._approval_future = None
+        self._approval_requested = None
 
     async def run(self, work_coro):
         if callable(work_coro):
@@ -597,6 +598,10 @@ class RuntimeCommandSession:
         work_task = asyncio.create_task(work_coro)
         interactive = bool(getattr(self.console, "interactive", False))
         input_task = asyncio.create_task(self.console.read_runtime_line()) if interactive else None
+        approval_task = None
+        if interactive:
+            self._approval_requested = asyncio.Event()
+            approval_task = asyncio.create_task(self._approval_requested.wait())
         timeout_task = (
             asyncio.create_task(asyncio.sleep(self.timeout_seconds)) if self.timeout_seconds is not None else None
         )
@@ -613,12 +618,25 @@ class RuntimeCommandSession:
                 wait_set = {work_task}
                 if input_task is not None:
                     wait_set.add(input_task)
+                if approval_task is not None:
+                    wait_set.add(approval_task)
                 if timeout_task is not None:
                     wait_set.add(timeout_task)
                 done, _ = await asyncio.wait(
                     wait_set,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+
+                if approval_task is not None and approval_task in done:
+                    if self._approval_requested is not None:
+                        self._approval_requested.clear()
+                    if self._approval_future is not None and not self._approval_future.done():
+                        if input_task is not None and not input_task.done():
+                            input_task.cancel()
+                            await asyncio.gather(input_task, return_exceptions=True)
+                        input_task = asyncio.create_task(self._read_approval_line())
+                    approval_task = asyncio.create_task(self._approval_requested.wait())
+                    continue
 
                 if work_task in done:
                     if timeout_task is not None and not timeout_task.done():
@@ -662,6 +680,9 @@ class RuntimeCommandSession:
                 if input_task is not None:
                     input_task = asyncio.create_task(self.console.read_runtime_line())
         finally:
+            if approval_task and not approval_task.done():
+                approval_task.cancel()
+                await asyncio.gather(approval_task, return_exceptions=True)
             if timeout_task and not timeout_task.done():
                 timeout_task.cancel()
                 await asyncio.gather(timeout_task, return_exceptions=True)
@@ -681,11 +702,24 @@ class RuntimeCommandSession:
 
         loop = asyncio.get_running_loop()
         self._approval_future = loop.create_future()
+        if self._approval_requested is not None:
+            self._approval_requested.set()
         try:
             answer = await self._approval_future
             return sanitize_text(answer).strip().lower()
         finally:
             self._approval_future = None
+
+    async def _read_approval_line(self) -> str:
+        read_choice_line = getattr(self.console, "read_choice_line", None)
+        if callable(read_choice_line):
+            return await read_choice_line(
+                "审批> ",
+                _approval_choices(),
+                bottom_toolbar="↑↓ 选择，Enter 确认；y/n 可直接输入；/stop 中断本轮",
+                reserve_space_for_menu=7,
+            )
+        return await self.console.read_runtime_line()
 
 
 async def _cancel_task_without_blocking(task: asyncio.Task, timeout: float = 2.0) -> bool:
@@ -707,6 +741,16 @@ async def _cancel_task_without_blocking(task: asyncio.Task, timeout: float = 2.0
     for pending_task in pending:
         pending_task.add_done_callback(_consume_late_result)
     return False
+
+
+def _approval_choices() -> list[ConsoleChoice]:
+    return [
+        ConsoleChoice("y", "允许一次", "只批准当前这一次工具调用"),
+        ConsoleChoice("n", "拒绝", "不执行当前工具调用"),
+        ConsoleChoice("session", "本会话允许同一工具", "后续同一工具自动批准"),
+        ConsoleChoice("rule", "本会话允许同类工具", "同类工具本轮自动批准"),
+        ConsoleChoice("edit", "让模型改方案", "不执行，要求模型换更安全方案"),
+    ]
 
 
 def _is_stop_command(user_input: str) -> bool:

@@ -4515,6 +4515,54 @@ class RuntimeInterruptTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.final_output, "answer=yes")
 
+    async def test_runtime_session_uses_choice_panel_for_approval_input(self):
+        from main import RuntimeCommandSession
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.runtime_reader_cancelled = False
+                self.choice_prompt = ""
+                self.choice_commands = []
+                self.choice_toolbar = ""
+
+            async def read_runtime_line(self):
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    self.runtime_reader_cancelled = True
+                    raise
+
+            async def read_choice_line(self, prompt, choices, *, bottom_toolbar="", reserve_space_for_menu=10):
+                self.choice_prompt = prompt
+                self.choice_commands = [choice.command for choice in choices]
+                self.choice_toolbar = bottom_toolbar
+                return "session"
+
+            def defer(self, line):
+                raise AssertionError(f"unexpected deferred line: {line}")
+
+        console = FakeConsole()
+        session = RuntimeCommandSession(console)
+
+        async def approval_turn():
+            answer = await session.request_approval("是否批准？")
+            return f"answer={answer}"
+
+        result = await session.run(approval_turn())
+
+        self.assertEqual(result.final_output, "answer=session")
+        self.assertTrue(console.runtime_reader_cancelled)
+        self.assertEqual(console.choice_prompt, "审批> ")
+        self.assertIn("y", console.choice_commands)
+        self.assertIn("n", console.choice_commands)
+        self.assertIn("session", console.choice_commands)
+        self.assertIn("rule", console.choice_commands)
+        self.assertIn("edit", console.choice_commands)
+        self.assertIn("Enter", console.choice_toolbar)
+        self.assertIn("y/n", console.choice_toolbar)
+
     async def test_runtime_session_times_out_and_cancels_turn(self):
         from main import RuntimeCommandSession
 
