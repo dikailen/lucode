@@ -1,243 +1,349 @@
-# Lucode V1.0
+# Lucode V1.2
 
-## 快速开始
+Lucode 是一个中文优先的终端代码代理。它把多模型、多 Agent、Skill、MCP、CLI 命令和本地项目上下文放到同一个工作流里，目标是让开发者在任意项目目录中运行 `lucode`，就能获得类似 Claude Code / OpenCode 的终端协作体验，同时保留更清晰的中文配置、中文审批和多脑模型调音能力。
 
-```powershell
-conda activate agents-demo
-python -m pip install -e .
-lucode doctor
-lucode run "Lucode OK"
-```
-
-如果通过 npm 入口启动，但实际运行依赖 conda 里的 Python，请设置 `LUCODE_PYTHON`：
-
-```powershell
-$env:LUCODE_PYTHON = "D:\develop\Data_anaconda2024\envs\agents-demo\python.exe"
-lucode doctor
-```
-
-> 中文优先、本地优先、模型中立的多 Agent 终端编码助手
-
-Lucode 是一个运行在终端里的多 Agent 编码代理，支持单 Agent / 串行多 Agent / 并行多 Agent 三种执行模式，内置 10 个 MCP 工具服务器、8 个技能模块、模型能力探测、Git 检查点回滚、SHA256 文件安全校验等特性。
-
-> **⚠️ 当前版本：V1.0 实验版**
->
-> 本项目处于早期实验阶段，诸多功能模块和代码结构仍在持续迭代完善中。部分特性可能不稳定，接口和行为在后续版本中可能发生变更。欢迎试用和反馈，但不建议直接用于生产环境。
-
----
+> 当前 V1.2 是产品化推进版本：核心链路已经可用，但仍建议先在个人项目或小范围测试环境中使用。公开分发前还需要继续完善原生 Provider、错误恢复、沙箱隔离和文档。
 
 ## 核心特点
 
-### 三脑架构
+### 中文优先的终端体验
 
-| 角色 | 说明 |
-|------|------|
-| **前置优化脑** (Query Refiner) | 把用户原始问题整理清晰，可选开关 |
-| **主脑** (Orchestrator Planner) | 读取技能/MCP/模型目录，生成动态执行计划 |
-| **汇总脑** (Final Synthesizer) | 合并多 Agent 执行结果，输出连贯回答 |
+- 启动页使用蓝色边框仪表盘，显示当前项目、模式、主脑、执行脑、隐私、工具和备份状态。
+- Slash 命令支持上下键、回车和鼠标选择；异常终端会自动回退到普通文本输入。
+- `/connect`、`/models`、审批面板和主要配置页都尽量使用中文说明，降低新用户理解成本。
 
 ### 三种执行模式
 
-- **Solo** — 默认模式，单 Agent 携带 MCP 工具（读写文件、代码定位、命令执行、Git、联网搜索），智能匹配工具
-- **Serial** — 多 Agent 串行模式，主脑规划任务 → 专家 Agent 按依赖顺序执行 → 汇总脑整合
-- **Full** — 多 Agent 并行模式，在 Serial 基础上自动检测写冲突，安全的并行任务同时执行
+| 模式 | 适合场景 | 行为 |
+| --- | --- | --- |
+| `solo` | 小任务、单文件阅读、快速问答 | 单 Agent 直接执行，响应最快 |
+| `serial` | 需要逐步分析和校验的任务 | 多 Agent 串行推进，先分析再执行 |
+| `full` | 复杂项目审查、并行分析 | 多 Agent 并行拆解，再汇总结论 |
 
-### 模型中立
+在聊天内可用 `/mode solo`、`/mode serial`、`/mode full` 切换；切换后会重新显示欢迎仪表盘，方便确认当前状态。
 
-通过 OpenAI-compatible 协议统一接入，支持一行 `.env` 配置注册任意模型：
+### 多脑模型调音台
 
-- **云端**: DeepSeek、MiMo、DashScope (Qwen)、SiliconFlow、OpenRouter 等
-- **本地**: Ollama、llama.cpp / GGUF
-- **自建**: 任意 OpenAI-compatible 中转服务
+Lucode 把模型角色拆成四个脑位，用户可以按个人偏好单独配置：
 
-启动时自动探测本地模型的 tools/function calling 能力，缓存结果供下次使用。
+| 脑位 | 内部角色 | 用途 |
+| --- | --- | --- |
+| 前置优化脑 | `query_refiner` | 优化用户输入、澄清任务边界 |
+| 主脑规划脑 | `orchestrator` | 规划任务、拆解步骤、决定工具 |
+| 执行专家脑 | `executor` | 阅读文件、调用工具、执行子任务 |
+| 汇总脑 | `final_synthesizer` | 汇总多 Agent 结果、给出最终回答 |
 
-### 10 个 MCP 工具服务器
+输入 `/models` 会进入独立调音台，可以用上下键或鼠标选择脑位和模型；输入 `q` 或选择退出返回主聊天。也可以用命令方式设置：
 
-| MCP 服务器 | 功能 |
-|------------|------|
-| `project_filesystem_readonly` | 预算限制的只读文件系统访问 |
-| `skills_filesystem_readonly` | Skills 目录只读访问，用于创建和优化技能 |
-| `code_locator` | BM25 + AST 符号索引 + SQLite 调用图，精准定位代码 |
-| `workspace_edit` | 文件创建/写入/替换/补丁/删除，带 SHA256 安全校验 |
-| `safe_backup` | 删除前自动 zip 备份到隔离区 |
-| `command_runner` | 安全的本地命令执行（禁用 shell、内置拒绝列表） |
-| `git_tools` | Git status/diff/log/commit（commit 需用户审批） |
-| `web_search` | 联网搜索，结果按来源优先级排序：官方文档 > GitHub > 社区文章 |
-| `context7_docs` | Context7 官方远程 MCP，检索公开库文档和代码示例 |
-| `grep_code_search` | Vercel Grep 官方远程 MCP，搜索公开 GitHub 代码片段 |
+```bash
+/models select deepseek/deepseek-v4-pro deepseek/deepseek-v4-flash
+/models role orchestrator deepseek/deepseek-v4-pro
+/models brain 主脑 deepseek/deepseek-v4-flash
+/models brain reset
+```
 
-### 多层安全防护
+### Provider 连接向导
 
-- **SHA256 严格模式**: 修改文件前必须先读取并校验当前内容哈希，防止基于过期上下文覆盖
-- **Git 检查点回滚**: 每轮自动创建 Git checkpoint，支持 `/rollback` 一键回退
-- **权限策略**: 读/写/Shell/MCP 四级可配置权限（allow / ask / deny）
-- **隔离备份**: 所有删除文件自动 zip 备份到 `.agent_quarantine/`
-- **隐私模式**: `offline`（禁止云模型和联网）/ `local_first`（优先本地）/ `cloud_allowed`
-- **执行后审计**: 自动检查交付物是否符合计划，失败自动修复（最多 3 次）
+`/connect` 提供 Provider 连接和删除入口。内置预设包括：
 
-### 8 个技能模块
+- DeepSeek
+- OpenAI
+- OpenRouter
+- Qwen / DashScope
+- SiliconFlow
+- MiMo
+- Ollama / LM Studio / llama.cpp 本地服务
+- 自定义 OpenAI-compatible 中转
 
-每个技能是独立的 `SKILL.md` 文件夹，可扩展：
+自定义中转必须同时配置：
 
-| 技能 | 用途 |
-|------|------|
-| `jpc_now_skill` | Java/Python/C++ 代码开发、评审、重构 |
-| `humanizer_zh` | 中文文本去 AI 痕迹，拟人化润色 |
-| `project_explorer` | 项目结构分析与架构理解 |
-| `skill_creator` | 技能创建、修改和效果评估 |
-| `task_router` | 用户查询路由到专家 Agent |
-| `query_refiner` | 用户查询优化和意图澄清 |
-| `orchestrator_planner` | 动态规划（读取目录，生成任务图） |
-| `final_synthesizer` | 多 Agent 结果合成 |
+- Provider 名称
+- 官网或控制台地址 `homepage`
+- 真实请求地址 `base_url`
+- API key
+- 模型名
 
-### JSONL 会话持久化
+API key 保存到用户级 `~/.lucode/auth.json`，项目配置保存到当前项目的 `.lucode/config.toml`。README 不会要求用户把密钥写进仓库。
 
-- 追加式 JSONL 存储，支持断点恢复
-- `/resume last` 继续上次会话
-- `/resume <session_id>` 恢复指定会话
-- 会话自动记录 token 消耗、工具调用、模型选择
+### 模型能力探测 v2.3
 
----
+`/models probe` 会检查已配置模型的可用性，并把结果缓存到 `.agent_cache/model_capabilities.json`。当前探测范围包括：
+
+- API key 是否存在
+- `base_url` 是否可连接
+- 模型名是否可用
+- chat 是否可用
+- JSON 输出能力
+- tools / function calling 支持情况
+- stream 支持情况
+- 延迟估计
+- 上下文长度档位
+- 适合主脑、执行脑或汇总脑的推荐
+
+如果你刚改完 Provider、模型名或中转地址，建议运行：
+
+```bash
+/models probe force
+```
+
+探测结果是“运行时实测 + 厂商预设表 + 保守回退”的组合。部分厂商对 tools、JSON 或 stream 的错误提示不完全一致，所以结果可能需要通过强制探测或手动配置修正。
+
+### Skill、MCP 和 Slash 命令融合
+
+Lucode 会发现多种命令来源：
+
+- 内置命令，例如 `/status`、`/config`、`/diff`
+- 项目命令：`.lucode/commands/*.md`
+- 用户命令：`~/.lucode/commands/*.md`
+- Skill 命令：项目、用户和内置 `skills/*/SKILL.md`
+- MCP prompt 命令：来自 MCP catalog 的 prompt 定义
+
+输入 `/` 会出现命令菜单，左侧是命令，右侧是中文说明。输入 `/mo` 会过滤到模型相关命令。
+
+### JSONL 会话、恢复和上下文压缩
+
+- 会话保存在 `.lucode/sessions/*.jsonl`。
+- `/resume` 可以查看或恢复最近会话。
+- 当前版本使用轻量分级压缩：短期上下文优先保留最近对话，完整历史保留在 JSONL 中，后续可继续接语义压缩或知识图谱。
+
+### 审批、安全和审计
+
+Lucode 已经把危险命令分析从执行链里拆出来：
+
+- `CommandAnalyzer v2` 会给出 `allow`、`allow_limited`、`ask`、`sandbox_preview`、`deny` 决策。
+- 高风险命令如 `git reset --hard`、`git clean`、递归删除、发布命令会被直接拦截或要求审批。
+- 交互式审批支持上下键和鼠标选择；非交互环境回退到 `y` / `n`。
+- `/audit` 或 `/hooks` 可以查看最近工具审批和事件记录。
+
+### CLI 优先，MCP 兜底
+
+为了减少 token 消耗和等待时间，V1.2 已开始把部分只读任务走本地 fast path：
+
+- `git status`
+- `git diff`
+- `package.json` / `pyproject.toml` 摘要
+- JSON / TOML / YAML 配置摘要
+- README 与 MCP catalog 的数量统计类任务
+
+MCP 仍然作为兜底工具，用于外部文档、GitHub 代码搜索、复杂协议和模型需要工具上下文的任务。
 
 ## 快速开始
 
-### 环境要求
+### 1. 准备环境
 
-- Python >= 3.11
-- Git
-- [可选] Node.js（npm 入口包装器）
-- [可选] ripgrep（提升搜索效率，无 rg 则降级为 PowerShell 搜索）
-
-### 安装
+建议使用 Python 3.11+。如果你使用 conda，本项目测试环境名为 `agents-demo`：
 
 ```powershell
-# 使用 conda 环境
 conda activate agents-demo
 python -m pip install -e .
-
-# 验证安装
 lucode doctor
 ```
 
-### 配置模型
-
-复制 `.env.example` 为 `.env`，填入至少一个模型的 API Key：
-
-```env
-DEEPSEEK_API_KEY=sk-xxx
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-flash
-```
-
-支持一键注册多个模型、配置三脑模型优先级、本地模型等，详见 `.env.example` 注释。
-
-### 启动
+如果通过 npm wrapper 启动，可以指定当前 conda 环境里的 Python：
 
 ```powershell
-# 进入交互式终端
-lucode chat
+$env:LUCODE_PYTHON="D:\develop\Data_anaconda2024\envs\agents-demo\python.exe"
+npm link
+lucode doctor
+```
 
-# 一次性执行任务
-lucode run "解释这个项目的架构"
+`LUCODE_PYTHON` 的优先级高于系统 Python，适合避免“命令行找不到 openai-agents 依赖”的问题。
 
-# 初始化工作区
+### 2. 初始化项目
+
+在任意项目目录执行：
+
+```bash
 lucode init
 ```
 
----
+Lucode 会创建：
 
-## 命令参考
+```text
+.lucode/
+  config.toml
+  permissions.toml
+  skills/
+  mcp/
+  memory/
+  sessions/
+```
 
-### CLI 命令
+以后在这个目录或子目录运行 `lucode`，都会识别当前项目的 `.lucode` 配置。
 
-| 命令 | 说明 |
-|------|------|
-| `lucode chat` | 启动交互式终端 |
-| `lucode run "<任务>"` | 非交互执行一次任务 |
-| `lucode init` | 创建 `.lucode/` 工作区 |
-| `lucode doctor` | 检查环境状态 |
-| `lucode config` | 查看当前配置 |
-| `lucode model` | 查看模型优先级 |
-| `lucode mcp` | 查看 MCP 注册状态 |
-| `lucode session` | 查看会话列表 |
-| `lucode connect <provider>` | 连接并保存 Provider |
-| `lucode auth login/logout/list` | 管理凭据 |
+### 3. 连接模型
 
-### 交互终端命令
+推荐进入交互式连接向导：
 
-| 命令 | 说明 |
-|------|------|
-| `/mode solo\|serial\|full` | 切换执行模式 |
-| `/plan <查询>` | 预览执行计划（不执行） |
-| `/resume last\|<id>` | 恢复会话 |
-| `/rollback` | 回滚上一轮文件变更 |
-| `/status` | 查看当前状态 |
-| `/diff` | 查看变更摘要 |
-| `/new` | 开始新对话 |
+```bash
+lucode chat
+/connect
+```
 
----
+也可以直接用 CLI：
+
+```bash
+lucode connect deepseek --api-key <你的 key>
+lucode connect openai --api-key <你的 key>
+lucode connect my_proxy --custom --homepage https://proxy.example.com --base-url https://api.proxy.example.com/v1 --model gpt-5.2 --api-key <你的 key>
+```
+
+删除已保存 Provider 或模型：
+
+```bash
+/connect
+# 选择“删除模型/Provider”
+```
+
+删除时会二次确认，并清理 API key、Provider 配置和失效脑位引用。
+
+### 4. 开始使用
+
+交互式聊天：
+
+```bash
+lucode chat
+```
+
+非交互执行一次任务：
+
+```bash
+lucode run "解释这个项目的目录结构"
+```
+
+常用命令：
+
+```text
+/status              查看运行状态
+/config              查看当前配置
+/mode serial         切换执行模式
+/models              打开多脑模型调音台
+/models list         查看 Provider 模型列表
+/models probe force  强制重新探测模型能力
+/connect             打开 Provider 连接向导
+/skills              查看当前项目 Skills
+/skills_all          查看全部 Skills
+/mcp                 查看当前项目 MCP
+/mcp_all             查看全部 MCP
+/tools               查看核心工具
+/audit               查看工具审批审计
+/resume              恢复会话
+/new                 开始新对话
+/exit                退出
+```
 
 ## 项目结构
 
-```
-agents_demo/
-├── lucode/               # CLI 入口（chat、run、init、doctor 等）
-├── runtime/              # 核心运行时引擎
-│   ├── kernel/           # Shell ↔ Runtime 边界、执行策略
-│   ├── agent/            # Agent 运行器、审批流程
-│   ├── agents/           # Agent 工厂、SDK 封装、能力检测
-│   ├── config/           # 配置加载、模型配置、工作区发现
-│   ├── execution/        # 编排器：计划→执行→审计→修复
-│   ├── safety/           # 隐私、审计、检查点、权限、命令分析
-│   ├── context/          # 上下文压缩（规则/语义）
-│   ├── sessions/         # JSONL 会话存储
-│   ├── providers/        # OpenAI-compatible Provider 注册
-│   ├── tools/            # MCP 工具注册
-│   └── hooks/            # 工具生命周期事件
-├── catalog_system/       # 模型/技能/MCP 目录系统
-├── planning/             # 编排器规划系统
-├── mcp_servers/          # 7 个 MCP 服务器实现
-├── skills/               # 8 个技能模块（SKILL.md）
-├── catalogs/             # 自动生成的 JSON 目录
-├── tests/                # 回归测试
-├── bin/lucode.js         # npm CLI 入口包装器
-└── main.py               # 交互模式主入口
-```
+```text
+lucode/
+  entry.py              # lucode CLI 入口、子命令分发
+  shell/                # 交互式聊天循环、Slash 命令和输入体验
 
----
+runtime/
+  agents/               # Agent 工厂和模型角色
+  commands/             # Slash 命令注册、外部命令发现
+  config/               # Provider、模型调音台、工作区配置
+  context/              # 上下文压缩和会话注入
+  execution/            # 执行编排、fast path、动态任务路由
+  hooks/                # 工具事件和审计
+  kernel/               # 对外统一运行入口
+  memory/               # 失败记忆、checkpoint 等辅助状态
+  modes/                # solo / serial / full 兼容层
+  providers/            # Provider registry 和 OpenAI-compatible adapter
+  safety/               # 命令风险分析、审批策略
+  sessions/             # JSONL SessionStore
+  tools/                # MCP / 工具注册表
+  ui/                   # 欢迎页、面板、prompt_toolkit UI
+  workspace/            # .lucode 工作区发现
 
-## 配置
-
-### 工作区配置 (`.lucode/config.toml`)
-
-```toml
-mode = "solo"
-privacy = "local_first"
+catalog_system/         # catalog 刷新与生成逻辑
+catalogs/               # Provider / MCP / Skill / Model catalog
+mcp_servers/            # 内置 MCP 服务
+skills/                 # 内置 Skills
+planning/               # 内置规划资源
+bin/lucode.js           # npm wrapper
+tests/                  # 回归测试
+main.py                 # 本地开发入口
 ```
 
-### 权限配置 (`.lucode/permissions.toml`)
+## 配置和本地文件
 
-```toml
-[read]
-default = "allow"
-deny = [".env", "**/*.pem"]
+建议提交到 Git：
 
-[write]
-default = "ask"
-deny = [".git/**"]
+- `lucode/`
+- `runtime/`
+- `catalog_system/`
+- `catalogs/` 中稳定的预设文件
+- `mcp_servers/`
+- `skills/`
+- `planning/`
+- `tests/`
+- `README.md`
+- `pyproject.toml`
+- `package.json`
+- `.env.example`
 
-[shell]
-default = "ask"
-deny = ["git reset --hard", "git clean", "rm -rf"]
+不建议提交：
+
+- `.env`
+- `.lucode/`
+- `.agent_cache/`
+- `.agent_quarantine/`
+- `.agent_runs/`
+- `.pytest_cache/`
+- `.idea/`
+- `__pycache__/`
+- `lucode.egg-info/`
+- `package-lock.json`
+- 本地计划文档和临时评审文档
+
+## MCP 工具服务器
+
+| `MCP 工具服务器` | 说明 |
+| --- | --- |
+| `project_filesystem_readonly` | 只读项目文件访问 |
+| `skills_filesystem_readonly` | 只读 Skill 文件访问 |
+| `code_locator` | 代码定位和索引 |
+| `workspace_edit` | 受审批保护的工作区编辑 |
+| `safe_backup` | 修改前备份 |
+| `command_runner` | 受审批保护的命令执行 |
+| `git_tools` | Git 状态、diff、log 和受控 commit |
+| `web_search` | 网络搜索和网页读取 |
+| `context7_docs` | 第三方库文档查询 |
+| `grep_code_search` | GitHub 代码片段搜索 |
+
+## 冲突点和边界
+
+1. **npm 包还不是完全自包含二进制。** 当前 `bin/lucode.js` 会寻找 `LUCODE_PYTHON`、conda、venv 或系统 Python。后续产品化可以继续做打包器，降低用户环境依赖。
+2. **Provider 以 OpenAI-compatible 为主。** DeepSeek、OpenAI、OpenRouter、DashScope、SiliconFlow、MiMo、自定义中转和本地服务已经能走统一 adapter；Anthropic、Gemini 等原生 SDK 适配仍是后续任务。
+3. **模型能力探测不是绝对真理。** 不同厂商对 tools、JSON、stream 和超时错误的表达不一致，探测结果可能需要 `/models probe force` 或手动覆盖。
+4. **CLI fast path 当前只覆盖只读任务。** 写入、删除、发布、Git 历史修改等操作仍走审批和安全分析，不会为了速度绕过安全边界。
+5. **MCP 是兜底，不是所有任务的首选。** 本地可直接完成的查询优先走 CLI；外部文档、GitHub 代码搜索和复杂协议仍依赖 MCP 或网络。
+6. **`rg` 不是硬依赖。** 如果本机 `rg` 不可用或被系统权限拦截，Lucode 会继续运行，但搜索体验会降级。
+7. **终端 UI 有兼容差异。** Windows Terminal、PowerShell、CMD、PyCharm Terminal 对鼠标、滚轮和 ANSI 的支持不同；Lucode 会尽量回退到纯文本，但视觉效果可能不完全一致。
+8. **本地缓存可能反映旧状态。** 删除模型、切换 Provider 或改中转后，如果调音台或探测结果不一致，可以运行 `/models probe force`，必要时清理 `.agent_cache/model_capabilities.json`。
+
+## 开发和验证
+
+常用验证命令：
+
+```powershell
+python -m compileall lucode runtime tests
+python -m unittest tests.run_regression
+python tests/run_regression.py
+git diff --check
+npm pack --dry-run --json
 ```
 
-### 环境变量（`.env`）
+只验证 CLI 入口和 README 相关内容：
 
-所有可配置项参见 `.env.example`，包含完整的中文注释说明。
+```powershell
+python -m unittest tests.run_regression.LucodeCliEntryTests.test_readme_documents_quick_start_and_conda_python
+python -m unittest tests.run_regression.LucodeCliEntryTests.test_npm_wrapper_package_declares_lucode_bin
+```
 
----
+## 版本说明
 
-## License
-
-UNLICENSED — 内部使用
+- 文档标题版本：Lucode V1.2。
+- Python / npm 包版本当前仍为 `0.1.0`，后续正式发布前需要统一升级版本号。
+- License：`UNLICENSED`。
