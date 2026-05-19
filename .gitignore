@@ -1,6 +1,8 @@
 .env
 __pycache__/
+.pytest_cache/
 .lucode/
+.idea/
 .agent_quarantine/
 .agent_runs/
 .agent_cache/
@@ -9,3 +11,9 @@ __pycache__/
 build/
 dist/
 *.pyc
+package-lock.json
+
+# Local planning / review notes kept outside the product repository.
+计划文档/
+后续改进计划1期.md
+多脑模型调音台修改计划执行表.md
