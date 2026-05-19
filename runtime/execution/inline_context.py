@@ -94,7 +94,7 @@ def _latest_workspace_context(project_root: Path, task) -> str:
     return "\n".join(lines)
 
 
-def _inline_project_file_context(project_root: Path, task, refined_request: str) -> str:
+def _inline_project_file_context(project_root: Path, task, refined_request: str, run_context=None) -> str:
     """Inline explicit readonly file targets so simple analysis does not burn MCP turns."""
 
     if not _should_inline_readonly_file_task(task):
@@ -111,9 +111,25 @@ def _inline_project_file_context(project_root: Path, task, refined_request: str)
             continue
         relative = path.relative_to(project_root.resolve()).as_posix()
         snippets.append(f"### {relative}\n{excerpt}")
+        _record_inline_file_snapshot(run_context, path, task, relative, excerpt)
     if not snippets:
         return ""
     return "内联只读文件片段：\n" + "\n\n".join(snippets)
+
+
+def _record_inline_file_snapshot(run_context, path: Path, task, relative: str, excerpt: str) -> None:
+    if run_context is None or not hasattr(run_context, "record_file_snapshot"):
+        return
+    summary = f"{relative} 已为任务 {getattr(task, 'id', '') or 'unknown'} 内联读取。"
+    try:
+        run_context.record_file_snapshot(
+            path=path,
+            task_id=str(getattr(task, "id", "") or ""),
+            summary=summary,
+            excerpt=excerpt,
+        )
+    except Exception:
+        return
 
 
 def _should_inline_readonly_file_task(task) -> bool:

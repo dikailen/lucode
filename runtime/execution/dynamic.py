@@ -161,7 +161,7 @@ async def _execute_dynamic_attempt(
     )
     _apply_executor_model_defaults(plan, settings, model_registry)
     gate_decision = apply_pipeline_gate(plan, refined.refined_request)
-    run_state = PipelineRunState.create(refined.refined_request, plan)
+    run_state = PipelineRunState.create(refined.refined_request, plan, project_root=project_root)
     run_state.record_gate(gate_decision)
     validation = validate_plan(plan, privacy_policy=privacy_policy)
     review = review_plan(plan)

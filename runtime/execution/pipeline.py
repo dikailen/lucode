@@ -11,6 +11,7 @@ from typing import Any
 from catalog_system.model_catalog import load_model_catalog
 from planning.planner_schema import PlannedTask, PlannerResult
 from runtime.agents.model_capability import ModelExecutionStrategy, strategy_for_model_info
+from runtime.execution.run_context import RunContextStore
 
 
 CODE_MARKERS = {
@@ -104,9 +105,10 @@ class PipelineRunState:
     tasks: list[TaskRunRecord]
     gate: GateDecision | None = None
     errors: list[str] = field(default_factory=list)
+    run_context: RunContextStore | None = None
 
     @classmethod
-    def create(cls, user_request: str, plan: PlannerResult) -> "PipelineRunState":
+    def create(cls, user_request: str, plan: PlannerResult, project_root: Path | None = None) -> "PipelineRunState":
         return cls(
             user_request=user_request,
             route_type=plan.route_type,
@@ -126,6 +128,7 @@ class PipelineRunState:
                 )
                 for task in plan.tasks
             ],
+            run_context=RunContextStore(project_root) if project_root else None,
         )
 
     def record_gate(self, decision: GateDecision) -> None:
@@ -167,6 +170,7 @@ class PipelineRunState:
             "gate": _gate_to_dict(self.gate) if self.gate else None,
             "tasks": [record.__dict__ for record in self.tasks],
             "errors": list(self.errors),
+            "run_context": self.run_context.render_for_task() if self.run_context else "",
         }
 
     def _find_task(self, task_id: str) -> TaskRunRecord | None:

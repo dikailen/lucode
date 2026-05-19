@@ -1208,6 +1208,7 @@ class RuntimeHelpersTests(unittest.TestCase):
             PROJECT_ROOT / "runtime" / "execution" / "parallel_scheduler.py",
             PROJECT_ROOT / "runtime" / "execution" / "pipeline.py",
             PROJECT_ROOT / "runtime" / "execution" / "progress.py",
+            PROJECT_ROOT / "runtime" / "execution" / "run_context.py",
             PROJECT_ROOT / "runtime" / "execution" / "single_agent_runner.py",
             PROJECT_ROOT / "runtime" / "execution" / "solo_runner.py",
             PROJECT_ROOT / "runtime" / "execution" / "task_runner.py",
@@ -6287,6 +6288,194 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("### main.py", context)
         self.assertIn("### runtime/ui/welcome.py", context)
         self.assertIn("render_welcome_dashboard", context)
+
+    def test_run_context_store_records_file_snapshot_artifacts(self):
+        from runtime.execution.run_context import RunContextStore
+
+        workspace = TEMP_ROOT / f"run_context_store_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        target = workspace / "README.md"
+        target.write_text("# Demo\n\nLucode context pack test.\n", encoding="utf-8")
+
+        store = RunContextStore(workspace)
+        artifact = store.record_file_snapshot(
+            path=target,
+            task_id="inspect",
+            summary="README 项目说明",
+            excerpt="L0001: # Demo",
+        )
+        rendered = store.render_for_task("explain")
+
+        self.assertTrue(artifact.artifact_id.startswith("file:README.md@"))
+        self.assertEqual(artifact.path, "README.md")
+        self.assertIn("本轮共享上下文", rendered)
+        self.assertIn("README.md", rendered)
+        self.assertIn("README 项目说明", rendered)
+        self.assertIn("inspect", rendered)
+
+    def test_inline_readonly_file_context_records_run_context_store(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.execution.inline_context import _inline_project_file_context
+        from runtime.execution.run_context import RunContextStore
+
+        workspace = TEMP_ROOT / f"inline_context_store_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        (workspace / "README.md").write_text("# Lucode\n\nRunContextStore should capture this.\n", encoding="utf-8")
+        store = RunContextStore(workspace)
+        task = PlannedTask(
+            id="inspect_readme",
+            title="分析 README",
+            instruction="只读分析 README.md。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["project_filesystem_readonly"],
+            read_set=["README.md"],
+        )
+
+        context = _inline_project_file_context(workspace, task, "分析 README.md", run_context=store)
+
+        self.assertIn("### README.md", context)
+        self.assertEqual(len(store.file_snapshots), 1)
+        rendered = store.render_for_task("next")
+        self.assertIn("README.md", rendered)
+        self.assertIn("inspect_readme", rendered)
+
+    def test_planned_task_prompt_includes_shared_context_from_previous_task(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.run_context import RunContextStore
+        from runtime.execution.task_runner import _run_planned_task
+
+        workspace = TEMP_ROOT / f"planned_context_store_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        (workspace / "README.md").write_text("# Shared\n\nContext pack source.\n", encoding="utf-8")
+        store = RunContextStore(workspace)
+        store.record_file_snapshot(
+            path=workspace / "README.md",
+            task_id="inspect",
+            summary="README 已由 inspect 读取",
+            excerpt="L0001: # Shared",
+        )
+        prompts = []
+
+        class FakeFactory:
+            async def create_task_agent(self, task):
+                return f"agent:{task.id}"
+
+        class FakeResult:
+            final_output = "ok"
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20):
+            prompts.append(prompt)
+            return FakeResult()
+
+        task = PlannedTask(
+            id="summarize",
+            title="汇总",
+            instruction="根据已有上下文汇总 README。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=[],
+        )
+        state = PipelineRunState.create(
+            "汇总 README",
+            PlannerResult(route_type="multi_agent", reason="test", refined_request="汇总 README", tasks=[task]),
+        )
+        state.run_context = store
+
+        asyncio.run(
+            _run_planned_task(
+                "汇总 README",
+                task,
+                workspace,
+                FakeFactory(),
+                hooks=None,
+                run_agent=fake_run_agent,
+                run_state=state,
+            )
+        )
+
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("本轮共享上下文", prompts[0])
+        self.assertIn("README 已由 inspect 读取", prompts[0])
+
+    def test_planned_task_records_declared_read_set_after_agent_output(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.task_runner import _run_planned_task
+
+        workspace = TEMP_ROOT / f"planned_read_set_store_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        (workspace / "README.md").write_text("# Read Set\n\nAgent read this through MCP.\n", encoding="utf-8")
+
+        class FakeFactory:
+            async def create_task_agent(self, task):
+                return f"agent:{task.id}"
+
+        class FakeResult:
+            final_output = "README 定位摘要"
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20):
+            return FakeResult()
+
+        task = PlannedTask(
+            id="inspect_readme",
+            title="读取 README",
+            instruction="读取 README.md 并总结。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["project_filesystem_readonly"],
+            read_set=["README.md"],
+        )
+        state = PipelineRunState.create(
+            "读取 README",
+            PlannerResult(route_type="multi_agent", reason="test", refined_request="读取 README", tasks=[task]),
+            project_root=workspace,
+        )
+
+        asyncio.run(
+            _run_planned_task(
+                "读取 README",
+                task,
+                workspace,
+                FakeFactory(),
+                hooks=None,
+                run_agent=fake_run_agent,
+                run_state=state,
+            )
+        )
+
+        rendered = state.run_context.render_for_task("next")
+        self.assertIn("README.md", rendered)
+        self.assertIn("inspect_readme", rendered)
+
+    def test_declared_read_set_skips_sensitive_files(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.execution.run_context import RunContextStore
+        from runtime.execution.task_runner import _record_declared_read_set_context
+
+        workspace = TEMP_ROOT / f"read_set_sensitive_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        (workspace / ".env").write_text("API_KEY=secret\n", encoding="utf-8")
+        (workspace / "service_token.txt").write_text("token\n", encoding="utf-8")
+        store = RunContextStore(workspace)
+        task = PlannedTask(
+            id="inspect_sensitive",
+            title="检查敏感文件",
+            instruction="不要把敏感文件写入共享上下文。",
+            skill_id="project_explorer",
+            model="local_model",
+            read_set=[".env", "service_token.txt"],
+        )
+
+        _record_declared_read_set_context(store, workspace, task)
+
+        self.assertEqual(store.render_for_task("next"), "")
 
     def test_tasks_are_ordered_by_dependencies_before_parallel_group(self):
         from planning.planner_schema import PlannedTask, PlannerResult

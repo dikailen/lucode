@@ -32,10 +32,13 @@ def _task_prompt(
     task_instruction: str,
     dependency_context: str = "",
     workspace_context: str = "",
+    shared_context: str = "",
 ) -> str:
     prefix = "优化后的用户请求：\n" f"{refined_request}\n\n"
     if dependency_context.strip():
         prefix += "前序任务输出：\n" f"{dependency_context}\n\n"
+    if shared_context.strip():
+        prefix += f"{shared_context.strip()}\n\n"
     if workspace_context.strip():
         prefix += f"{workspace_context.strip()}\n\n"
     prefix += "你的具体任务：\n" f"{task_instruction}"
@@ -63,7 +66,8 @@ async def _run_planned_task(
             ledger.record_task_status(task.id, "failed", message)
         return task.title, _task_failure_output(task, message)
 
-    fast_path_output = _readonly_fast_path_output(project_root, task)
+    run_context = getattr(run_state, "run_context", None)
+    fast_path_output = _readonly_fast_path_output(project_root, task, run_context=run_context)
     if fast_path_output is not None:
         output = _with_verification_report(project_root, task, fast_path_output, run_state)
         if run_state:
@@ -74,10 +78,17 @@ async def _run_planned_task(
     agent = await factory.create_task_agent(task)
     dependency_context = _dependency_context_for_task(task, _task_output_map(run_state))
     workspace_context = _latest_workspace_context(project_root, task)
+    shared_context = _shared_context_for_task(run_state, task)
     try:
         result = await run_agent(
             agent,
-            _task_prompt(refined_request, task.instruction, dependency_context, workspace_context),
+            _task_prompt(
+                refined_request,
+                task.instruction,
+                dependency_context,
+                workspace_context,
+                shared_context,
+            ),
             hooks,
             max_turns=_max_turns_for_task(task),
         )
@@ -89,6 +100,7 @@ async def _run_planned_task(
             ledger.record_task_status(task.id, "failed", message)
         return task.title, _task_failure_output(task, message)
     output = _with_verification_report(project_root, task, str(result.final_output), run_state)
+    _record_declared_read_set_context(run_context, project_root, task)
     if run_state:
         run_state.record_task_result(task, output)
     if ledger:
@@ -96,18 +108,107 @@ async def _run_planned_task(
     return task.title, output
 
 
-def _readonly_fast_path_output(project_root: Path, task) -> str | None:
+def _readonly_fast_path_output(project_root: Path, task, run_context=None) -> str | None:
     if _can_fast_path_git_diff(task):
-        return _run_git_diff_fast_path(project_root, task)
+        output = _run_git_diff_fast_path(project_root, task)
+        _record_fast_path_context(run_context, "git", "diff", output, task)
+        return output
     if _can_fast_path_project_manifest_summary(task):
-        return _run_project_manifest_summary_fast_path(project_root, task)
+        output = _run_project_manifest_summary_fast_path(project_root, task)
+        _record_fast_path_context(run_context, "project_manifest", "summary", output, task)
+        return output
     if _can_fast_path_config_summary(task):
-        return _run_config_summary_fast_path(project_root, task)
+        output = _run_config_summary_fast_path(project_root, task)
+        _record_fast_path_context(run_context, "config", "summary", output, task)
+        return output
     if _can_fast_path_mcp_catalog_count(task):
-        return _run_mcp_catalog_count_fast_path(project_root, task)
+        output = _run_mcp_catalog_count_fast_path(project_root, task)
+        _record_fast_path_context(run_context, "mcp_catalog", "count", output, task)
+        return output
     if _can_fast_path_readme_mcp_count(task):
-        return _run_readme_mcp_count_fast_path(project_root, task)
+        output = _run_readme_mcp_count_fast_path(project_root, task)
+        _record_fast_path_context(run_context, "readme", "mcp_count", output, task)
+        return output
     return None
+
+
+def _record_fast_path_context(run_context, tool: str, action: str, output: str, task) -> None:
+    if run_context is None or not hasattr(run_context, "record_tool_output"):
+        return
+    try:
+        run_context.record_tool_output(
+            tool=tool,
+            action=action,
+            summary=output,
+            task_id=str(getattr(task, "id", "") or ""),
+        )
+    except Exception:
+        return
+
+
+def _shared_context_for_task(run_state: PipelineRunState | None, task) -> str:
+    run_context = getattr(run_state, "run_context", None)
+    if run_context is None or not hasattr(run_context, "render_for_task"):
+        return ""
+    try:
+        return run_context.render_for_task(str(getattr(task, "id", "") or ""))
+    except Exception:
+        return ""
+
+
+def _record_declared_read_set_context(run_context, project_root: Path, task) -> None:
+    if run_context is None or not hasattr(run_context, "record_file_snapshot"):
+        return
+    for item in list(getattr(task, "read_set", []) or [])[:8]:
+        candidate = _resolve_read_set_file(project_root, str(item or ""))
+        if candidate is None:
+            continue
+        try:
+            run_context.record_file_snapshot(
+                path=candidate,
+                task_id=str(getattr(task, "id", "") or ""),
+                summary=f"{candidate.relative_to(project_root.resolve()).as_posix()} 已由任务 {getattr(task, 'id', '') or 'unknown'} 读取。",
+            )
+        except Exception:
+            continue
+
+
+def _resolve_read_set_file(project_root: Path, value: str) -> Path | None:
+    clean = str(value or "").strip().strip("`'\"“”‘’（）()[]<>，,。；;：:")
+    if not clean or "://" in clean:
+        return None
+    clean = clean.replace("\\", "/")
+    if any(part == ".." for part in clean.split("/")):
+        return None
+    root = project_root.resolve()
+    path = (root / clean).resolve()
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None
+    if _is_sensitive_context_path(relative):
+        return None
+    return path if path.is_file() else None
+
+
+def _is_sensitive_context_path(relative: Path) -> bool:
+    ignored_dirs = {
+        ".git",
+        ".agent_cache",
+        ".agent_quarantine",
+        ".agent_runs",
+        ".pytest_cache",
+        "__pycache__",
+        "node_modules",
+    }
+    parts = {part.lower() for part in relative.parts}
+    if parts & ignored_dirs:
+        return True
+    name = relative.name.lower()
+    if name in {".env", "auth.json"}:
+        return True
+    sensitive_markers = ("secret", "token", "apikey", "api_key", "password", "credential")
+    return any(marker in name for marker in sensitive_markers)
 
 
 def _with_verification_report(project_root: Path, task, output: str, run_state: PipelineRunState | None = None) -> str:

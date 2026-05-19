@@ -17,6 +17,7 @@ from runtime.execution.progress import _print_progress_snapshot
 from runtime.execution.task_runner import (
     _max_turns_for_task,
     _readonly_fast_path_output,
+    _record_declared_read_set_context,
     _task_prompt,
     _with_verification_report,
 )
@@ -51,6 +52,7 @@ async def _run_single_agent(
         return format_final_report(output, audit), audit
     if _can_fast_path_git_status(task):
         output = _run_git_status_fast_path(project_root, task)
+        _record_single_fast_path_context(run_state, "git", "status", output, task)
         run_state.record_task_result(task, output)
         if show_plan:
             _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
@@ -59,6 +61,7 @@ async def _run_single_agent(
         return format_final_report(output, audit), audit
     if _can_fast_path_git_diff(task):
         output = _run_git_diff_fast_path(project_root, task)
+        _record_single_fast_path_context(run_state, "git", "diff", output, task)
         run_state.record_task_result(task, output)
         if show_plan:
             _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
@@ -66,7 +69,7 @@ async def _run_single_agent(
         audit = audit_execution(plan, run_state, output)
         return format_final_report(output, audit), audit
 
-    fast_path_output = _readonly_fast_path_output(project_root, task)
+    fast_path_output = _readonly_fast_path_output(project_root, task, run_context=getattr(run_state, "run_context", None))
     if fast_path_output is not None:
         output = _with_verification_report(project_root, task, fast_path_output, run_state)
         run_state.record_task_result(task, output)
@@ -77,7 +80,13 @@ async def _run_single_agent(
         return format_final_report(output, audit), audit
 
     workspace_context = _latest_workspace_context(project_root, task)
-    inline_context = _inline_project_file_context(project_root, task, refined_request)
+    inline_context = _inline_project_file_context(
+        project_root,
+        task,
+        refined_request,
+        run_context=getattr(run_state, "run_context", None),
+    )
+    shared_context = _single_shared_context(run_state, task)
     if inline_context:
         agent = factory.create_direct_answer_agent(
             task.model,
@@ -92,7 +101,7 @@ async def _run_single_agent(
                 _task_prompt(
                     refined_request,
                     task.instruction,
-                    workspace_context=f"{workspace_context}\n\n{inline_context}",
+                    workspace_context=f"{shared_context}\n\n{workspace_context}\n\n{inline_context}",
                 ),
                 hooks,
                 max_turns=4,
@@ -109,6 +118,7 @@ async def _run_single_agent(
             _record_flywheel_safely(flywheel, run_state)
             raise
         output = _with_verification_report(project_root, task, str(result.final_output), run_state)
+        _record_declared_read_set_context(getattr(run_state, "run_context", None), project_root, task)
         run_state.record_task_result(task, output)
         if show_plan:
             _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
@@ -120,7 +130,12 @@ async def _run_single_agent(
     try:
         result = await run_agent(
             agent,
-            _task_prompt(refined_request, task.instruction, workspace_context=workspace_context),
+            _task_prompt(
+                refined_request,
+                task.instruction,
+                workspace_context=workspace_context,
+                shared_context=shared_context,
+            ),
             hooks,
             max_turns=_max_turns_for_task(task),
         )
@@ -136,9 +151,35 @@ async def _run_single_agent(
         _record_flywheel_safely(flywheel, run_state)
         raise
     output = _with_verification_report(project_root, task, str(result.final_output), run_state)
+    _record_declared_read_set_context(getattr(run_state, "run_context", None), project_root, task)
     run_state.record_task_result(task, output)
     if show_plan:
         _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
     _record_flywheel_safely(flywheel, run_state)
     audit = audit_execution(plan, run_state, output)
     return format_final_report(output, audit), audit
+
+
+def _record_single_fast_path_context(run_state, tool: str, action: str, output: str, task) -> None:
+    run_context = getattr(run_state, "run_context", None)
+    if run_context is None or not hasattr(run_context, "record_tool_output"):
+        return
+    try:
+        run_context.record_tool_output(
+            tool=tool,
+            action=action,
+            summary=output,
+            task_id=str(getattr(task, "id", "") or ""),
+        )
+    except Exception:
+        return
+
+
+def _single_shared_context(run_state, task) -> str:
+    run_context = getattr(run_state, "run_context", None)
+    if run_context is None or not hasattr(run_context, "render_for_task"):
+        return ""
+    try:
+        return run_context.render_for_task(str(getattr(task, "id", "") or ""))
+    except Exception:
+        return ""
