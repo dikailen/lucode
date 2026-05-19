@@ -5053,6 +5053,75 @@ class WelcomeRefreshC5Tests(unittest.TestCase):
         self.assertEqual(config["provider"]["my_proxy"]["base_url"], "https://api.proxy.example.com/v1")
         self.assertEqual(auth["providers"]["my_proxy"]["api_key"], "sk-fullscreen-secret")
 
+    def test_connect_fullscreen_form_labels_are_readable_chinese(self):
+        from lucode.shell.input_adapter import ConsoleFormResult
+        from lucode.shell.slash_commands import _handle_connect_wizard_session
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"connect_fullscreen_labels_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_fullscreen_labels_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.provider_lines = iter(["custom my_proxy"])
+                self.form_calls = []
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                return next(self.provider_lines)
+
+            async def read_form(self, **kwargs):
+                self.form_calls.append(kwargs)
+                return ConsoleFormResult(action="cancel", values={})
+
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        console = FakeConsole()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            asyncio.run(
+                _handle_connect_wizard_session(
+                    console=console,
+                    workspace_context=context,
+                    runtime_settings=RuntimeSettings(),
+                )
+            )
+
+        form = console.form_calls[0]
+        labels = {field.name: field.label for field in form["fields"]}
+        actions = {action.command: action.display for action in form["actions"]}
+        rendered = "\n".join(
+            [
+                form["title"],
+                form["message"],
+                form["footer"],
+                *labels.values(),
+                *(field.help for field in form["fields"]),
+                *actions.values(),
+            ]
+        )
+
+        self.assertEqual(form["title"], "Lucode Provider 连接")
+        self.assertEqual(labels["homepage"], "官网/控制台地址 *")
+        self.assertEqual(labels["base_url"], "真实请求地址 base_url *")
+        self.assertEqual(labels["model"], "模型名 *")
+        self.assertEqual(actions["save_default"], "保存并设默认")
+        self.assertEqual(actions["save_only"], "仅保存")
+        self.assertIn("当前 Provider：my_proxy（自定义中转）", form["message"])
+        for marker in ["鐎", "閻", "鍦", "杩", "鈫", "銆", "绌"]:
+            self.assertNotIn(marker, rendered)
+
     def test_connect_fullscreen_form_reopens_when_missing_required_fields(self):
         from lucode.shell.input_adapter import ConsoleFormResult
         from lucode.shell.slash_commands import _handle_connect_wizard_session

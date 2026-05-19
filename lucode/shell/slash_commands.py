@@ -330,14 +330,14 @@ async def _read_connect_wizard_line(console, state) -> str:
     if callable(choice_reader):
         try:
             return await choice_reader(
-                "\nProvider杩炴帴> ",
+                "\nProvider连接> ",
                 choices,
                 bottom_toolbar="↑↓ 选择，Enter 确认；滚轮可滚动终端历史；key <你的 key> 可直接粘贴；q 退出",
                 reserve_space_for_menu=12,
             )
         except TypeError:
             pass
-    print("\nProvider杩炴帴> ", end="", flush=True)
+    print("\nProvider连接> ", end="", flush=True)
     reader = getattr(console, "read_runtime_line", None)
     if callable(reader):
         return await reader()
@@ -500,7 +500,7 @@ async def _read_connect_fullscreen_form(console, state, message: str) -> Console
         return None
     try:
         result = await reader(
-            title="Lucode Provider 杩炴帴",
+            title="Lucode Provider 连接",
             fields=_connect_fullscreen_fields(state),
             actions=_connect_fullscreen_actions(state),
             message=_connect_fullscreen_message(state, message),
@@ -520,14 +520,14 @@ def _connect_fullscreen_fields(state) -> list[ConsoleFormField]:
             [
                 ConsoleFormField(
                     name="homepage",
-                    label="瀹樼綉/鎺у埗鍙板湴鍧€",
+                    label="官网/控制台地址 *",
                     value=state.homepage,
                     required=True,
                     help="只用于展示和确认，例如 https://proxy.example.com",
                 ),
                 ConsoleFormField(
                     name="base_url",
-                    label="鐪熷疄璇锋眰鍦板潃 base_url",
+                    label="真实请求地址 base_url *",
                     value=state.base_url,
                     required=True,
                     help="模型请求会走这个地址，例如 https://api.proxy.example.com/v1",
@@ -537,7 +537,7 @@ def _connect_fullscreen_fields(state) -> list[ConsoleFormField]:
     fields.append(
         ConsoleFormField(
             name="model",
-            label="模型名",
+            label="模型名 *",
             value=_selected_connect_model(state),
             required=True,
             help=_connect_model_hint(state),
@@ -559,10 +559,10 @@ def _connect_fullscreen_fields(state) -> list[ConsoleFormField]:
 
 def _connect_fullscreen_actions(state) -> list[ConsoleChoice]:
     return [
-        ConsoleChoice("save_default", "Save and set default", _connect_state_primary_ref(state) or "Ready after fields are complete"),
+        ConsoleChoice("save_default", "保存并设默认", _connect_state_primary_ref(state) or "填完字段后可保存"),
         ConsoleChoice("save_only", "仅保存", "稍后在 /models 选择"),
         ConsoleChoice("change_provider", "重选 Provider", state.selected_provider),
-        ConsoleChoice("cancel", "鍙栨秷", "涓嶄繚瀛橈紝杩斿洖鑱婂ぉ"),
+        ConsoleChoice("cancel", "取消", "不保存，返回聊天"),
     ]
 
 
@@ -585,9 +585,9 @@ def _apply_connect_form_values(state, values: dict[str, str]):
         homepage = str(values.get("homepage", state.homepage) or "").strip()
         base_url = str(values.get("base_url", state.base_url) or "").strip()
         if homepage:
-            _validate_connect_url(homepage, "瀹樼綉/鎺у埗鍙板湴鍧€")
+            _validate_connect_url(homepage, "官网/控制台地址")
         if base_url:
-            _validate_connect_url(base_url, "鐪熷疄璇锋眰鍦板潃")
+            _validate_connect_url(base_url, "真实请求地址")
         state.homepage = homepage
         state.base_url = base_url
     model = str(values.get("model", state.model) or "").strip()
@@ -618,7 +618,7 @@ async def _read_connect_form_action(console, state) -> str:
 def _connect_form_command_items(state):
     from runtime.config.connect_wizard import ConnectWizardCommandItem
 
-    items = [ConnectWizardCommandItem("change_provider", "閲嶆柊閫夋嫨 Provider", state.selected_provider)]
+    items = [ConnectWizardCommandItem("change_provider", "重新选择 Provider", state.selected_provider)]
     if state.custom:
         items.extend(
             [
@@ -675,10 +675,10 @@ def _apply_inline_connect_form_command(state, action: str):
     lower = str(action or "").strip().lower()
     if lower.startswith(("homepage ", "home ")):
         value = _strip_field_alias(action, ("homepage", "home"))
-        _validate_connect_url(value, "瀹樼綉/鎺у埗鍙板湴鍧€")
+        _validate_connect_url(value, "官网/控制台地址")
     elif lower.startswith(("base-url ", "base_url ", "url ")):
         value = _strip_field_alias(action, ("base-url", "base_url", "url"))
-        _validate_connect_url(value, "鐪熷疄璇锋眰鍦板潃")
+        _validate_connect_url(value, "真实请求地址")
     state, _ = apply_connect_wizard_input(state, action)
     return state
 
@@ -709,9 +709,9 @@ def _missing_connect_form_fields(state) -> list[str]:
     missing = []
     if state.custom:
         if not str(state.homepage or "").strip():
-            missing.append("瀹樼綉/鎺у埗鍙板湴鍧€")
+            missing.append("官网/控制台地址")
         if not str(state.base_url or "").strip():
-            missing.append("鐪熷疄璇锋眰鍦板潃 base_url")
+            missing.append("真实请求地址 base_url")
         if not str(state.model or "").strip():
             missing.append("模型名")
     elif not _selected_connect_model(state):
@@ -769,21 +769,21 @@ async def _collect_one_connect_field(console, state, field: str):
     if field == "homepage":
         value = await _read_connect_text_field(
             console,
-            "瀹樼綉/鎺у埗鍙板湴鍧€",
+            "官网/控制台地址",
             aliases=("homepage", "home"),
             help_text="示例：https://proxy.example.com；输入 back 返回上一步，provider deepseek 可重新选 Provider。",
         )
-        _validate_connect_url(value, "瀹樼綉/鎺у埗鍙板湴鍧€")
+        _validate_connect_url(value, "官网/控制台地址")
         state, _ = apply_connect_wizard_input(state, f"homepage {value}")
         return state
     if field == "base_url":
         value = await _read_connect_text_field(
             console,
-            "鐪熷疄璇锋眰鍦板潃 base_url",
+            "真实请求地址 base_url",
             aliases=("base-url", "base_url", "url"),
             help_text="示例：https://api.proxy.example.com/v1；模型请求会走这个地址。",
         )
-        _validate_connect_url(value, "鐪熷疄璇锋眰鍦板潃")
+        _validate_connect_url(value, "真实请求地址")
         state, _ = apply_connect_wizard_input(state, f"base-url {value}")
         return state
     if field == "model":
