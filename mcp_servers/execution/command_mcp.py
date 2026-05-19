@@ -67,7 +67,7 @@ def _validate_command(args: list[str]) -> None:
     lowered = [arg.lower() for arg in args]
     analysis = analyze_command(" ".join(args))
     if analysis.should_deny:
-        raise ValueError(f"Command is denied by analyzer: {analysis.blocking_summary}")
+        raise ValueError(f"Command is denied by analyzer ({analysis.decision}): {analysis.blocking_summary}")
 
     if any(item in DENIED_SHELL_OPERATORS for item in lowered):
         raise ValueError("Shell chaining, pipes, and redirection are not allowed")

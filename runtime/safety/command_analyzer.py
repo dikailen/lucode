@@ -13,6 +13,27 @@ SEVERITY_RANK = {
     "critical": 3,
 }
 
+DECISION_LABELS = {
+    "allow": "允许",
+    "allow_limited": "有限允许",
+    "ask": "需要审批",
+    "sandbox_preview": "沙箱预演",
+    "deny": "拒绝",
+}
+
+HARD_DENY_COMMAND_PATTERNS = {
+    "git push --force": "会强制改写远端历史",
+    "git reset --hard": "会丢弃工作区修改",
+    "git clean": "会删除未跟踪文件",
+    "git push": "会把本地提交发布到远端",
+    "git checkout --": "会覆盖工作区文件",
+    "npm publish": "发布命令会把包或构建产物推送到外部仓库",
+    "pnpm publish": "发布命令会把包或构建产物推送到外部仓库",
+    "yarn publish": "发布命令会把包或构建产物推送到外部仓库",
+    "bun publish": "发布命令会把包或构建产物推送到外部仓库",
+    "twine upload": "发布命令会把包或构建产物推送到外部仓库",
+}
+
 
 @dataclass(frozen=True)
 class CommandFinding:
@@ -30,11 +51,13 @@ class CommandAnalysis:
     executable: str
     risk_level: str
     findings: tuple[CommandFinding, ...]
+    decision: str = "ask"
+    decision_reason: str = ""
     parse_error: str = ""
 
     @property
     def should_deny(self) -> bool:
-        return bool(self.parse_error) or any(finding.blocks_execution for finding in self.findings)
+        return self.decision == "deny" or bool(self.parse_error) or any(finding.blocks_execution for finding in self.findings)
 
     @property
     def blocking_summary(self) -> str:
@@ -53,6 +76,8 @@ def analyze_command(command: str) -> CommandAnalysis:
             executable="",
             risk_level="high",
             findings=(CommandFinding("high", "parse", "命令为空，无法确认执行意图", blocks_execution=True),),
+            decision="deny",
+            decision_reason="命令为空，不能安全执行",
             parse_error="命令为空",
         )
 
@@ -65,6 +90,8 @@ def analyze_command(command: str) -> CommandAnalysis:
             executable="",
             risk_level="high",
             findings=(CommandFinding("high", "parse", f"命令解析失败：{exc}", blocks_execution=True),),
+            decision="deny",
+            decision_reason="命令无法解析，不能确认执行边界",
             parse_error=str(exc),
         )
 
@@ -83,12 +110,15 @@ def analyze_command(command: str) -> CommandAnalysis:
     findings.extend(_find_path_traversal(argv))
 
     risk_level = _max_severity(findings)
+    decision, decision_reason = _decide_command(argv, executable, risk_level, findings)
     return CommandAnalysis(
         command=text,
         argv=argv,
         executable=executable,
         risk_level=risk_level,
         findings=tuple(findings),
+        decision=decision,
+        decision_reason=decision_reason,
     )
 
 
@@ -96,7 +126,10 @@ def render_command_analysis(analysis: CommandAnalysis) -> list[str]:
     lines = [
         "命令风险分析",
         f"- 风险等级：{analysis.risk_level}",
+        f"- 决策：{analysis.decision}（{DECISION_LABELS.get(analysis.decision, analysis.decision)}）",
     ]
+    if analysis.decision_reason:
+        lines.append(f"- 决策原因：{analysis.decision_reason}")
     if analysis.executable:
         lines.append(f"- 可执行程序：{analysis.executable}")
     if not analysis.findings:
@@ -202,13 +235,9 @@ def _find_git_risks(lowered: tuple[str, ...]) -> list[CommandFinding]:
     if not lowered or lowered[0] != "git":
         return []
     joined = " ".join(lowered)
-    blocked_patterns = {
-        "git reset --hard": "会丢弃工作区修改",
-        "git clean": "会删除未跟踪文件",
-        "git push": "会把本地提交发布到远端",
-        "git checkout --": "会覆盖工作区文件",
-    }
-    for pattern, message in blocked_patterns.items():
+    for pattern, message in HARD_DENY_COMMAND_PATTERNS.items():
+        if not pattern.startswith("git "):
+            continue
         if joined.startswith(pattern):
             return [
                 CommandFinding(
@@ -234,19 +263,18 @@ def _find_git_risks(lowered: tuple[str, ...]) -> list[CommandFinding]:
 def _find_publish_risks(executable: str, lowered: tuple[str, ...]) -> list[CommandFinding]:
     joined = " ".join(lowered)
     publish_patterns = {
-        "npm publish",
-        "pnpm publish",
-        "yarn publish",
-        "bun publish",
-        "twine upload",
+        pattern: message
+        for pattern, message in HARD_DENY_COMMAND_PATTERNS.items()
+        if "publish" in pattern or pattern == "twine upload"
     }
-    if joined in publish_patterns or any(joined.startswith(pattern + " ") for pattern in publish_patterns):
+    matched = next((item for item in publish_patterns if joined == item or joined.startswith(item + " ")), "")
+    if matched:
         return [
             CommandFinding(
                 "critical",
                 "publish",
-                "发布命令会把包或构建产物推送到外部仓库",
-                evidence=f"{executable} publish" if executable else joined,
+                publish_patterns[matched],
+                evidence=matched,
                 blocks_execution=True,
             )
         ]
@@ -294,6 +322,60 @@ def _find_network_risks(executable: str, lowered: tuple[str, ...]) -> list[Comma
             evidence=executable,
         )
     ]
+
+
+def _decide_command(
+    argv: tuple[str, ...],
+    executable: str,
+    risk_level: str,
+    findings: list[CommandFinding],
+) -> tuple[str, str]:
+    if any(finding.blocks_execution for finding in findings):
+        return "deny", "命中硬阻断规则"
+    lowered = tuple(arg.lower() for arg in argv)
+    if not lowered:
+        return "deny", "命令为空"
+    if _is_readonly_command(lowered, executable):
+        return "allow", "明确只读查询命令"
+    if _is_limited_local_command(lowered, executable):
+        return "allow_limited", "本地验证或版本查询，限制在当前工作区执行"
+    if any(finding.category in {"package_manager", "network", "git", "inline_code", "nested_shell"} for finding in findings):
+        return "ask", "会修改环境、访问网络或执行动态逻辑，需要用户审批"
+    if risk_level in {"high", "critical"}:
+        return "sandbox_preview", "风险较高，后续应先进入沙箱预演"
+    return "ask", "未命中明确只读白名单，默认需要审批"
+
+
+def _is_readonly_command(lowered: tuple[str, ...], executable: str) -> bool:
+    if executable == "git" and lowered[:2] in {
+        ("git", "status"),
+        ("git", "diff"),
+        ("git", "log"),
+        ("git", "show"),
+        ("git", "branch"),
+    }:
+        return True
+    if executable in {"rg", "ripgrep", "findstr", "where", "dir", "ls", "pwd"}:
+        return True
+    if executable in {"python", "python.exe", "py"} and any(arg in {"--version", "-v"} for arg in lowered[1:]):
+        return True
+    if executable in {"node", "node.exe", "npm", "pnpm", "yarn", "bun"} and any(
+        arg in {"--version", "-v", "version"} for arg in lowered[1:3]
+    ):
+        return True
+    return False
+
+
+def _is_limited_local_command(lowered: tuple[str, ...], executable: str) -> bool:
+    if executable in {"python", "python.exe", "py"} and "-m" in lowered:
+        module_index = lowered.index("-m")
+        module = lowered[module_index + 1] if module_index + 1 < len(lowered) else ""
+        return module in {"pytest", "unittest", "compileall"}
+    if executable in {"pytest", "pytest.exe"}:
+        return True
+    if executable in {"npm", "pnpm", "yarn", "bun"} and len(lowered) >= 2:
+        return lowered[1] in {"test", "run"} and "publish" not in lowered
+    return False
 
 
 def _find_interpreter_risks(executable: str, lowered: tuple[str, ...]) -> list[CommandFinding]:
