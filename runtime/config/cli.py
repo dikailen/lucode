@@ -372,9 +372,9 @@ def _run_models_probe(value: str, workspace_context=None) -> str:
     results = cache.get("results") or {}
     configured_models = [item for item in refreshed.get("models", []) if item.get("configured")]
     lines = [
-        "已完成模型能力探测 v2.2。",
+        "已完成模型能力探测 v2.3。",
         f"范围：已配置模型 {len(configured_models)} 个；云端和本地都会探测；结果已写入 .agent_cache/model_capabilities.json。",
-        "检测项：key / base_url / model name / chat / JSON / tools(auto/强制/回填) / stream。",
+        "检测项：key / base_url / model name / chat / JSON / tools / stream / latency / context / 推荐脑位。",
         "",
     ]
     for model in configured_models:
@@ -384,7 +384,8 @@ def _run_models_probe(value: str, workspace_context=None) -> str:
             f"chat {_format_bool_zh(probe.get('supports_basic_chat'))} | "
             f"JSON {_format_bool_zh(probe.get('supports_json_output'))} | "
             f"tools {_format_tools_probe_summary(probe)} | "
-            f"stream {_format_bool_zh(probe.get('supports_streaming'))}"
+            f"stream {_format_bool_zh(probe.get('supports_streaming'))} | "
+            f"{_format_model_probe_badges(model)}"
         )
         missing = probe.get("missing") or []
         if missing:
@@ -864,7 +865,8 @@ def _render_model_available(settings: RuntimeSettings) -> str:
             f"- {_format_model_title(item)} | "
             f"{_format_backend_type(item.get('backend_type'))} | "
             f"{_format_availability(item)} | "
-            f"{_format_privacy_level(item.get('privacy_level'))}"
+            f"{_format_privacy_level(item.get('privacy_level'))} | "
+            f"{_format_model_probe_badges(item)}"
         )
     lines.append("")
     lines.append("说明：这里只显示当前可运行的模型。")
@@ -1460,6 +1462,8 @@ def _format_availability(model_info: dict) -> str:
     status = str(probe.get("status") or "").strip()
     if status == "ok":
         return "连接可用"
+    if status == "partial":
+        return "部分可用"
     if status == "capability_probe_failed" and probe.get("service_available") is True:
         return "服务在线，能力探测失败"
     if status in {"chat_failed", "probe_failed"}:
@@ -1567,6 +1571,50 @@ def _format_tools_probe_summary(probe: dict) -> str:
             return "否（接口接受但未触发）"
         return "否"
     return "未知"
+
+
+def _format_model_probe_badges(model_info: dict) -> str:
+    badges: list[str] = []
+    roles = model_info.get("recommended_roles") or (model_info.get("probe") or {}).get("recommended_roles") or []
+    role_labels = {
+        "query_refiner": "前置",
+        "orchestrator": "主脑",
+        "executor": "执行",
+        "final_synthesizer": "汇总",
+    }
+    for role in ["query_refiner", "orchestrator", "executor", "final_synthesizer"]:
+        if role in roles:
+            badges.append(role_labels[role])
+    context_label = _format_context_window(model_info)
+    if context_label:
+        badges.append(context_label)
+    latency_label = _format_latency(model_info.get("latency_ms") or (model_info.get("probe") or {}).get("latency_ms"))
+    if latency_label:
+        badges.append(latency_label)
+    return " · ".join(badges) if badges else "能力未探测"
+
+
+def _format_context_window(model_info: dict) -> str:
+    tokens = model_info.get("context_window_tokens") or (model_info.get("probe") or {}).get("context_window_tokens")
+    try:
+        value = int(tokens)
+    except (TypeError, ValueError):
+        return ""
+    if value >= 1_000_000:
+        return f"{value // 1_000_000}M"
+    if value >= 1024:
+        return f"{round(value / 1024):g}K"
+    return str(value)
+
+
+def _format_latency(value) -> str:
+    try:
+        ms = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if ms <= 0:
+        return ""
+    return f"{ms / 1000:.2f}s"
 
 
 def _format_bool_zh(value, unknown: str = "未知", suffix: str = "") -> str:

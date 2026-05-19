@@ -11,7 +11,7 @@ import requests
 from dotenv import dotenv_values
 
 
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 CACHE_RELATIVE_PATH = Path(".agent_cache") / "model_capabilities.json"
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -162,8 +162,9 @@ def refresh_model_probe_cache(
                 "probed_at": time.time(),
             }
         )
-        result["planner_suitable"] = bool(result.get("supports_basic_chat"))
-        result["execution_suitable"] = bool(result.get("supports_tools"))
+        roles = result.get("recommended_roles") or []
+        result["planner_suitable"] = "orchestrator" in roles or bool(result.get("supports_basic_chat"))
+        result["execution_suitable"] = "executor" in roles
         results[model["id"]] = result
 
     save_probe_cache(project_root, cache)
@@ -268,6 +269,7 @@ def probe_ollama_service(model_info: dict, timeout: float = 1.0) -> dict:
 
 def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
     profile = probe_profile_for_model(model_info)
+    context_info = estimate_context_window(model_info, profile)
     chat_timeout = _probe_step_timeout("MODEL_PROBE_CHAT_TIMEOUT_SECONDS", max(timeout, 6.0), profile, "chat_timeout")
     tool_timeout = _probe_step_timeout("MODEL_PROBE_TOOL_TIMEOUT_SECONDS", timeout, profile, "tool_timeout")
     stream_timeout = _probe_step_timeout(
@@ -277,7 +279,8 @@ def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
     headers = _headers(model_info)
     model_name = model_info.get("model_name") or ""
 
-    basic, basic_exception = _safe_post_json(
+    probe_started = time.perf_counter()
+    basic, basic_exception, chat_latency_ms = _timed_post_json(
         endpoint,
         headers,
         {
@@ -294,7 +297,7 @@ def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
         supports_json_output = _response_contains_json_ok(basic)
     else:
         basic_error = str(basic_exception) if basic_exception else _response_error_text(basic)
-        return {
+        result = {
             "status": "chat_failed",
             "supports_basic_chat": False,
             "supports_json_output": False,
@@ -311,7 +314,19 @@ def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
             "forced_tool_error": "",
             "tool_roundtrip_error": "",
             "stream_error": "",
+            "probe_profile": profile["provider_id"],
+            "probe_tool_choice_modes": profile["tool_choice_modes"],
+            "latency_ms": _elapsed_ms(probe_started),
+            "chat_latency_ms": chat_latency_ms,
+            "tool_accept_latency_ms": 0,
+            "auto_tool_latency_ms": 0,
+            "forced_tool_latency_ms": 0,
+            "tool_roundtrip_latency_ms": 0,
+            "stream_latency_ms": 0,
+            **context_info,
         }
+        result["recommended_roles"] = recommend_model_roles(result)
+        return result
 
     tools = [_capability_probe_tool_schema()]
     tool_accept_payload = {
@@ -320,7 +335,7 @@ def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
         "tools": tools,
         "stream": False,
     }
-    tool_accept_response, tool_accept_exception = _safe_post_json(
+    tool_accept_response, tool_accept_exception, tool_accept_latency_ms = _timed_post_json(
         endpoint, headers, tool_accept_payload, tool_timeout
     )
     tools_api_accepted = tool_accept_response is not None and 200 <= tool_accept_response.status_code < 300
@@ -333,12 +348,14 @@ def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
     auto_response = None
     auto_exception = None
     if tools_api_accepted and "auto" in profile["tool_choice_modes"]:
-        auto_response, auto_exception = _safe_post_json(
+        auto_response, auto_exception, auto_tool_latency_ms = _timed_post_json(
             endpoint,
             headers,
             _tool_probe_payload(model_name, tools, "auto", profile),
             tool_timeout,
         )
+    else:
+        auto_tool_latency_ms = 0
     tools_auto_call = False
     auto_tool_error = tool_api_error
     auto_tool_call = None
@@ -355,12 +372,14 @@ def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
     forced_response = None
     forced_exception = None
     if tools_api_accepted and "forced" in profile["tool_choice_modes"]:
-        forced_response, forced_exception = _safe_post_json(
+        forced_response, forced_exception, forced_tool_latency_ms = _timed_post_json(
             endpoint,
             headers,
             _tool_probe_payload(model_name, tools, "forced", profile),
             tool_timeout,
         )
+    else:
+        forced_tool_latency_ms = 0
     tools_forced_choice = False
     forced_tool_error = tool_api_error
     if forced_response is not None:
@@ -375,7 +394,7 @@ def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
     tools_result_roundtrip = False
     tool_roundtrip_error = ""
     if auto_tool_call:
-        roundtrip_response, roundtrip_exception = _safe_post_json(
+        roundtrip_response, roundtrip_exception, tool_roundtrip_latency_ms = _timed_post_json(
             endpoint,
             headers,
             _tool_roundtrip_payload(model_name, auto_tool_call),
@@ -385,6 +404,8 @@ def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
             tools_result_roundtrip = True
         else:
             tool_roundtrip_error = str(roundtrip_exception) if roundtrip_exception else _response_error_text(roundtrip_response)
+    else:
+        tool_roundtrip_latency_ms = 0
 
     tool_probe_completed = tool_accept_response is not None or bool(tool_api_error and tool_accept_exception is None)
     supports_tools = True if bool(tools_auto_call or tools_forced_choice or tools_result_roundtrip) else None
@@ -405,7 +426,9 @@ def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
         "messages": [{"role": "user", "content": "Reply with exactly: pong"}],
         "stream": True,
     }
-    stream_response, stream_exception = _safe_post_json(endpoint, headers, stream_payload, stream_timeout)
+    stream_response, stream_exception, stream_latency_ms = _timed_post_json(
+        endpoint, headers, stream_payload, stream_timeout
+    )
     supports_streaming = False
     stream_error = ""
     if stream_response is not None and 200 <= stream_response.status_code < 300:
@@ -432,7 +455,8 @@ def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
     ):
         status = "partial"
 
-    return {
+    latency_ms = _elapsed_ms(probe_started)
+    result = {
         "status": status,
         "supports_basic_chat": supports_basic_chat,
         "supports_json_output": supports_json_output,
@@ -451,7 +475,17 @@ def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
         "stream_error": stream_error,
         "probe_profile": profile["provider_id"],
         "probe_tool_choice_modes": profile["tool_choice_modes"],
+        "latency_ms": latency_ms,
+        "chat_latency_ms": chat_latency_ms,
+        "tool_accept_latency_ms": tool_accept_latency_ms,
+        "auto_tool_latency_ms": auto_tool_latency_ms,
+        "forced_tool_latency_ms": forced_tool_latency_ms,
+        "tool_roundtrip_latency_ms": tool_roundtrip_latency_ms,
+        "stream_latency_ms": stream_latency_ms,
+        **context_info,
     }
+    result["recommended_roles"] = recommend_model_roles(result)
+    return result
 
 
 def model_fingerprint(model_info: dict) -> str:
@@ -525,6 +559,13 @@ def _probe_input_for_model(model_info: dict) -> dict[str, Any]:
         "api_key": api_key,
         "provider": model_info.get("provider") or model_info.get("provider_id") or "",
         "provider_ref": model_info.get("provider_ref") or model_info.get("shared_config_group") or "",
+        "context_window_tokens": _first_int_value(
+            model_info,
+            "context_window_tokens",
+            "context_length",
+            "max_context_tokens",
+            "max_input_tokens",
+        ),
     }
 
 
@@ -556,25 +597,34 @@ def probe_profile_for_model(model_info: dict) -> dict[str, Any]:
         "tool_timeout": 2.0,
         "stream_timeout": 2.0,
         "roundtrip_enabled": True,
+        "context_window_tokens": None,
+        "context_source": "unknown",
     }
 
     if "api.openai.com" in provider or "openai/" in model_name or model_name.startswith("gpt-"):
         profile["provider_id"] = "openai"
+        profile["context_window_tokens"] = _openai_context_window(model_name)
+        profile["context_source"] = "provider_profile" if profile["context_window_tokens"] else "unknown"
         return profile
     if "openrouter" in provider:
         profile["provider_id"] = "openrouter"
         profile["chat_timeout"] = 8.0
+        profile["context_source"] = "provider_dynamic"
         return profile
     if "deepseek" in provider:
         profile["provider_id"] = "deepseek"
         profile["tool_choice_modes"] = ["auto"]
         profile["chat_timeout"] = 8.0
         profile["tool_timeout"] = 3.0
+        profile["context_window_tokens"] = 65536
+        profile["context_source"] = "provider_profile"
         return profile
     if "dashscope" in provider or "aliyuncs.com" in provider or "qwen" in model_name:
         profile["provider_id"] = "dashscope"
         profile["tool_choice_modes"] = ["auto"]
         profile["chat_timeout"] = 8.0
+        profile["context_window_tokens"] = _qwen_context_window(model_name)
+        profile["context_source"] = "provider_profile" if profile["context_window_tokens"] else "unknown"
         return profile
     if "siliconflow" in provider:
         profile["provider_id"] = "siliconflow"
@@ -594,6 +644,86 @@ def probe_profile_for_model(model_info: dict) -> dict[str, Any]:
         profile["tool_timeout"] = 2.0
         return profile
     return profile
+
+
+def estimate_context_window(model_info: dict, profile: dict) -> dict[str, Any]:
+    configured = _first_int_value(
+        model_info,
+        "context_window_tokens",
+        "context_length",
+        "max_context_tokens",
+        "max_input_tokens",
+    )
+    if configured:
+        tokens = configured
+        source = "user_config"
+    else:
+        tokens = profile.get("context_window_tokens")
+        source = str(profile.get("context_source") or "unknown")
+    return {
+        "context_window_tokens": tokens,
+        "context_tier": _context_tier(tokens),
+        "context_source": source if tokens else "unknown",
+    }
+
+
+def recommend_model_roles(probe_result: dict) -> list[str]:
+    roles: list[str] = []
+    if probe_result.get("supports_basic_chat") is True:
+        roles.append("query_refiner")
+        roles.append("final_synthesizer")
+    context_tokens = int(probe_result.get("context_window_tokens") or 0)
+    if probe_result.get("supports_json_output") is True and context_tokens >= 32768:
+        roles.append("orchestrator")
+    if probe_result.get("supports_tools") is True:
+        roles.append("executor")
+    return roles
+
+
+def _first_int_value(source: dict, *keys: str) -> int | None:
+    for key in keys:
+        raw = source.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def _context_tier(tokens: int | None) -> str:
+    if not tokens:
+        return "unknown"
+    if tokens >= 200000:
+        return "very_long"
+    if tokens >= 65536:
+        return "long"
+    if tokens >= 32768:
+        return "medium"
+    return "standard"
+
+
+def _openai_context_window(model_name: str) -> int | None:
+    name = str(model_name or "").lower()
+    if "gpt-5.2" in name:
+        return 400000
+    if "gpt-4.1" in name:
+        return 1000000
+    if name.startswith("gpt-5") or name.startswith("gpt-4o"):
+        return 128000
+    return None
+
+
+def _qwen_context_window(model_name: str) -> int | None:
+    name = str(model_name or "").lower()
+    if "long" in name or "1m" in name or "million" in name:
+        return 1000000
+    if "qwen3" in name or "qwen-max" in name or "qwen-plus" in name:
+        return 131072
+    return None
 
 
 def _probe_step_timeout(env_name: str, fallback: float, profile: dict, profile_key: str) -> float:
@@ -650,6 +780,16 @@ def _safe_post_json(endpoint: str, headers: dict[str, str], payload: dict[str, A
         return _post_json(endpoint, headers, payload, timeout), None
     except Exception as exc:
         return None, exc
+
+
+def _timed_post_json(endpoint: str, headers: dict[str, str], payload: dict[str, Any], timeout: float):
+    started = time.perf_counter()
+    response, error = _safe_post_json(endpoint, headers, payload, timeout)
+    return response, error, _elapsed_ms(started)
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, int(round((time.perf_counter() - started) * 1000)))
 
 
 def _response_contains_json_ok(response) -> bool:

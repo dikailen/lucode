@@ -601,7 +601,19 @@ def _merge_probe(project_root: Path, model_info: dict) -> dict:
     probe = cached_probe_for_model(project_root, model_info)
     merged["probe"] = probe or {}
     if probe:
-        for key in ["supports_tools", "supports_basic_chat", "supports_json_output", "planner_suitable", "execution_suitable"]:
+        for key in [
+            "supports_tools",
+            "supports_basic_chat",
+            "supports_json_output",
+            "planner_suitable",
+            "execution_suitable",
+            "latency_ms",
+            "chat_latency_ms",
+            "context_window_tokens",
+            "context_tier",
+            "context_source",
+            "recommended_roles",
+        ]:
             if key in probe and probe.get(key) is not None:
                 merged[key] = probe.get(key)
     return merged

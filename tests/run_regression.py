@@ -6723,6 +6723,10 @@ class ModelTunerTests(unittest.TestCase):
                     "supports_tools": True,
                     "planner_suitable": True,
                     "execution_suitable": True,
+                    "context_window_tokens": 65536,
+                    "context_tier": "long",
+                    "latency_ms": 1234,
+                    "recommended_roles": ["orchestrator", "executor"],
                 },
                 {
                     "id": "mimo_v25_model",
@@ -6732,6 +6736,10 @@ class ModelTunerTests(unittest.TestCase):
                     "provider_ref": "mimo/mimo-v2.5",
                     "configured": True,
                     "supports_tools": True,
+                    "context_window_tokens": 32768,
+                    "context_tier": "medium",
+                    "latency_ms": 900,
+                    "recommended_roles": ["executor"],
                 },
             ]
         }
@@ -6741,6 +6749,10 @@ class ModelTunerTests(unittest.TestCase):
 
         self.assertIn("Lucode 多脑模型调音台", output)
         self.assertIn("当前脑位：执行专家脑", output)
+        self.assertIn("主脑", output)
+        self.assertIn("执行", output)
+        self.assertIn("64K", output)
+        self.assertIn("1.23s", output)
         self.assertIn("role 1-4", output)
         self.assertIn("select 1", output)
         self.assertEqual(resolve_role_selection("3"), "executor")
@@ -8529,7 +8541,7 @@ class ModelBackendPrivacyTests(unittest.TestCase):
         os.environ["MODEL_LOCAL_MODEL"] = "deepseek-r1:7b"
         os.environ["MODEL_LOCAL_BACKEND"] = "ollama"
         cache = {
-            "version": 4,
+            "version": 5,
             "results": {
                 "local_model": {
                     "status": "ok",
@@ -8982,6 +8994,44 @@ class ModelProbeTests(unittest.TestCase):
         self.assertTrue(result["tools_result_roundtrip"])
         self.assertTrue(result["supports_streaming"])
 
+    def test_probe_model_capabilities_records_latency_context_and_role_recommendations(self):
+        from catalog_system import model_probe
+
+        class FakeResponse:
+            def __init__(self, status_code, payload=None, text=""):
+                self.status_code = status_code
+                self._payload = payload or {}
+                self.text = text or json.dumps(self._payload)
+
+            def json(self):
+                return self._payload
+
+        responses = [
+            FakeResponse(200, {"choices": [{"message": {"content": '{"ok": true}'}}]}),
+            FakeResponse(200, {"choices": [{"message": {"content": "tools accepted"}}]}),
+            FakeResponse(200, {"choices": [{"message": {"tool_calls": [{"id": "call_auto", "function": {"name": "capability_probe", "arguments": "{\"value\":\"ping\"}"}}]}}]}),
+            FakeResponse(200, {"choices": [{"message": {"content": "tool result accepted"}}]}),
+            FakeResponse(200, text='data: {"choices":[{"delta":{"content":"pong"}}]}\n\n'),
+        ]
+
+        with patch.object(model_probe, "_post_json", side_effect=responses):
+            result = model_probe.probe_model_capabilities(
+                {
+                    "model_name": "deepseek-chat",
+                    "backend_type": "openai_compatible",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_key": "sk-test",
+                },
+                timeout=0.1,
+            )
+
+        self.assertIn("latency_ms", result)
+        self.assertIsInstance(result["chat_latency_ms"], int)
+        self.assertEqual(result["context_window_tokens"], 65536)
+        self.assertEqual(result["context_tier"], "long")
+        self.assertIn("orchestrator", result["recommended_roles"])
+        self.assertIn("executor", result["recommended_roles"])
+
     def test_refresh_model_probe_cache_records_config_incomplete_without_network(self):
         from catalog_system import model_probe
 
@@ -9382,7 +9432,17 @@ class ReadonlyCliConfigTests(unittest.TestCase):
                     "supports_tools": True,
                     "planner_suitable": True,
                     "execution_suitable": True,
-                    "probe": {},
+                    "context_window_tokens": 65536,
+                    "context_tier": "long",
+                    "latency_ms": 1234,
+                    "recommended_roles": ["orchestrator", "executor"],
+                    "probe": {
+                        "status": "ok",
+                        "context_window_tokens": 65536,
+                        "context_tier": "long",
+                        "latency_ms": 1234,
+                        "recommended_roles": ["orchestrator", "executor"],
+                    },
                 },
             ]
         }
@@ -9392,6 +9452,10 @@ class ReadonlyCliConfigTests(unittest.TestCase):
 
         self.assertIn("可用模型（紧凑视图）", output)
         self.assertIn("DeepSeek Pro（deepseek_v4_pro_model）", output)
+        self.assertIn("64K", output)
+        self.assertIn("1.23s", output)
+        self.assertIn("主脑", output)
+        self.assertIn("执行", output)
         self.assertNotIn("本地 DeepSeek R1", output)
         self.assertNotIn("暂不可用", output)
         self.assertEqual(alias_output, output)
@@ -10030,7 +10094,7 @@ class WritableCliConfigTests(unittest.TestCase):
             ]
         }
         fake_cache = {
-            "version": 4,
+            "version": 5,
             "results": {
                 "cloud_model": {
                     "status": "ok",

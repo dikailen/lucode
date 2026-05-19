@@ -273,17 +273,57 @@ def _model_label_for_tuner(model_info: dict) -> str:
 
 def _model_capability_for_tuner(model_info: dict) -> str:
     flags = []
-    if model_info.get("supports_tools") is True:
-        flags.append("工具")
-    if model_info.get("planner_suitable") is True:
-        flags.append("规划")
-    if model_info.get("execution_suitable") is True:
-        flags.append("执行")
+    roles = model_info.get("recommended_roles") or (model_info.get("probe") or {}).get("recommended_roles") or []
+    role_labels = {
+        "query_refiner": "前置",
+        "orchestrator": "主脑",
+        "executor": "执行",
+        "final_synthesizer": "汇总",
+    }
+    for role in ["query_refiner", "orchestrator", "executor", "final_synthesizer"]:
+        if role in roles:
+            flags.append(role_labels[role])
+    if not flags:
+        if model_info.get("supports_tools") is True:
+            flags.append("工具")
+        if model_info.get("planner_suitable") is True:
+            flags.append("规划")
+        if model_info.get("execution_suitable") is True:
+            flags.append("执行")
     if model_info.get("is_local"):
         flags.append("本地")
+    context_label = _format_context_window(model_info)
+    if context_label:
+        flags.append(context_label)
+    latency_label = _format_latency(model_info.get("latency_ms") or (model_info.get("probe") or {}).get("latency_ms"))
+    if latency_label:
+        flags.append(latency_label)
     if not flags:
         flags.append("未探测")
     return " / ".join(flags)
+
+
+def _format_context_window(model_info: dict) -> str:
+    tokens = model_info.get("context_window_tokens") or (model_info.get("probe") or {}).get("context_window_tokens")
+    try:
+        value = int(tokens)
+    except (TypeError, ValueError):
+        return ""
+    if value >= 1_000_000:
+        return f"{value // 1_000_000}M"
+    if value >= 1024:
+        return f"{round(value / 1024):g}K"
+    return str(value)
+
+
+def _format_latency(value) -> str:
+    try:
+        ms = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if ms <= 0:
+        return ""
+    return f"{ms / 1000:.2f}s"
 
 
 def _apply_role_ids_to_settings(settings: RuntimeSettings, role_id: str, model_ids: list[str]) -> None:
