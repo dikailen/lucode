@@ -6,6 +6,7 @@ import os
 import sys
 import threading
 from dataclasses import dataclass
+from typing import Sequence
 
 from runtime.commands.completion import (
     create_slash_command_completer,
@@ -19,6 +20,29 @@ from runtime.common.text_utils import sanitize_text
 class RuntimeTurnResult:
     final_output: str
     stopped: bool = False
+
+
+@dataclass(frozen=True)
+class ConsoleChoice:
+    command: str
+    display: str
+    meta: str = ""
+
+
+@dataclass(frozen=True)
+class ConsoleFormField:
+    name: str
+    label: str
+    value: str = ""
+    required: bool = False
+    secret: bool = False
+    help: str = ""
+
+
+@dataclass(frozen=True)
+class ConsoleFormResult:
+    action: str
+    values: dict[str, str]
 
 
 def should_enable_prompt_toolkit(
@@ -46,6 +70,52 @@ def prompt_mouse_support_enabled(env=None) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def choice_mouse_support_enabled(env=None) -> bool:
+    env = os.environ if env is None else env
+    value = str(env.get("LUCODE_TUNER_MOUSE_SUPPORT", "")).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def fullscreen_form_mouse_support_enabled(env=None) -> bool:
+    env = os.environ if env is None else env
+    value = str(env.get("LUCODE_FORM_MOUSE_SUPPORT", "1")).strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def fullscreen_form_enabled(env=None) -> bool:
+    env = os.environ if env is None else env
+    value = str(env.get("LUCODE_DISABLE_FULLSCREEN_FORMS", "")).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return False
+    mode = str(env.get("LUCODE_CONNECT_FORM", "")).strip().lower()
+    return mode not in {"light", "lite", "simple", "basic"}
+
+
+def fullscreen_form_style_rules() -> dict[str, str]:
+    return {
+        "form.root": "bg:#05070d #d6e5ff",
+        "dialog": "bg:#07111f #d6e5ff",
+        "dialog.body": "bg:#07111f #d6e5ff",
+        "frame": "bg:#07111f #d6e5ff",
+        "frame.border": "#1f7aff bg:#07111f",
+        "frame.label": "#59d7ff bg:#07111f bold",
+        "shadow": "bg:#02040a",
+        "form.message": "#d6e5ff bg:#07111f",
+        "form.label": "#7db4ff bg:#07111f bold",
+        "form.required": "#59d7ff bg:#07111f bold",
+        "form.help": "#7b8aa3 bg:#07111f",
+        "form.footer": "#7db4ff bg:#07111f",
+        "form.input": "bg:#0d1b2e #f2f7ff",
+        "form.input.prompt": "#59d7ff bg:#0d1b2e bold",
+        "form.button": "bg:#10223a #9fb7d9",
+        "form.button.focused": "bg:#1f7aff #ffffff bold",
+        "button": "bg:#10223a #9fb7d9",
+        "button.focused": "bg:#1f7aff #ffffff bold",
+        "button.arrow": "#59d7ff",
+        "button.text": "bold",
+    }
+
+
 class StdinConsoleAdapter:
     """Single-reader stdin adapter so runtime stop/approval won't compete for input()."""
 
@@ -61,6 +131,8 @@ class StdinConsoleAdapter:
         self._reader_lock = threading.Lock()
         self._main_prompt_session = None
         self._runtime_prompt_session = None
+        self._choice_prompt_session = None
+        self._secret_prompt_session = None
 
     async def read_line(self, prompt: str = "\n你：") -> str:
         if self._deferred_lines:
@@ -84,6 +156,74 @@ class StdinConsoleAdapter:
         if item is self._EOF:
             raise EOFError
         return item
+
+    async def read_choice_line(
+        self,
+        prompt: str,
+        choices: Sequence[ConsoleChoice],
+        *,
+        bottom_toolbar: str = "",
+        reserve_space_for_menu: int = 10,
+    ) -> str:
+        if self._deferred_lines:
+            return self._deferred_lines.pop(0)
+        if self._should_use_prompt_toolkit():
+            try:
+                return await self._read_prompt_toolkit_choice(
+                    prompt,
+                    choices,
+                    bottom_toolbar=bottom_toolbar,
+                    reserve_space_for_menu=reserve_space_for_menu,
+                )
+            except Exception:
+                pass
+        print(prompt, end="", flush=True)
+        self._ensure_reader()
+        item = await self._queue.get()
+        if item is self._EOF:
+            raise EOFError
+        return item
+
+    async def read_secret_line(self, prompt: str) -> str:
+        if self._deferred_lines:
+            return self._deferred_lines.pop(0)
+        if self._should_use_prompt_toolkit():
+            try:
+                return await self._read_prompt_toolkit_secret(prompt)
+            except Exception:
+                pass
+        print(prompt, end="", flush=True)
+        self._ensure_reader()
+        item = await self._queue.get()
+        if item is self._EOF:
+            raise EOFError
+        return item
+
+    async def read_form(
+        self,
+        *,
+        title: str,
+        fields: Sequence[ConsoleFormField],
+        actions: Sequence[ConsoleChoice],
+        message: str = "",
+        footer: str = "",
+    ) -> ConsoleFormResult | None:
+        if self._deferred_lines:
+            return None
+        if not fullscreen_form_enabled():
+            return None
+        if not self._should_use_prompt_toolkit():
+            return None
+        try:
+            return await self._read_prompt_toolkit_form(
+                title=title,
+                fields=fields,
+                actions=actions,
+                message=message,
+                footer=footer,
+            )
+        except Exception:
+            return None
 
     def defer(self, line: str) -> None:
         if line is None:
@@ -138,6 +278,301 @@ class StdinConsoleAdapter:
         with patch_stdout():
             prompt_message = slash_prompt_message(prompt) if complete_slash else prompt
             return await session.prompt_async(prompt_message)
+
+    async def _read_prompt_toolkit_choice(
+        self,
+        prompt: str,
+        choices: Sequence[ConsoleChoice],
+        *,
+        bottom_toolbar: str,
+        reserve_space_for_menu: int,
+    ) -> str:
+        try:
+            from prompt_toolkit import PromptSession
+            from prompt_toolkit.application import get_app
+            from prompt_toolkit.completion import Completer, Completion
+            from prompt_toolkit.key_binding import KeyBindings
+            from prompt_toolkit.patch_stdout import patch_stdout
+            from prompt_toolkit.shortcuts.prompt import CompleteStyle
+            from prompt_toolkit.styles import Style
+        except Exception:
+            print(prompt, end="", flush=True)
+            self._ensure_reader()
+            item = await self._queue.get()
+            if item is self._EOF:
+                raise EOFError
+            return item
+
+        class ChoiceCompleter(Completer):
+            def get_completions(self, document, complete_event):
+                del complete_event
+                query = document.text_before_cursor.strip().lower()
+                start_position = -len(document.text_before_cursor)
+                for choice in choices:
+                    haystack = f"{choice.command} {choice.display} {choice.meta}".lower()
+                    if query and query not in haystack:
+                        continue
+                    yield Completion(
+                        choice.command,
+                        start_position=start_position,
+                        display=choice.display,
+                        display_meta=choice.meta,
+                    )
+
+        bindings = KeyBindings()
+
+        @bindings.add("q")
+        def _exit_on_empty_q(event):
+            buffer = event.current_buffer
+            if buffer.text:
+                buffer.insert_text("q")
+                return
+            buffer.insert_text("q")
+            buffer.validate_and_handle()
+
+        if self._choice_prompt_session is None:
+            self._choice_prompt_session = PromptSession()
+
+        def start_choice_completion() -> None:
+            get_app().current_buffer.start_completion(select_first=True)
+
+        style = Style.from_dict(
+            {
+                "prompt": "ansiblue bold",
+                "completion-menu.completion": "bg:#202020 #d0d0d0",
+                "completion-menu.completion.current": "bg:#005fff #ffffff bold",
+                "scrollbar.background": "bg:#303030",
+                "scrollbar.button": "bg:#707070",
+            }
+        )
+        with patch_stdout():
+            return await self._choice_prompt_session.prompt_async(
+                [("class:prompt", prompt)],
+                completer=ChoiceCompleter(),
+                complete_while_typing=True,
+                complete_style=CompleteStyle.COLUMN,
+                key_bindings=bindings,
+                mouse_support=choice_mouse_support_enabled(),
+                bottom_toolbar=bottom_toolbar,
+                reserve_space_for_menu=reserve_space_for_menu,
+                style=style,
+                pre_run=start_choice_completion,
+            )
+
+    async def _read_prompt_toolkit_secret(self, prompt: str) -> str:
+        try:
+            from prompt_toolkit import PromptSession
+            from prompt_toolkit.patch_stdout import patch_stdout
+        except Exception:
+            print(prompt, end="", flush=True)
+            self._ensure_reader()
+            item = await self._queue.get()
+            if item is self._EOF:
+                raise EOFError
+            return item
+
+        if self._secret_prompt_session is None:
+            self._secret_prompt_session = PromptSession(is_password=True)
+        with patch_stdout():
+            return await self._secret_prompt_session.prompt_async([("class:prompt", prompt)])
+
+    async def _read_prompt_toolkit_form(
+        self,
+        *,
+        title: str,
+        fields: Sequence[ConsoleFormField],
+        actions: Sequence[ConsoleChoice],
+        message: str,
+        footer: str,
+    ) -> ConsoleFormResult:
+        try:
+            from prompt_toolkit.application import Application, get_app
+            from prompt_toolkit.key_binding import KeyBindings
+            from prompt_toolkit.layout.containers import HSplit
+            from prompt_toolkit.layout import Layout, Window, WindowAlign
+            from prompt_toolkit.layout.controls import FormattedTextControl
+            from prompt_toolkit.patch_stdout import patch_stdout
+            from prompt_toolkit.styles import Style
+            from prompt_toolkit.mouse_events import MouseEventType
+            from prompt_toolkit.utils import get_cwidth
+            from prompt_toolkit.widgets import Box, Dialog, Label, TextArea
+        except Exception:
+            raise
+
+        class FormButton:
+            def __init__(self, text: str, command: str, handler, width: int) -> None:
+                self.text = text
+                self.command = command
+                self.handler = handler
+                self.width = width
+                self.control = FormattedTextControl(
+                    self._get_text_fragments,
+                    key_bindings=self._get_key_bindings(),
+                    focusable=True,
+                )
+                self.window = Window(
+                    self.control,
+                    align=WindowAlign.CENTER,
+                    height=1,
+                    width=width,
+                    style=self._get_style,
+                    dont_extend_width=False,
+                    dont_extend_height=True,
+                )
+
+            def _has_focus(self) -> bool:
+                try:
+                    return get_app().layout.has_focus(self)
+                except Exception:
+                    return False
+
+            def _get_style(self) -> str:
+                return "class:form.button.focused" if self._has_focus() else "class:form.button"
+
+            def _get_text_fragments(self):
+                style = "class:form.button.focused" if self._has_focus() else "class:form.button"
+                text_width = get_cwidth(self.text)
+                pad = max(2, self.width - text_width)
+                left = pad // 2
+                right = pad - left
+
+                def mouse_handler(mouse_event):
+                    if mouse_event.event_type == MouseEventType.MOUSE_UP:
+                        self.handler()
+
+                return [(style, f"{' ' * left}{self.text}{' ' * right}", mouse_handler)]
+
+            def _get_key_bindings(self) -> KeyBindings:
+                bindings = KeyBindings()
+
+                @bindings.add(" ")
+                @bindings.add("enter")
+                def _accept(event):
+                    del event
+                    self.handler()
+
+                return bindings
+
+            def __pt_container__(self):
+                return self.window
+
+        text_areas = []
+        rows = []
+        for field in fields:
+            marker = " *" if field.required else ""
+            area = TextArea(
+                text=str(field.value or ""),
+                multiline=False,
+                password=field.secret,
+                height=1,
+                prompt=[("class:form.input.prompt", "> ")],
+                focus_on_click=True,
+                style="class:form.input",
+            )
+            text_areas.append((field, area))
+            label = Label(
+                [
+                    ("class:form.label", field.label),
+                    ("class:form.required", marker),
+                ]
+            )
+            if field.help:
+                rows.append(HSplit([label, area, Label(field.help, style="class:form.help")], padding=0))
+            else:
+                rows.append(HSplit([label, area], padding=0))
+
+        app_holder = {}
+
+        def finish(action: str) -> None:
+            values = {field.name: area.text for field, area in text_areas}
+            app_holder["app"].exit(result=ConsoleFormResult(action=action, values=values))
+
+        buttons = []
+        for action in actions:
+            width = max(16, min(28, get_cwidth(str(action.display)) + 8))
+            buttons.append(
+                FormButton(
+                    action.display,
+                    command=action.command,
+                    handler=lambda command=action.command: finish(command),
+                    width=width,
+                )
+            )
+        focusables = [area for _, area in text_areas] + buttons
+
+        body_items = []
+        if message:
+            body_items.append(Label(message, style="class:form.message"))
+        body_items.extend(rows)
+        if footer:
+            body_items.append(Label(footer, style="class:form.footer"))
+
+        dialog = Dialog(
+            title=title,
+            body=HSplit(body_items, padding=1),
+            buttons=buttons,
+            width=90,
+            with_background=True,
+        )
+        root_container = Box(dialog, padding=1, style="class:form.root")
+        layout = Layout(root_container, focused_element=text_areas[0][1] if text_areas else buttons[0])
+
+        bindings = KeyBindings()
+
+        def move_focus(offset: int) -> None:
+            current = layout.current_window
+            widgets = [item.window if hasattr(item, "window") else item for item in focusables]
+            try:
+                index = widgets.index(current)
+            except ValueError:
+                index = 0
+            target = focusables[(index + offset) % len(focusables)]
+            layout.focus(target)
+
+        @bindings.add("tab")
+        @bindings.add("down")
+        def _focus_next(event):
+            del event
+            move_focus(1)
+
+        @bindings.add("s-tab")
+        @bindings.add("up")
+        def _focus_previous(event):
+            del event
+            move_focus(-1)
+
+        @bindings.add("c-s")
+        def _save_default(event):
+            del event
+            finish("save_default")
+
+        @bindings.add("c-o")
+        def _save_only(event):
+            del event
+            finish("save_only")
+
+        @bindings.add("c-p")
+        def _change_provider(event):
+            del event
+            finish("change_provider")
+
+        @bindings.add("escape")
+        @bindings.add("c-c")
+        def _cancel(event):
+            del event
+            finish("cancel")
+
+        style = Style.from_dict(fullscreen_form_style_rules())
+        app = Application(
+            layout=layout,
+            key_bindings=bindings,
+            full_screen=True,
+            mouse_support=fullscreen_form_mouse_support_enabled(),
+            style=style,
+        )
+        app_holder["app"] = app
+        with patch_stdout():
+            return await app.run_async()
 
     def _reader_loop(self) -> None:
         while True:

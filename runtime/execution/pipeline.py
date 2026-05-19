@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass, field
@@ -37,6 +38,10 @@ CODE_MARKERS = {
     "refactor",
     "review",
 }
+CODE_FILE_PATTERN = re.compile(
+    r"[\w./\\-]+\.(?:py|ts|tsx|js|jsx|md|json|toml|yaml|yml|ini|cfg|txt)\b",
+    re.IGNORECASE,
+)
 EDIT_MARKERS = {
     "修复",
     "修改",
@@ -176,6 +181,7 @@ def apply_pipeline_gate(plan: PlannerResult, refined_request: str) -> GateDecisi
 
     text = _combined_plan_text(plan, refined_request)
     if _is_explicit_readonly_analysis(text):
+        _ensure_readonly_locator_tools(plan)
         return GateDecision(
             needs_code_pipeline=False,
             edit_intent=False,
@@ -227,6 +233,19 @@ def apply_pipeline_gate(plan: PlannerResult, refined_request: str) -> GateDecisi
         decision.applied_tasks.append(task.id)
 
     return decision
+
+
+def _ensure_readonly_locator_tools(plan: PlannerResult) -> None:
+    for task in plan.tasks:
+        if "project_filesystem_readonly" not in task.mcp or "code_locator" in task.mcp:
+            continue
+        if not _readonly_task_mentions_file_or_code(task):
+            continue
+        _append_unique(task.mcp, "code_locator")
+        task.risk_notes = _append_note(
+            task.risk_notes,
+            "只读代码/文件分析已自动加入 code_locator，用于先定位后少量读取；未启用写入或命令工具。",
+        )
 
 
 def format_gate_decision(decision: GateDecision) -> str:
@@ -411,6 +430,13 @@ def _is_code_task(task: PlannedTask) -> bool:
     if task.skill_id == "jpc_now_skill":
         return True
     return "code_locator" in task.mcp or "workspace_edit" in task.mcp or "command_runner" in task.mcp
+
+
+def _readonly_task_mentions_file_or_code(task: PlannedTask) -> bool:
+    text = _task_text(task).lower()
+    if CODE_FILE_PATTERN.search(text):
+        return True
+    return _contains_any(text, CODE_MARKERS)
 
 
 def _task_text(task: PlannedTask) -> str:

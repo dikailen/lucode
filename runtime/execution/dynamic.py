@@ -159,6 +159,7 @@ async def _execute_dynamic_attempt(
         hooks=hooks,
         refiner_enabled=settings.query_refiner_enabled,
     )
+    _apply_executor_model_defaults(plan, settings, model_registry)
     gate_decision = apply_pipeline_gate(plan, refined.refined_request)
     run_state = PipelineRunState.create(refined.refined_request, plan)
     run_state.record_gate(gate_decision)
@@ -231,3 +232,64 @@ async def _execute_dynamic_attempt(
         return format_final_report(output, audit), audit
 
     return "主脑没有给出可执行路线。", None
+
+
+def _apply_executor_model_defaults(plan, settings, model_registry) -> None:
+    """Fill empty or invalid task.model with executor default model.
+
+    Conservative strategy (v1):
+    1. If task.model is empty, fill executor default.
+    2. If task.model is not in configured models and executor has a usable model, replace.
+    3. If task.model is already a valid configured model, leave it alone.
+    4. If task requires MCP/tools but executor model doesn't support tools, keep original
+       model and log a warning.
+    """
+    if not plan.tasks:
+        return
+
+    try:
+        executor_model_id = settings.select_model_id(model_registry, "executor")
+    except Exception:
+        executor_model_id = None
+
+    if not executor_model_id:
+        return
+
+    try:
+        executor_info = model_registry.get_model_info(executor_model_id)
+    except Exception:
+        executor_info = None
+
+    executor_supports_tools = executor_info.get("supports_tools", True) if executor_info else True
+
+    for task in plan.tasks:
+        if not task.model or not _task_model_is_usable(model_registry, task.model):
+            needs_tools = bool(task.mcp)
+            if needs_tools and not executor_supports_tools:
+                # Executor model doesn't support tools, keep a usable explicit task model.
+                if task.model and _task_model_is_usable(model_registry, task.model):
+                    continue
+            task.model = executor_model_id
+            if not needs_tools or executor_supports_tools:
+                continue
+
+
+def _task_model_is_usable(model_registry, model_id: str) -> bool:
+    if not model_id:
+        return False
+    try:
+        info = model_registry.get_model_info(model_id)
+    except Exception:
+        definitions = getattr(model_registry, "definitions", {}) or {}
+        return model_id in definitions
+    if info.get("configured") is False:
+        return False
+    probe = info.get("probe") or {}
+    status = str(probe.get("status") or "").strip()
+    return status not in {
+        "chat_failed",
+        "probe_failed",
+        "service_unavailable",
+        "model_missing",
+        "capability_probe_failed",
+    }

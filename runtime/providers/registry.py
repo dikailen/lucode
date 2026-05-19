@@ -53,9 +53,11 @@ class ProviderRegistry:
         )
         if cache_key not in self._model_cache:
             self._model_cache[cache_key] = provider.create_model(
+                provider_id=provider_id,
                 api_key=api_key,
                 base_url=base_url,
                 model_name=model_name,
+                options=options or {},
             )
         return self._model_cache[cache_key]
 

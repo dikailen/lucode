@@ -45,14 +45,9 @@ async def _run_multi_agent(
                     if show_progress and run_state:
                         run_state.record_task_started(task)
                         _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=task.title)
-                    try:
-                        title, output = await _run_planned_task(
-                            refined_request, task, project_root, factory, hooks, run_agent, run_state, ledger
-                        )
-                    except Exception:
-                        if show_progress and run_state:
-                            _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"失败：{task.title}")
-                        raise
+                    title, output = await _run_planned_task(
+                        refined_request, task, project_root, factory, hooks, run_agent, run_state, ledger
+                    )
                     workspace.write_task_output(task.id, title, output)
                     if show_progress and run_state:
                         _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"已完成：{task.title}")
@@ -64,20 +59,41 @@ async def _run_multi_agent(
                         run_state.record_task_started(task)
                     active = "并行批次 " + ", ".join(getattr(task, "id", "task") for task in batch)
                     _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=active)
-                try:
-                    results = await asyncio.gather(
-                        *(
-                            _run_planned_task(
-                                refined_request, task, project_root, factory, hooks, run_agent, run_state, ledger
-                            )
-                            for task in batch
+                results = await asyncio.gather(
+                    *(
+                        _run_planned_task(
+                            refined_request, task, project_root, factory, hooks, run_agent, run_state, ledger
                         )
+                        for task in batch
+                    ),
+                    return_exceptions=True,
+                )
+                normalized_results = []
+                for task, result in zip(batch, results):
+                    if isinstance(result, Exception):
+                        message = str(result) or result.__class__.__name__
+                        if run_state:
+                            run_state.record_task_error(task, message)
+                        normalized_results.append(
+                            (
+                                task.title,
+                                f"任务失败：{task.title}\n原因：{message}\n系统已记录该失败并交给最终审核判断。",
+                            )
+                        )
+                    else:
+                        normalized_results.append(result)
+                if show_progress and run_state and any(
+                    getattr(record, "status", "") == "failed"
+                    for record in run_state.tasks
+                    if record.id in {getattr(task, "id", "") for task in batch}
+                ):
+                    _print_progress_snapshot(
+                        run_state,
+                        mode=mode,
+                        attempt=attempt,
+                        active=f"批次存在失败：{active}",
                     )
-                except Exception:
-                    if show_progress and run_state:
-                        _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"失败：{active}")
-                    raise
-                for task, (title, output) in zip(batch, results):
+                for task, (title, output) in zip(batch, normalized_results):
                     workspace.write_task_output(task.id, title, output)
                 if show_progress and run_state:
                     _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"已完成：{active}")
@@ -90,6 +106,8 @@ async def _run_multi_agent(
             synthesis_prompt = (
                 "请读取当前运行工作目录中的所有任务输出文件，按照以下要求汇总：\n"
                 f"{plan.synthesis_instruction}\n\n"
+                "这些文件只是本轮临时 Agent 输出，不是用户项目文件；"
+                "最终回答请称为“专家输出/任务输出”，不要声称读取了用户项目文件。\n"
                 "请输出面向用户的最终中文答案。"
             )
             result = await run_agent(synthesizer, synthesis_prompt, hooks, max_turns=10)

@@ -48,6 +48,15 @@ async def _run_planned_task(
 ) -> tuple[str, str]:
     if ledger:
         ledger.record_proposal(task, task.instruction)
+    failed_dependencies = _failed_dependencies_for_task(task, run_state)
+    if failed_dependencies:
+        message = "依赖任务未完成或已失败：" + ", ".join(failed_dependencies)
+        if run_state:
+            run_state.record_task_error(task, message)
+        if ledger:
+            ledger.record_task_status(task.id, "failed", message)
+        return task.title, _task_failure_output(task, message)
+
     fast_path_output = _readonly_fast_path_output(project_root, task)
     if fast_path_output is not None:
         output = _with_verification_report(project_root, task, fast_path_output, run_state)
@@ -67,11 +76,12 @@ async def _run_planned_task(
             max_turns=_max_turns_for_task(task),
         )
     except Exception as exc:
+        message = _friendly_task_error(exc)
         if run_state:
-            run_state.record_task_error(task, exc)
+            run_state.record_task_error(task, message)
         if ledger:
-            ledger.record_task_status(task.id, "failed", str(exc))
-        raise
+            ledger.record_task_status(task.id, "failed", message)
+        return task.title, _task_failure_output(task, message)
     output = _with_verification_report(project_root, task, str(result.final_output), run_state)
     if run_state:
         run_state.record_task_result(task, output)
@@ -103,6 +113,36 @@ def _max_turns_for_task(task) -> int:
     if task.mcp:
         return 12
     return 6
+
+
+def _failed_dependencies_for_task(task, run_state: PipelineRunState | None) -> list[str]:
+    if not run_state:
+        return []
+    records = {record.id: record for record in run_state.tasks}
+    failed = []
+    for dep_id in getattr(task, "depends_on", []) or []:
+        record = records.get(dep_id)
+        if record is None:
+            continue
+        if record.status != "completed":
+            failed.append(dep_id)
+    return failed
+
+
+def _friendly_task_error(exc: Exception | str) -> str:
+    name = exc.__class__.__name__ if isinstance(exc, Exception) else ""
+    text = str(exc)
+    if name == "MaxTurnsExceeded" or "max turns" in text.lower():
+        return "任务超过最大工具/模型轮数，已停止该专家以避免无限循环。"
+    return text or name or "任务执行失败。"
+
+
+def _task_failure_output(task, message: str) -> str:
+    return (
+        f"任务失败：{getattr(task, 'title', '') or getattr(task, 'id', 'task')}\n"
+        f"原因：{message}\n"
+        "系统已记录该失败并交给最终审核判断；如果需要继续，请缩小任务范围、减少工具读取，或让主脑重新规划。"
+    )
 
 
 def _task_output_map(run_state: PipelineRunState | None) -> dict[str, str]:

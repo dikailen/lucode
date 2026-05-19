@@ -15,6 +15,17 @@ APP_HOME = Path(__file__).resolve().parents[1]
 DEFAULT_VERSION = "0.1.0"
 
 
+def configure_stdio_encoding() -> None:
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def fast_dispatch(argv: list[str]) -> int | None:
     if not argv or "--" in argv[:1]:
         return None
@@ -83,16 +94,23 @@ def build_parser() -> argparse.ArgumentParser:
     connect.add_argument("--model", action="append", default=[], help="添加一个模型名，可重复传入")
     connect.add_argument("--models", help="逗号分隔的模型名列表")
     connect.add_argument("--custom", action="store_true", help="按自定义 OpenAI-compatible 中转保存")
+    connect.add_argument("--remove", "--delete", action="store_true", help="删除 Provider 配置、API key 和失效模型引用")
     connect.set_defaults(command="connect")
 
     models = subparsers.add_parser("models", help="查看或选择模型优先级")
     model_subparsers = models.add_subparsers(dest="models_action")
+    model_subparsers.add_parser("list", help="按 Provider 分组查看模型源")
+    model_subparsers.add_parser("available", help="只显示当前可运行模型")
     model_select = model_subparsers.add_parser("select", help="选择主模型和 fallback")
     model_select.add_argument("primary", help="主模型引用，例如 deepseek/deepseek-chat")
     model_select.add_argument("fallback", nargs="*", help="Fallback 模型引用")
-    model_role = model_subparsers.add_parser("role", help="配置三脑角色模型优先级")
-    model_role.add_argument("role", help="query_refiner、orchestrator 或 final_synthesizer")
+    model_role = model_subparsers.add_parser("role", help="配置四脑角色模型优先级（兼容命令）")
+    model_role.add_argument("role", help="query_refiner、orchestrator、executor 或 final_synthesizer")
     model_role.add_argument("refs", nargs="+", help="模型引用列表，例如 deepseek/deepseek-chat")
+    model_subparsers.add_parser("roles", help="查看四脑角色模型配置")
+    model_brain = model_subparsers.add_parser("brain", help="切换前置优化脑、主脑、执行脑或汇总脑模型")
+    model_brain.add_argument("role", help="前置优化、主脑、执行、汇总，或 query_refiner/orchestrator/executor/final_synthesizer")
+    model_brain.add_argument("refs", nargs="*", help="模型引用列表，例如 deepseek/deepseek-chat；role 为 reset 时可省略")
     models.set_defaults(command="models")
 
     auth = subparsers.add_parser("auth", help="管理用户级 Provider 凭据")
@@ -109,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_stdio_encoding()
     argv = list(sys.argv[1:] if argv is None else argv)
     fast_result = fast_dispatch(argv)
     if fast_result is not None:
@@ -185,8 +204,16 @@ def main(argv: list[str] | None = None) -> int:
 def _workspace_context(args):
     from runtime.config.workspace import discover_workspace_context
 
-    cwd = Path(args.workspace).resolve() if getattr(args, "workspace", None) else Path.cwd()
-    return discover_workspace_context(APP_HOME, cwd=cwd)
+    explicit_workspace = bool(getattr(args, "workspace", None))
+    env_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+    if explicit_workspace:
+        cwd = Path(args.workspace).resolve()
+    elif env_workspace:
+        cwd = Path(env_workspace).expanduser().resolve()
+        explicit_workspace = True
+    else:
+        cwd = Path.cwd()
+    return discover_workspace_context(APP_HOME, cwd=cwd, explicit_workspace=explicit_workspace)
 
 
 def _export_context(context, args=None) -> None:
@@ -361,44 +388,88 @@ def _handle_session(context) -> int:
 
 def _handle_connect(args, context) -> int:
     from runtime.config.cli import render_readonly_command
-    from runtime.config.model_config import connect_provider
+    from runtime.config.connect_command import (
+        apply_provider_connect_request,
+        provider_requires_api_key,
+        redact_connect_secret,
+        render_provider_connect_success,
+        request_from_cli_args,
+    )
     from runtime.config.settings import RuntimeSettings
 
     if not args.provider:
         print(render_readonly_command("/connect", RuntimeSettings.from_env(), context))
         return 0
 
-    models = list(args.model or [])
-    if args.models:
-        models.extend(item.strip() for item in args.models.split(",") if item.strip())
+    if bool(getattr(args, "remove", False)):
+        from runtime.config.model_config import remove_provider_config
+
+        try:
+            result = remove_provider_config(args.provider, workspace_root=context.workspace_root, user_home=context.user_home)
+            try:
+                from catalog_system.model_catalog import clear_model_catalog_cache
+                from runtime.commands.completion import clear_completion_caches
+
+                clear_model_catalog_cache()
+                clear_completion_caches()
+            except Exception:
+                pass
+        except Exception as exc:
+            print(f"删除 Provider 失败：{exc}")
+            return 1
+        if not result["provider_removed"] and not result["auth_removed"]:
+            print(f"没有找到 Provider：{result['provider_id']}，未改动配置。")
+            return 1
+        print(f"已删除 Provider：{result['provider_id']}")
+        print(f"项目配置：{'已删除' if result['provider_removed'] else '未找到'}")
+        print(f"API key：{'已删除' if result['auth_removed'] else '未找到'}")
+        print(f"已清理失效模型引用：{result.get('removed_model_refs', 0)} 个")
+        print("失效脑位会在下次启动或重新加载时回到默认可用模型顺序。")
+        return 0
+
     try:
-        result = connect_provider(
-            args.provider,
-            api_key=args.api_key,
-            workspace_root=context.workspace_root,
-            user_home=context.user_home,
-            homepage=args.homepage,
-            base_url=args.base_url,
-            models=models or None,
-            display_name=args.display_name,
-            custom=args.custom,
-        )
+        request = request_from_cli_args(args)
     except Exception as exc:
         print(f"连接失败：{exc}")
         return 1
-    provider = result["provider"]
-    print(f"已连接 Provider：{provider.get('display_name')}（{result['provider_id']}）")
-    print(f"官网：{provider.get('homepage')}")
-    print(f"请求地址：{provider.get('base_url')}")
-    print("API key 已保存到用户级 auth.json，未写入项目配置。")
+    try:
+        missing_builtin_key = not args.custom and provider_requires_api_key(request) and not request.api_key
+    except Exception as exc:
+        print(f"连接失败：{redact_connect_secret(str(exc), request)}")
+        return 1
+    if missing_builtin_key:
+        print(render_readonly_command(f"/connect {args.provider}", RuntimeSettings.from_env(), context))
+        print("")
+        print("还缺 API key，未写入项目配置。")
+        print(f"保存命令：lucode connect {request.normalized_provider} --api-key <key>")
+        return 0
+    try:
+        result = apply_provider_connect_request(
+            request,
+            workspace_root=context.workspace_root,
+            user_home=context.user_home,
+        )
+    except Exception as exc:
+        print(f"连接失败：{redact_connect_secret(str(exc), request)}")
+        return 1
+    print(render_provider_connect_success(result, api_key_provided=bool(request.api_key)))
     return 0
 
 
 def _handle_models(args, context) -> int:
     from runtime.config.cli import render_readonly_command
-    from runtime.config.model_config import select_model_priority, select_role_model_priority
+    from runtime.config.model_config import reset_role_model_priorities, select_model_priority, select_role_model_priority
     from runtime.config.settings import RuntimeSettings
 
+    if getattr(args, "models_action", None) == "list":
+        print(render_readonly_command("/models list", RuntimeSettings.from_env(), context))
+        return 0
+    if getattr(args, "models_action", None) == "available":
+        print(render_readonly_command("/models available", RuntimeSettings.from_env(), context))
+        return 0
+    if getattr(args, "models_action", None) == "roles":
+        print(render_readonly_command("/models roles", RuntimeSettings.from_env(), context))
+        return 0
     if getattr(args, "models_action", None) == "select":
         try:
             select_model_priority(
@@ -412,7 +483,15 @@ def _handle_models(args, context) -> int:
         print(f"已选择主模型：{args.primary}")
         print(f"Fallback：{', '.join(args.fallback) if args.fallback else '无'}")
         return 0
-    if getattr(args, "models_action", None) == "role":
+    if getattr(args, "models_action", None) in {"role", "brain"}:
+        if getattr(args, "models_action", None) == "brain" and str(args.role).strip().lower() == "reset":
+            reset_role_model_priorities(workspace_root=context.workspace_root)
+            print("已重置多脑模型覆盖配置。")
+            print("已删除项目配置中的 [roles]。")
+            return 0
+        if not args.refs:
+            print("模型角色配置失败：请提供至少一个模型引用，或使用 lucode models brain reset。")
+            return 1
         try:
             select_role_model_priority(
                 workspace_root=context.workspace_root,

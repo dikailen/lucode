@@ -152,7 +152,7 @@ async def run_solo_request(
     """Run one tool-capable Agent without planner/refiner/synthesizer."""
 
     settings = settings or RuntimeSettings.from_env()
-    model_id = settings.select_model_id(model_registry, "orchestrator")
+    model_id = settings.select_model_id(model_registry, "executor")
     factory = AgentFactory(model_registry, mcp_manager=mcp_manager)
     mcp_ids = _solo_mcp_ids_for_input(run_input, settings)
     if "project_filesystem_readonly" in mcp_ids:

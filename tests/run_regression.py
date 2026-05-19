@@ -1,6 +1,7 @@
 ﻿import json
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import stat
 import asyncio
 import contextlib
 import io
+import unicodedata
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,6 +36,33 @@ def _safe_rmtree(path: Path) -> None:
             pass
 
     shutil.rmtree(path, onerror=_onerror)
+
+
+def _restore_env(name: str, old_value: str | None) -> None:
+    if old_value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = old_value
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _visible_width(value: str) -> int:
+    text = ANSI_RE.sub("", str(value or ""))
+    width = 0
+    for char in text:
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+    return width
+
+
+def _assert_box_lines_aligned(testcase: unittest.TestCase, output: str, *, label: str) -> None:
+    lines = [line for line in str(output or "").splitlines() if line]
+    testcase.assertGreater(len(lines), 1, label)
+    widths = {_visible_width(line) for line in lines}
+    testcase.assertEqual(len(widths), 1, f"{label} box widths differ: {sorted(widths)}")
 
 
 class BudgetedFilesystemTests(unittest.TestCase):
@@ -1446,6 +1475,26 @@ class RuntimeHelpersTests(unittest.TestCase):
         self.assertIn("Diff 摘要", diff)
         self.assertNotIn("sk-", status + diff)
 
+    def test_blue_panel_borders_are_aligned_for_common_cli_pages(self):
+        from runtime.config.cli import render_readonly_command, render_status_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import discover_workspace_context
+
+        settings = RuntimeSettings.from_env()
+        context = discover_workspace_context(PROJECT_ROOT, cwd=PROJECT_ROOT)
+        outputs = {
+            "/status": render_status_command(PROJECT_ROOT, settings),
+            "/connect": render_readonly_command("/connect", settings, context),
+            "/help": render_readonly_command("/help", settings, context),
+            "/tools": render_readonly_command("/tools", settings, context),
+            "/config": render_readonly_command("/config", settings, context),
+            "/models list": render_readonly_command("/models list", settings, context),
+        }
+
+        for command, output in outputs.items():
+            with self.subTest(command=command):
+                _assert_box_lines_aligned(self, output, label=command)
+
     def test_status_and_diff_commands_handle_missing_workspace(self):
         from runtime.config.cli import render_status_command, render_diff_command
         from runtime.config.settings import RuntimeSettings
@@ -1513,6 +1562,29 @@ class WorkspaceContextTests(unittest.TestCase):
         self.assertEqual(context.workspace_root, cwd.resolve())
         self.assertFalse(context.has_project_config)
         self.assertEqual(context.project_config_dir, cwd.resolve() / ".lucode")
+
+    def test_workspace_context_explicit_workspace_does_not_walk_to_parent_lucode(self):
+        from runtime.config.workspace import discover_workspace_context
+
+        app_home = TEMP_ROOT / f"app_{uuid.uuid4().hex}"
+        root = TEMP_ROOT / f"explicit_workspace_{uuid.uuid4().hex}"
+        child = root / "pkg" / "demo"
+        app_home.mkdir(parents=True)
+        (root / ".lucode").mkdir(parents=True)
+        child.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(root))
+
+        context = discover_workspace_context(
+            app_home=app_home,
+            cwd=child,
+            user_home=TEMP_ROOT,
+            explicit_workspace=True,
+        )
+
+        self.assertEqual(context.workspace_root, child.resolve())
+        self.assertFalse(context.has_project_config)
+        self.assertEqual(context.project_config_dir, child.resolve() / ".lucode")
 
     def test_workspace_context_finds_nearest_lucode_parent(self):
         from runtime.config.workspace import discover_workspace_context
@@ -1707,9 +1779,18 @@ class ProviderConfigC2Tests(unittest.TestCase):
 
         catalog = load_provider_catalog(PROJECT_ROOT / "catalogs" / "provider_catalog.json")
 
-        self.assertIn("deepseek", catalog)
+        for provider_id in ["deepseek", "openai", "openrouter", "dashscope", "siliconflow"]:
+            with self.subTest(provider=provider_id):
+                self.assertIn(provider_id, catalog)
+                self.assertTrue(catalog[provider_id]["homepage"])
+                self.assertTrue(catalog[provider_id]["base_url"])
+                self.assertTrue(catalog[provider_id]["models"])
+                self.assertIn("supports_tools", catalog[provider_id])
+                self.assertIn("compatible_type", catalog[provider_id])
+
         self.assertEqual(catalog["deepseek"]["homepage"], "https://platform.deepseek.com")
         self.assertEqual(catalog["deepseek"]["base_url"], "https://api.deepseek.com")
+        self.assertEqual(catalog["openai"]["base_url"], "https://api.openai.com/v1")
         self.assertIn("custom_openai_compatible", catalog)
         self.assertIn("homepage", catalog["custom_openai_compatible"])
         self.assertIn("base_url", catalog["custom_openai_compatible"])
@@ -1762,6 +1843,123 @@ class ProviderConfigC2Tests(unittest.TestCase):
                 models=["deepseek-chat"],
                 custom=True,
             )
+
+    def test_custom_provider_requires_key_and_model_name(self):
+        from runtime.config.model_config import connect_provider
+
+        workspace = TEMP_ROOT / f"c2_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        with self.assertRaisesRegex(ValueError, "API key"):
+            connect_provider(
+                "my_proxy",
+                workspace_root=workspace,
+                user_home=user_home,
+                homepage="https://proxy.example.com",
+                base_url="https://api.proxy.example.com/v1",
+                models=["qwen-max"],
+                custom=True,
+            )
+        with self.assertRaisesRegex(ValueError, "模型名"):
+            connect_provider(
+                "my_proxy",
+                api_key="sk-c2-secret",
+                workspace_root=workspace,
+                user_home=user_home,
+                homepage="https://proxy.example.com",
+                base_url="https://api.proxy.example.com/v1",
+                custom=True,
+            )
+
+    def test_custom_provider_saves_model_source_without_secret_leak(self):
+        from runtime.config.model_config import connect_provider, load_auth, load_lucode_config
+
+        workspace = TEMP_ROOT / f"c2_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        connect_provider(
+            "my_proxy",
+            api_key="sk-c2-secret",
+            workspace_root=workspace,
+            user_home=user_home,
+            homepage="https://proxy.example.com",
+            base_url="https://api.proxy.example.com/v1",
+            models=["qwen-max"],
+            custom=True,
+        )
+
+        config_text = (workspace / ".lucode" / "config.toml").read_text(encoding="utf-8")
+        config = load_lucode_config(workspace_root=workspace)
+        auth = load_auth(user_home=user_home)
+
+        self.assertEqual(config["provider"]["my_proxy"]["models"], ["qwen-max"])
+        self.assertEqual(auth["providers"]["my_proxy"]["api_key"], "sk-c2-secret")
+        self.assertNotIn("sk-c2-secret", config_text)
+
+    def test_remove_custom_provider_prunes_model_and_brain_refs(self):
+        from runtime.config.model_config import (
+            connect_provider,
+            load_auth,
+            load_lucode_config,
+            remove_provider_config,
+            select_model_priority,
+            select_role_model_priority,
+        )
+
+        workspace = TEMP_ROOT / f"c2_remove_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_remove_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        connect_provider(
+            "my_proxy",
+            api_key="sk-c2-secret",
+            workspace_root=workspace,
+            user_home=user_home,
+            homepage="https://proxy.example.com",
+            base_url="https://api.proxy.example.com/v1",
+            models=["qwen-max"],
+            custom=True,
+        )
+        select_model_priority(
+            workspace_root=workspace,
+            primary_ref="my_proxy/qwen-max",
+            fallback_refs=["deepseek/deepseek-chat"],
+        )
+        select_role_model_priority(
+            workspace_root=workspace,
+            role="executor",
+            refs=["my_proxy/qwen-max", "deepseek/deepseek-chat"],
+        )
+        select_role_model_priority(
+            workspace_root=workspace,
+            role="orchestrator",
+            refs=["my_proxy/qwen-max"],
+        )
+
+        result = remove_provider_config("my_proxy", workspace_root=workspace, user_home=user_home)
+        config = load_lucode_config(workspace_root=workspace)
+        auth = load_auth(user_home=user_home)
+
+        self.assertTrue(result["provider_removed"])
+        self.assertTrue(result["auth_removed"])
+        self.assertNotIn("my_proxy", config.get("provider") or {})
+        self.assertNotIn("my_proxy", auth.get("providers") or {})
+        self.assertEqual(config["model"]["primary"], "deepseek/deepseek-chat")
+        self.assertEqual(config["model"]["fallback"], [])
+        self.assertEqual(config["roles"]["executor"], ["deepseek/deepseek-chat"])
+        self.assertNotIn("orchestrator", config.get("roles") or {})
+        self.assertGreaterEqual(result["removed_model_refs"], 3)
 
     def test_model_catalog_merges_lucode_provider_config_without_exposing_key(self):
         from catalog_system.model_catalog import clear_model_catalog_cache, load_model_catalog
@@ -1883,7 +2081,7 @@ class ProviderConfigC2Tests(unittest.TestCase):
         self.assertTrue(updated, output)
         self.assertEqual(settings.orchestrator_model_priority[:2], ["deepseek_chat_model", "deepseek_coder_model"])
         self.assertEqual(reloaded.orchestrator_model_priority[:2], ["deepseek_chat_model", "deepseek_coder_model"])
-        self.assertIn("三脑角色模型配置", roles_output)
+        self.assertIn("四脑角色模型配置", roles_output)
         self.assertIn("orchestrator", roles_output)
 
     def test_provider_registry_caches_openai_compatible_models(self):
@@ -1892,9 +2090,17 @@ class ProviderConfigC2Tests(unittest.TestCase):
         class FakeProvider:
             def __init__(self):
                 self.calls = 0
+                self.last_kwargs = None
 
-            def create_model(self, *, api_key, base_url, model_name):
+            def create_model(self, *, provider_id=None, api_key=None, base_url=None, model_name=None, options=None):
                 self.calls += 1
+                self.last_kwargs = {
+                    "provider_id": provider_id,
+                    "api_key": api_key,
+                    "base_url": base_url,
+                    "model_name": model_name,
+                    "options": options,
+                }
                 return {"api_key": api_key, "base_url": base_url, "model_name": model_name}
 
         fake = FakeProvider()
@@ -1919,6 +2125,43 @@ class ProviderConfigC2Tests(unittest.TestCase):
         self.assertEqual(fake.calls, 1)
         self.assertEqual(registry.cache_size(), 1)
         self.assertEqual(normalize_sdk_type("openai-compatible"), "openai_compatible")
+        self.assertEqual(fake.last_kwargs["provider_id"], "deepseek")
+        self.assertEqual(fake.last_kwargs["options"], {})
+
+    def test_openai_compatible_provider_enables_reasoning_replay_for_mimo_family(self):
+        from runtime.providers.openai_compatible import OpenAICompatibleProvider
+
+        class FakeAsyncOpenAI:
+            def __init__(self, *, api_key, base_url):
+                self.api_key = api_key
+                self.base_url = base_url
+
+        class FakeModel:
+            def __init__(self, *, model, openai_client, should_replay_reasoning_content=None):
+                self.model = model
+                self.client = openai_client
+                self.should_replay_reasoning_content = should_replay_reasoning_content
+
+        with patch("runtime.providers.openai_compatible.async_openai_class", return_value=FakeAsyncOpenAI), patch(
+            "runtime.providers.openai_compatible.openai_chat_completions_model_class",
+            return_value=FakeModel,
+        ):
+            model = OpenAICompatibleProvider().create_model(
+                provider_id="mimo",
+                api_key="sk-test",
+                base_url="https://api.xiaomimimo.com/v1",
+                model_name="mimo-v2.5",
+            )
+            disabled = OpenAICompatibleProvider().create_model(
+                provider_id="mimo",
+                api_key="sk-test",
+                base_url="https://api.xiaomimimo.com/v1",
+                model_name="mimo-v2.5",
+                options={"replay_reasoning_content": False},
+            )
+
+        self.assertIsNotNone(model.should_replay_reasoning_content)
+        self.assertFalse(disabled.should_replay_reasoning_content(object()))
 
     def test_provider_registry_rejects_unknown_sdk_type(self):
         from runtime.providers.registry import ProviderRegistry
@@ -2003,9 +2246,305 @@ class ProviderConfigC2Tests(unittest.TestCase):
         self.assertIn("https://api.deepseek.com", connect_output)
         self.assertIn("已保存 key", connect_output)
         self.assertNotIn("sk-c2-secret", connect_output)
-        self.assertIn("模型选择", models_output)
+        self.assertIn("多脑模型调音台", models_output)
         self.assertIn("deepseek/deepseek-chat", models_output)
         self.assertIn("当前主模型", models_output)
+
+    def test_connect_provider_hint_for_builtin_preset_is_actionable(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+
+        output = render_readonly_command("/connect openai", RuntimeSettings())
+
+        self.assertIn("Provider：OpenAI", output)
+        self.assertIn("https://platform.openai.com", output)
+        self.assertIn("https://api.openai.com/v1", output)
+        self.assertIn("推荐模型", output)
+        self.assertIn("lucode connect openai --api-key <key>", output)
+
+    def test_connect_readonly_render_never_echoes_api_key_flags(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+
+        output = render_readonly_command("/connect deepseek --api-key sk-readonly-secret", RuntimeSettings())
+
+        self.assertIn("连接命令包含写入参数", output)
+        self.assertNotIn("sk-readonly-secret", output)
+
+    def test_connect_slash_command_writes_provider_and_redacts_key(self):
+        from runtime.config.cli import apply_writable_config_command, parse_writable_config_command
+        from runtime.config.model_config import load_auth, load_lucode_config
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"c2_slash_connect_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_slash_connect_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        parsed = parse_writable_config_command("/connect deepseek --api-key sk-slash-secret --model deepseek-chat")
+        self.assertIsNotNone(parsed)
+        output, updated = apply_writable_config_command(
+            "/connect deepseek --api-key sk-slash-secret --model deepseek-chat",
+            workspace / ".env",
+            RuntimeSettings.from_env(),
+            workspace_context=context,
+        )
+
+        config_text = (workspace / ".lucode" / "config.toml").read_text(encoding="utf-8")
+        config = load_lucode_config(workspace_root=workspace)
+        auth = load_auth(user_home=user_home)
+
+        self.assertTrue(updated, output)
+        self.assertIn("已连接 Provider：DeepSeek（deepseek）", output)
+        self.assertIn("API key 已保存到用户级 auth.json", output)
+        self.assertNotIn("sk-slash-secret", output)
+        self.assertNotIn("sk-slash-secret", config_text)
+        self.assertEqual(config["provider"]["deepseek"]["models"], ["deepseek-chat"])
+        self.assertEqual(auth["providers"]["deepseek"]["api_key"], "sk-slash-secret")
+
+    def test_connect_slash_command_custom_validation_is_productized(self):
+        from runtime.config.cli import apply_writable_config_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"c2_slash_custom_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_slash_custom_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        missing_key, updated_key = apply_writable_config_command(
+            "/connect my_proxy --custom --homepage https://proxy.example.com --base-url https://api.proxy.example.com/v1 --model qwen-max",
+            workspace / ".env",
+            RuntimeSettings.from_env(),
+            workspace_context=context,
+        )
+        missing_model, updated_model = apply_writable_config_command(
+            "/connect my_proxy --custom --homepage https://proxy.example.com --base-url https://api.proxy.example.com/v1 --api-key sk-slash-secret",
+            workspace / ".env",
+            RuntimeSettings.from_env(),
+            workspace_context=context,
+        )
+
+        self.assertFalse(updated_key)
+        self.assertIn("连接失败", missing_key)
+        self.assertIn("API key", missing_key)
+        self.assertNotIn("sk-slash-secret", missing_model)
+        self.assertFalse(updated_model)
+        self.assertIn("模型名", missing_model)
+
+    def test_models_list_groups_provider_sources_for_humans(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.model_config import connect_provider
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"c2_models_list_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_models_list_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        connect_provider(
+            "deepseek",
+            api_key="sk-models-list-secret",
+            workspace_root=workspace,
+            user_home=user_home,
+            models=["deepseek-chat"],
+        )
+        connect_provider(
+            "openai",
+            workspace_root=workspace,
+            user_home=user_home,
+            models=["gpt-5.2"],
+        )
+        connect_provider("ollama", workspace_root=workspace, user_home=user_home)
+        connect_provider(
+            "my_proxy",
+            api_key="sk-proxy-secret",
+            workspace_root=workspace,
+            user_home=user_home,
+            homepage="https://proxy.example.com",
+            base_url="https://api.proxy.example.com/v1",
+            models=["qwen-max"],
+            custom=True,
+        )
+
+        output = render_readonly_command("/models list", RuntimeSettings.from_env(), context)
+
+        self.assertIn("Provider 模型列表", output)
+        self.assertIn("已配置 key", output)
+        self.assertIn("╭", output)
+        self.assertIn("DeepSeek（deepseek）", output)
+        self.assertIn("缺 API key", output)
+        self.assertIn("OpenAI（openai）", output)
+        self.assertIn("本地 Provider", output)
+        self.assertIn("Ollama（ollama）", output)
+        self.assertIn("自定义中转", output)
+        self.assertIn("my_proxy（my_proxy）", output)
+        self.assertIn("模型：deepseek/deepseek-chat", output)
+        self.assertIn("下一步：/models select", output)
+        self.assertNotIn("  官网：", output)
+        self.assertNotIn("  请求地址：", output)
+        self.assertNotIn("sk-models-list-secret", output)
+        self.assertNotIn("sk-proxy-secret", output)
+
+    def test_connect_wizard_builds_request_without_leaking_secret(self):
+        from runtime.config.connect_wizard import (
+            apply_connect_wizard_input,
+            build_connect_request_from_state,
+            build_connect_wizard_state,
+            connect_wizard_command_items,
+            render_connect_wizard_snapshot,
+        )
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"connect_wizard_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_wizard_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        state = build_connect_wizard_state(context)
+        output = render_connect_wizard_snapshot(state)
+        choices = connect_wizard_command_items(state)
+
+        self.assertIn("Lucode Provider 连接", output)
+        self.assertIn("DeepSeek", output)
+        self.assertIn("自定义中转", output)
+        self.assertIn("删除模型/Provider", output)
+        self.assertTrue(any(getattr(item, "command", "") == "delete" for item in choices))
+        self.assertTrue(any(getattr(item, "command", "") == "provider deepseek" for item in choices))
+        self.assertFalse(any(str(getattr(item, "command", "")).startswith("delete ") for item in choices))
+
+        state, message = apply_connect_wizard_input(state, "provider deepseek")
+        self.assertIn("DeepSeek", message)
+        state, _ = apply_connect_wizard_input(state, "key sk-connect-wizard-secret")
+        state, _ = apply_connect_wizard_input(state, "model deepseek-chat")
+        rendered = render_connect_wizard_snapshot(state, message="已填写")
+        request = build_connect_request_from_state(state)
+
+        self.assertEqual(request.normalized_provider, "deepseek")
+        self.assertEqual(request.api_key, "sk-connect-wizard-secret")
+        self.assertEqual(request.models, ("deepseek-chat",))
+        self.assertNotIn("sk-connect-wizard-secret", rendered)
+        self.assertIn("key 已填写", rendered)
+
+    def test_connect_wizard_custom_proxy_collects_required_fields(self):
+        from runtime.config.connect_wizard import (
+            apply_connect_wizard_input,
+            build_connect_request_from_state,
+            build_connect_wizard_state,
+            render_connect_wizard_snapshot,
+        )
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"connect_wizard_custom_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_wizard_custom_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        state = build_connect_wizard_state(context)
+        state, _ = apply_connect_wizard_input(state, "custom my_proxy")
+        self.assertIn("homepage, base-url, key, model", render_connect_wizard_snapshot(state))
+
+        for command in [
+            "homepage https://proxy.example.com",
+            "base-url https://api.proxy.example.com/v1",
+            "model qwen-max",
+            "key sk-custom-connect-wizard-secret",
+        ]:
+            state, _ = apply_connect_wizard_input(state, command)
+        request = build_connect_request_from_state(state)
+        rendered = render_connect_wizard_snapshot(state)
+
+        self.assertTrue(request.custom)
+        self.assertEqual(request.normalized_provider, "my_proxy")
+        self.assertEqual(request.homepage, "https://proxy.example.com")
+        self.assertEqual(request.base_url, "https://api.proxy.example.com/v1")
+        self.assertEqual(request.models, ("qwen-max",))
+        self.assertNotIn("sk-custom-connect-wizard-secret", rendered)
+        self.assertIn("自定义必填：已填齐", rendered)
+
+    def test_connect_wizard_delete_items_show_connected_providers(self):
+        from runtime.config.connect_wizard import build_connect_wizard_state, connected_provider_delete_items, connect_wizard_command_items
+        from runtime.config.model_config import connect_provider
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"connect_wizard_delete_items_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_wizard_delete_items_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        connect_provider(
+            "my_proxy",
+            api_key="sk-delete-item-secret",
+            workspace_root=workspace,
+            user_home=user_home,
+            homepage="https://proxy.example.com",
+            base_url="https://api.proxy.example.com/v1",
+            models=["qwen-max"],
+            custom=True,
+        )
+
+        state = build_connect_wizard_state(context)
+        choices = connect_wizard_command_items(state)
+        delete_items = connected_provider_delete_items(state)
+
+        self.assertTrue(any(getattr(item, "command", "") == "delete" for item in choices))
+        self.assertTrue(any(getattr(item, "command", "") == "delete my_proxy" for item in delete_items))
+        self.assertNotIn("sk-delete-item-secret", "\n".join(item.display + item.meta for item in delete_items))
 
     def test_help_and_slash_prefix_render_command_palette(self):
         from runtime.config.cli import render_readonly_command
@@ -2078,6 +2617,69 @@ class ProviderConfigC2Tests(unittest.TestCase):
         full_items = command_completion_items("/mode f")
         self.assertEqual([item.text for item in full_items], ["/mode full"])
 
+        connect_items = command_completion_items("/connect o")
+        connect_texts = [item.text for item in connect_items]
+        self.assertIn("/connect openai", connect_texts)
+        self.assertIn("/connect openrouter", connect_texts)
+        self.assertIn("https://api.openai.com/v1", next(item.meta for item in connect_items if item.text == "/connect openai"))
+
+        fake_catalog = {
+            "models": [
+                {
+                    "id": "deepseek_chat_model",
+                    "display_name_zh": "DeepSeek Chat",
+                    "provider": "deepseek",
+                    "model_name": "deepseek-chat",
+                    "configured": True,
+                    "supports_tools": True,
+                    "planner_suitable": True,
+                    "execution_suitable": True,
+                }
+            ]
+        }
+        with patch("runtime.commands.completion.load_model_catalog", return_value=fake_catalog):
+            compact_items = command_completion_items("/models")
+            brain_items = command_completion_items("/models brain 执")
+        self.assertIn("/models", [item.text for item in compact_items])
+        self.assertIn("/models brain", [item.text for item in compact_items])
+        self.assertNotIn("/models brain 执行 deepseek/deepseek-chat", [item.text for item in compact_items])
+        brain_texts = [item.text for item in brain_items]
+        self.assertIn("/models brain 执行 deepseek/deepseek-chat", brain_texts)
+        self.assertIn("执行专家脑", next(item.meta for item in brain_items if item.text.startswith("/models brain 执行")))
+
+    def test_slash_completion_caches_registry_and_model_choices_briefly(self):
+        from runtime.commands import completion as completion_module
+        from runtime.commands.registry import CommandSpec
+
+        completion_module.clear_completion_caches()
+        fake_specs = [CommandSpec("/cached", "缓存命令", "测试")]
+        with patch("runtime.commands.completion.search_command_specs", return_value=fake_specs) as search:
+            self.assertEqual([item.text for item in completion_module.command_completion_items("/cached")], ["/cached"])
+            self.assertEqual([item.text for item in completion_module.command_completion_items("/cached")], ["/cached"])
+            self.assertEqual(search.call_count, 1)
+
+        completion_module.clear_completion_caches()
+        fake_catalog = {
+            "models": [
+                {
+                    "id": "cached_model",
+                    "display_name_zh": "缓存模型",
+                    "provider": "cache",
+                    "model_name": "chat",
+                    "configured": True,
+                    "supports_tools": True,
+                }
+            ]
+        }
+        with patch("runtime.commands.completion.load_model_catalog", return_value=fake_catalog) as load_catalog:
+            first = completion_module.command_completion_items("/models brain 执")
+            second = completion_module.command_completion_items("/models brain 执")
+
+        self.assertIn("/models brain 执行 cache/chat", [item.text for item in first])
+        self.assertEqual([item.text for item in first], [item.text for item in second])
+        self.assertEqual(load_catalog.call_count, 1)
+        completion_module.clear_completion_caches()
+
     def test_slash_completion_refreshes_after_delete(self):
         from runtime.commands.completion import create_slash_command_key_bindings, should_refresh_slash_completion
 
@@ -2126,14 +2728,20 @@ class ProviderConfigC2Tests(unittest.TestCase):
         self.assertFalse(buffer.select_first)
 
     def test_slash_prompt_uses_claude_style_menu_config(self):
-        from runtime.commands.completion import slash_prompt_message, slash_prompt_session_kwargs
+        from runtime.commands.completion import (
+            slash_prompt_bottom_toolbar,
+            slash_prompt_message,
+            slash_prompt_session_kwargs,
+        )
         from prompt_toolkit.shortcuts.prompt import CompleteStyle
 
         kwargs = slash_prompt_session_kwargs()
 
-        self.assertEqual(slash_prompt_message("\n你："), [("class:prompt", "\n> ")])
+        self.assertEqual(slash_prompt_message("\n你："), [("class:prompt", "\nlucode> ")])
+        self.assertIn("命令菜单", slash_prompt_bottom_toolbar()[0][1])
         self.assertEqual(kwargs["complete_style"], CompleteStyle.COLUMN)
-        self.assertGreaterEqual(kwargs["reserve_space_for_menu"], 8)
+        self.assertGreaterEqual(kwargs["reserve_space_for_menu"], 12)
+        self.assertIn("bottom_toolbar", kwargs)
         self.assertIn("style", kwargs)
         self.assertIn("key_bindings", kwargs)
 
@@ -2370,7 +2978,17 @@ class ProviderConfigC2Tests(unittest.TestCase):
         self.assertIsNone(resolve_mcp_prompt_invocation("/mcp__project_tools__review", context))
 
     def test_prompt_toolkit_tty_gate_is_safe_for_non_interactive_pipes(self):
-        from lucode.shell.input_adapter import prompt_mouse_support_enabled, should_enable_prompt_toolkit
+        from lucode.shell.input_adapter import (
+            ConsoleChoice,
+            ConsoleFormField,
+            StdinConsoleAdapter,
+            choice_mouse_support_enabled,
+            fullscreen_form_mouse_support_enabled,
+            fullscreen_form_enabled,
+            fullscreen_form_style_rules,
+            prompt_mouse_support_enabled,
+            should_enable_prompt_toolkit,
+        )
 
         class FakeStream:
             def __init__(self, is_tty):
@@ -2405,6 +3023,40 @@ class ProviderConfigC2Tests(unittest.TestCase):
         )
         self.assertFalse(prompt_mouse_support_enabled({}))
         self.assertTrue(prompt_mouse_support_enabled({"LUCODE_PROMPT_MOUSE_SUPPORT": "1"}))
+        self.assertFalse(choice_mouse_support_enabled({}))
+        self.assertTrue(choice_mouse_support_enabled({"LUCODE_TUNER_MOUSE_SUPPORT": "1"}))
+        self.assertTrue(fullscreen_form_mouse_support_enabled({}))
+        self.assertFalse(fullscreen_form_mouse_support_enabled({"LUCODE_FORM_MOUSE_SUPPORT": "0"}))
+        self.assertTrue(fullscreen_form_enabled({}))
+        self.assertFalse(fullscreen_form_enabled({"LUCODE_DISABLE_FULLSCREEN_FORMS": "1"}))
+        self.assertFalse(fullscreen_form_enabled({"LUCODE_CONNECT_FORM": "light"}))
+        style_rules = fullscreen_form_style_rules()
+        self.assertIn("#1f7aff", style_rules["frame.border"])
+        self.assertIn("#59d7ff", style_rules["frame.label"])
+        self.assertIn("bg:#07111f", style_rules["dialog.body"])
+        self.assertIn("bg:#10223a", style_rules["form.button"])
+        self.assertIn("bg:#1f7aff", style_rules["form.button.focused"])
+        self.assertIn("#ffffff", style_rules["form.button.focused"])
+
+        async def read_deferred_choice():
+            console = StdinConsoleAdapter(enable_prompt_toolkit=False)
+            console.defer("q")
+            return await console.read_choice_line(
+                "模型调音台> ",
+                [ConsoleChoice("q", "退出调音台"), ConsoleChoice("select 1", "应用模型")],
+            )
+
+        self.assertEqual(asyncio.run(read_deferred_choice()), "q")
+
+        async def read_disabled_form():
+            console = StdinConsoleAdapter(enable_prompt_toolkit=False)
+            return await console.read_form(
+                title="测试表单",
+                fields=[ConsoleFormField("model", "模型名")],
+                actions=[ConsoleChoice("cancel", "取消")],
+            )
+
+        self.assertIsNone(asyncio.run(read_disabled_form()))
 
 
 class WorkspaceExtensionC26Tests(unittest.TestCase):
@@ -2767,6 +3419,40 @@ class RuntimeNoiseTests(unittest.TestCase):
 
 
 class LucodeCliEntryTests(unittest.TestCase):
+    def test_lucode_entry_reconfigures_standard_streams_to_utf8(self):
+        import lucode.entry as entry
+
+        calls = []
+
+        class FakeStream:
+            def reconfigure(self, **kwargs):
+                calls.append(kwargs)
+
+        with patch.object(entry.sys, "stdin", FakeStream()):
+            with patch.object(entry.sys, "stdout", FakeStream()):
+                with patch.object(entry.sys, "stderr", FakeStream()):
+                    entry.configure_stdio_encoding()
+
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(call["encoding"] == "utf-8" for call in calls))
+        self.assertTrue(all(call["errors"] == "replace" for call in calls))
+
+    def test_lucode_entry_honors_lucode_workspace_root_env(self):
+        import lucode.entry as entry
+
+        workspace = TEMP_ROOT / f"entry_env_workspace_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        class Args:
+            workspace = None
+
+        with patch.dict(os.environ, {"LUCODE_WORKSPACE_ROOT": str(workspace)}, clear=False):
+            context = entry._workspace_context(Args())
+
+        self.assertEqual(context.workspace_root, workspace.resolve())
+        self.assertEqual(context.project_config_dir, workspace.resolve() / ".lucode")
+
     def test_python_module_help_exposes_lucode_command_shell(self):
         result = subprocess.run(
             [sys.executable, "-m", "lucode", "--help"],
@@ -2882,6 +3568,211 @@ class LucodeCliEntryTests(unittest.TestCase):
         self.assertIn("最近会话", result.stdout)
         self.assertIn(session_id[:16], result.stdout)
         self.assertIn("持久会话 smoke", result.stdout)
+
+    def test_lucode_models_available_and_brain_reset_cli(self):
+        from runtime.config.model_config import load_lucode_config
+
+        workspace = TEMP_ROOT / f"cli_models_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"cli_models_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "LUCODE_USER_HOME": str(user_home)}
+
+        set_result = subprocess.run(
+            [sys.executable, "-m", "lucode", "--workspace", str(workspace), "models", "brain", "执行", "deepseek/deepseek-chat"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+        self.assertEqual(set_result.returncode, 0, set_result.stderr)
+        self.assertIn("roles", load_lucode_config(workspace_root=workspace))
+
+        available_result = subprocess.run(
+            [sys.executable, "-m", "lucode", "--workspace", str(workspace), "models", "available"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+        self.assertEqual(available_result.returncode, 0, available_result.stderr)
+        self.assertIn("可用模型", available_result.stdout)
+
+        roles_result = subprocess.run(
+            [sys.executable, "-m", "lucode", "--workspace", str(workspace), "models", "roles"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+        self.assertEqual(roles_result.returncode, 0, roles_result.stderr)
+        self.assertIn("四脑角色模型配置", roles_result.stdout)
+        self.assertIn("executor", roles_result.stdout)
+
+        reset_result = subprocess.run(
+            [sys.executable, "-m", "lucode", "--workspace", str(workspace), "models", "brain", "reset"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+
+        self.assertEqual(reset_result.returncode, 0, reset_result.stderr)
+        self.assertIn("已重置多脑模型覆盖配置", reset_result.stdout)
+        self.assertNotIn("roles", load_lucode_config(workspace_root=workspace))
+
+    def test_lucode_models_list_cli_shows_grouped_provider_sources(self):
+        workspace = TEMP_ROOT / f"cli_models_list_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"cli_models_list_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "LUCODE_USER_HOME": str(user_home)}
+
+        connect_result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "lucode",
+                "--workspace",
+                str(workspace),
+                "connect",
+                "deepseek",
+                "--api-key",
+                "sk-cli-models-list-secret",
+                "--model",
+                "deepseek-chat",
+            ],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+        list_result = subprocess.run(
+            [sys.executable, "-m", "lucode", "--workspace", str(workspace), "models", "list"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+
+        self.assertEqual(connect_result.returncode, 0, connect_result.stderr)
+        self.assertEqual(list_result.returncode, 0, list_result.stderr)
+        self.assertIn("Provider 模型列表", list_result.stdout)
+        self.assertIn("已配置 key", list_result.stdout)
+        self.assertIn("DeepSeek（deepseek）", list_result.stdout)
+        self.assertIn("缺 API key", list_result.stdout)
+        self.assertNotIn("sk-cli-models-list-secret", list_result.stdout)
+
+    def test_lucode_connect_without_key_shows_hint_without_writing_config(self):
+        workspace = TEMP_ROOT / f"cli_connect_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"cli_connect_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        result = subprocess.run(
+            [sys.executable, "-m", "lucode", "--workspace", str(workspace), "connect", "deepseek"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "LUCODE_USER_HOME": str(user_home)},
+            timeout=20,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Provider：DeepSeek", result.stdout)
+        self.assertIn("还缺 API key", result.stdout)
+        self.assertFalse((workspace / ".lucode" / "config.toml").exists())
+
+    def test_lucode_connect_custom_requires_key_and_model(self):
+        workspace = TEMP_ROOT / f"cli_connect_custom_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"cli_connect_custom_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "LUCODE_USER_HOME": str(user_home)}
+
+        missing_key = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "lucode",
+                "--workspace",
+                str(workspace),
+                "connect",
+                "my_proxy",
+                "--custom",
+                "--homepage",
+                "https://proxy.example.com",
+                "--base-url",
+                "https://api.proxy.example.com/v1",
+                "--model",
+                "qwen-max",
+            ],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+        missing_model = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "lucode",
+                "--workspace",
+                str(workspace),
+                "connect",
+                "my_proxy",
+                "--custom",
+                "--homepage",
+                "https://proxy.example.com",
+                "--base-url",
+                "https://api.proxy.example.com/v1",
+                "--api-key",
+                "sk-c2-secret",
+            ],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+
+        self.assertEqual(missing_key.returncode, 1)
+        self.assertIn("API key", missing_key.stdout)
+        self.assertEqual(missing_model.returncode, 1)
+        self.assertIn("模型名", missing_model.stdout)
 
     def test_python_environment_label_prefers_current_conda_prefix(self):
         import lucode.entry as entry
@@ -3659,6 +4550,678 @@ class WelcomeRefreshC5Tests(unittest.TestCase):
         self.assertIn("命令菜单", output)
         self.assertIn("已退出", output)
 
+    def test_chat_loop_models_opens_isolated_tuner_without_kernel_facade(self):
+        import lucode.shell.chat_loop as chat_loop_module
+        from runtime.config.model_config import load_lucode_config
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        app_home = TEMP_ROOT / f"models_tuner_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"models_tuner_workspace_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        kernel_calls = []
+        fake_catalog = {
+            "models": [
+                {
+                    "id": "deepseek_v4_pro_model",
+                    "display_name_zh": "DeepSeek deepseek-v4-pro",
+                    "provider": "deepseek",
+                    "model_name": "deepseek-v4-pro",
+                    "provider_ref": "deepseek/deepseek-v4-pro",
+                    "configured": True,
+                    "supports_tools": True,
+                    "planner_suitable": True,
+                    "execution_suitable": True,
+                }
+            ]
+        }
+
+        class FakeKernelFacade:
+            def __init__(self, context):
+                kernel_calls.append(context)
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.lines = iter(["/models", "role 3", "select 1", "/exit"])
+                self.choice_prompts = []
+
+            async def read_line(self, prompt="\n你："):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+            async def read_runtime_line(self):
+                return await self.read_line("")
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                self.choice_prompts.append((prompt, choices, kwargs))
+                return await self.read_line("")
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "models_tuner_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        settings = RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed")
+
+        buffer = io.StringIO()
+        console = FakeConsole()
+        with patch.object(chat_loop_module, "KernelFacade", FakeKernelFacade):
+            with patch("runtime.config.model_tuner.load_model_catalog", return_value=fake_catalog):
+                with contextlib.redirect_stdout(buffer):
+                    asyncio.run(
+                        chat_loop_module.chat_loop(
+                            model_registry=object(),
+                            quarantine_dir=workspace / ".agent_quarantine",
+                            runtime_settings=settings,
+                            console=console,
+                            app_home=app_home,
+                            project_root=workspace,
+                            workspace_context=context,
+                            use_color=False,
+                        )
+                    )
+
+        output = buffer.getvalue()
+        self.assertEqual(kernel_calls, [])
+        self.assertIn("Lucode 多脑模型调音台", output)
+        self.assertIn("已切换执行专家脑", output)
+        self.assertIn("      lucode", output)
+        self.assertIn("solo 单代理", output)
+        self.assertEqual(len(console.choice_prompts), 2)
+        first_choices = console.choice_prompts[0][1]
+        self.assertTrue(any(getattr(item, "command", "") == "q" for item in first_choices))
+        self.assertTrue(any(getattr(item, "command", "") == "select 1" for item in first_choices))
+        self.assertEqual(settings.executor_model_priority, ["deepseek_v4_pro_model"])
+        self.assertEqual(load_lucode_config(workspace_root=workspace)["roles"]["executor"], ["deepseek/deepseek-v4-pro"])
+
+    def test_chat_loop_connect_opens_isolated_wizard_without_kernel_facade(self):
+        import lucode.shell.chat_loop as chat_loop_module
+        from runtime.config.model_config import load_auth, load_lucode_config
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        app_home = TEMP_ROOT / f"connect_wizard_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"connect_wizard_chat_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_wizard_chat_user_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        kernel_calls = []
+
+        class FakeKernelFacade:
+            def __init__(self, context):
+                kernel_calls.append(context)
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.lines = iter([
+                    "/connect",
+                    "provider deepseek",
+                    "edit_model",
+                    "model deepseek-chat",
+                    "edit_key",
+                    "sk-chat-connect-wizard-secret",
+                    "save_default",
+                    "/exit",
+                ])
+                self.choice_prompts = []
+                self.secret_prompts = []
+
+            async def read_line(self, prompt="\n你："):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+            async def read_runtime_line(self):
+                return await self.read_line("")
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                self.choice_prompts.append((prompt, choices, kwargs))
+                return await self.read_line("")
+
+            async def read_secret_line(self, prompt):
+                self.secret_prompts.append(prompt)
+                return await self.read_line("")
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        settings = RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed")
+
+        buffer = io.StringIO()
+        console = FakeConsole()
+        with patch.object(chat_loop_module, "KernelFacade", FakeKernelFacade):
+            with contextlib.redirect_stdout(buffer):
+                asyncio.run(
+                    chat_loop_module.chat_loop(
+                        model_registry=object(),
+                        quarantine_dir=workspace / ".agent_quarantine",
+                        runtime_settings=settings,
+                        console=console,
+                        app_home=app_home,
+                        project_root=workspace,
+                        workspace_context=context,
+                        use_color=False,
+                    )
+                )
+
+        output = buffer.getvalue()
+        config = load_lucode_config(workspace_root=workspace)
+        auth = load_auth(user_home=user_home)
+        self.assertEqual(kernel_calls, [])
+        self.assertIn("Lucode Provider 连接", output)
+        self.assertIn("已连接 Provider：DeepSeek（deepseek）", output)
+        self.assertIn("已设为默认模型：deepseek/deepseek-chat", output)
+        self.assertNotIn("sk-chat-connect-wizard-secret", output)
+        self.assertGreaterEqual(len(console.choice_prompts), 4)
+        form_choices = console.choice_prompts[1][1]
+        form_commands = {getattr(item, "command", "") for item in form_choices}
+        self.assertIn("edit_model", form_commands)
+        self.assertIn("edit_key", form_commands)
+        self.assertIn("save_default", form_commands)
+        self.assertEqual(len(console.secret_prompts), 1)
+        self.assertEqual(config["provider"]["deepseek"]["models"], ["deepseek-chat"])
+        self.assertEqual(config["model"]["primary"], "deepseek/deepseek-chat")
+        self.assertEqual(settings.executor_model_priority, ["deepseek_chat_model"])
+        self.assertEqual(auth["providers"]["deepseek"]["api_key"], "sk-chat-connect-wizard-secret")
+
+    def test_connect_fullscreen_form_saves_custom_provider(self):
+        from lucode.shell.input_adapter import ConsoleFormResult
+        from lucode.shell.slash_commands import _handle_connect_wizard_session
+        from runtime.config.model_config import load_auth, load_lucode_config
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"connect_fullscreen_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_fullscreen_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.provider_lines = iter(["custom my_proxy"])
+                self.form_calls = []
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                return next(self.provider_lines)
+
+            async def read_form(self, **kwargs):
+                self.form_calls.append(kwargs)
+                return ConsoleFormResult(
+                    action="save_default",
+                    values={
+                        "homepage": "https://proxy.example.com",
+                        "base_url": "https://api.proxy.example.com/v1",
+                        "model": "qwen-max",
+                        "api_key": "sk-fullscreen-secret",
+                    },
+                )
+
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        console = FakeConsole()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            asyncio.run(
+                _handle_connect_wizard_session(
+                    console=console,
+                    workspace_context=context,
+                    runtime_settings=RuntimeSettings(),
+                )
+            )
+
+        output = buffer.getvalue()
+        config = load_lucode_config(workspace_root=workspace)
+        auth = load_auth(user_home=user_home)
+        self.assertEqual(len(console.form_calls), 1)
+        field_names = {field.name for field in console.form_calls[0]["fields"]}
+        action_names = {action.command for action in console.form_calls[0]["actions"]}
+        self.assertEqual(field_names, {"homepage", "base_url", "model", "api_key"})
+        self.assertIn("save_default", action_names)
+        self.assertIn("change_provider", action_names)
+        self.assertIn("已设为默认模型：my_proxy/qwen-max", output)
+        self.assertNotIn("sk-fullscreen-secret", output)
+        self.assertEqual(config["model"]["primary"], "my_proxy/qwen-max")
+        self.assertEqual(config["provider"]["my_proxy"]["base_url"], "https://api.proxy.example.com/v1")
+        self.assertEqual(auth["providers"]["my_proxy"]["api_key"], "sk-fullscreen-secret")
+
+    def test_connect_fullscreen_form_reopens_when_missing_required_fields(self):
+        from lucode.shell.input_adapter import ConsoleFormResult
+        from lucode.shell.slash_commands import _handle_connect_wizard_session
+        from runtime.config.model_config import load_auth, load_lucode_config
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"connect_fullscreen_missing_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_fullscreen_missing_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.provider_lines = iter(["custom my_proxy"])
+                self.form_calls = []
+                self.forms = iter(
+                    [
+                        ConsoleFormResult(
+                            action="save_only",
+                            values={"homepage": "", "base_url": "", "model": "", "api_key": ""},
+                        ),
+                        ConsoleFormResult(
+                            action="save_only",
+                            values={
+                                "homepage": "https://proxy.example.com",
+                                "base_url": "https://api.proxy.example.com/v1",
+                                "model": "qwen-max",
+                                "api_key": "sk-fullscreen-missing-secret",
+                            },
+                        ),
+                    ]
+                )
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                return next(self.provider_lines)
+
+            async def read_form(self, **kwargs):
+                self.form_calls.append(kwargs)
+                return next(self.forms)
+
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        console = FakeConsole()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            asyncio.run(
+                _handle_connect_wizard_session(
+                    console=console,
+                    workspace_context=context,
+                    runtime_settings=RuntimeSettings(),
+                )
+            )
+
+        output = buffer.getvalue()
+        config = load_lucode_config(workspace_root=workspace)
+        auth = load_auth(user_home=user_home)
+        self.assertEqual(len(console.form_calls), 2)
+        self.assertIn("还缺", console.form_calls[1]["message"])
+        self.assertIn("已连接 Provider：my_proxy（my_proxy）", output)
+        self.assertNotIn("sk-fullscreen-missing-secret", output)
+        self.assertEqual(config["provider"]["my_proxy"]["models"], ["qwen-max"])
+        self.assertEqual(auth["providers"]["my_proxy"]["api_key"], "sk-fullscreen-missing-secret")
+
+    def test_connect_fullscreen_form_failure_falls_back_to_light_form(self):
+        from lucode.shell.slash_commands import _handle_connect_wizard_session
+        from runtime.config.model_config import load_auth, load_lucode_config
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"connect_fullscreen_fallback_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_fullscreen_fallback_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.lines = iter([
+                    "provider deepseek",
+                    "edit_model",
+                    "model deepseek-chat",
+                    "edit_key",
+                    "sk-fallback-secret",
+                    "save_only",
+                ])
+                self.form_attempts = 0
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                return next(self.lines)
+
+            async def read_runtime_line(self):
+                return next(self.lines)
+
+            async def read_secret_line(self, prompt):
+                return next(self.lines)
+
+            async def read_form(self, **kwargs):
+                self.form_attempts += 1
+                raise RuntimeError("terminal cannot render fullscreen form")
+
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        console = FakeConsole()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            asyncio.run(
+                _handle_connect_wizard_session(
+                    console=console,
+                    workspace_context=context,
+                    runtime_settings=RuntimeSettings(),
+                )
+            )
+
+        output = buffer.getvalue()
+        config = load_lucode_config(workspace_root=workspace)
+        auth = load_auth(user_home=user_home)
+        self.assertGreaterEqual(console.form_attempts, 1)
+        self.assertIn("Lucode Provider 连接", output)
+        self.assertIn("已连接 Provider：DeepSeek（deepseek）", output)
+        self.assertNotIn("sk-fallback-secret", output)
+        self.assertEqual(config["provider"]["deepseek"]["models"], ["deepseek-chat"])
+        self.assertEqual(auth["providers"]["deepseek"]["api_key"], "sk-fallback-secret")
+
+    def test_connect_form_recovers_from_bad_field_and_back(self):
+        from lucode.shell.slash_commands import _handle_connect_wizard_session
+        from runtime.config.model_config import load_auth, load_lucode_config
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"connect_recover_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_recover_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.lines = iter([
+                    "custom my_proxy",
+                    "edit_homepage",
+                    "not-a-url",
+                    "edit_homepage",
+                    "back",
+                    "edit_homepage",
+                    "https://proxy.fixed.example.com",
+                    "edit_base_url",
+                    "https://api.proxy.example.com/v1",
+                    "edit_model",
+                    "qwen-max",
+                    "edit_key",
+                    "sk-recover-secret",
+                    "save_only",
+                ])
+
+            async def read_runtime_line(self):
+                return next(self.lines)
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                return next(self.lines)
+
+            async def read_secret_line(self, prompt):
+                return next(self.lines)
+
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            asyncio.run(
+                _handle_connect_wizard_session(
+                    console=FakeConsole(),
+                    workspace_context=context,
+                    runtime_settings=RuntimeSettings(),
+                )
+            )
+
+        output = buffer.getvalue()
+        config = load_lucode_config(workspace_root=workspace)
+        auth = load_auth(user_home=user_home)
+        self.assertIn("看起来不像 URL", output)
+        self.assertIn("已连接 Provider：my_proxy（my_proxy）", output)
+        self.assertNotIn("sk-recover-secret", output)
+        self.assertEqual(config["provider"]["my_proxy"]["homepage"], "https://proxy.fixed.example.com")
+        self.assertEqual(config["provider"]["my_proxy"]["base_url"], "https://api.proxy.example.com/v1")
+        self.assertEqual(config["provider"]["my_proxy"]["models"], ["qwen-max"])
+        self.assertEqual(auth["providers"]["my_proxy"]["api_key"], "sk-recover-secret")
+
+    def test_connect_form_missing_fields_stays_in_form_until_fixed(self):
+        from lucode.shell.slash_commands import _handle_connect_wizard_session
+        from runtime.config.model_config import load_auth, load_lucode_config
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"connect_missing_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_missing_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.lines = iter([
+                    "provider deepseek",
+                    "save_only",
+                    "edit_key",
+                    "sk-missing-field-secret",
+                    "save_only",
+                ])
+
+            async def read_runtime_line(self):
+                return next(self.lines)
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                return next(self.lines)
+
+            async def read_secret_line(self, prompt):
+                return next(self.lines)
+
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            asyncio.run(
+                _handle_connect_wizard_session(
+                    console=FakeConsole(),
+                    workspace_context=context,
+                    runtime_settings=RuntimeSettings(),
+                )
+            )
+
+        output = buffer.getvalue()
+        config = load_lucode_config(workspace_root=workspace)
+        auth = load_auth(user_home=user_home)
+        self.assertIn("还缺：API key", output)
+        self.assertIn("已连接 Provider：DeepSeek（deepseek）", output)
+        self.assertNotIn("sk-missing-field-secret", output)
+        self.assertTrue(config["provider"]["deepseek"]["models"])
+        self.assertEqual(auth["providers"]["deepseek"]["api_key"], "sk-missing-field-secret")
+
+    def test_connect_form_provider_command_returns_to_provider_picker(self):
+        from lucode.shell.slash_commands import _handle_connect_wizard_session
+        from runtime.config.model_config import load_auth, load_lucode_config
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"connect_provider_switch_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_provider_switch_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.lines = iter([
+                    "custom my_proxy",
+                    "provider deepseek",
+                    "provider deepseek",
+                    "edit_model",
+                    "model deepseek-chat",
+                    "edit_key",
+                    "sk-provider-switch-secret",
+                    "save_only",
+                ])
+
+            async def read_runtime_line(self):
+                return next(self.lines)
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                return next(self.lines)
+
+            async def read_secret_line(self, prompt):
+                return next(self.lines)
+
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            asyncio.run(
+                _handle_connect_wizard_session(
+                    console=FakeConsole(),
+                    workspace_context=context,
+                    runtime_settings=RuntimeSettings(),
+                )
+            )
+
+        output = buffer.getvalue()
+        config = load_lucode_config(workspace_root=workspace)
+        auth = load_auth(user_home=user_home)
+        self.assertIn("已返回 Provider 选择", output)
+        self.assertIn("已连接 Provider：DeepSeek（deepseek）", output)
+        self.assertNotIn("sk-provider-switch-secret", output)
+        self.assertEqual(config["provider"]["deepseek"]["models"], ["deepseek-chat"])
+        self.assertEqual(auth["providers"]["deepseek"]["api_key"], "sk-provider-switch-secret")
+
+    def test_connect_wizard_delete_provider_with_confirmation(self):
+        from lucode.shell.slash_commands import _handle_connect_wizard_session
+        from runtime.config.model_config import (
+            connect_provider,
+            load_auth,
+            load_lucode_config,
+            select_role_model_priority,
+        )
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"connect_delete_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_delete_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        connect_provider(
+            "my_proxy",
+            api_key="sk-delete-confirm-secret",
+            workspace_root=workspace,
+            user_home=user_home,
+            homepage="https://proxy.example.com",
+            base_url="https://api.proxy.example.com/v1",
+            models=["qwen-max"],
+            custom=True,
+        )
+        select_role_model_priority(workspace_root=workspace, role="executor", refs=["my_proxy/qwen-max"])
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.lines = iter(["delete", "delete my_proxy", "yes", "q"])
+                self.choice_prompts = []
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                self.choice_prompts.append((prompt, choices, kwargs))
+                return next(self.lines)
+
+            async def read_runtime_line(self):
+                return next(self.lines)
+
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        settings = RuntimeSettings(executor_model_priority=["my_proxy_qwen_max_model"])
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            asyncio.run(
+                _handle_connect_wizard_session(
+                    console=FakeConsole(),
+                    workspace_context=context,
+                    runtime_settings=settings,
+                )
+            )
+
+        output = buffer.getvalue()
+        config = load_lucode_config(workspace_root=workspace)
+        auth = load_auth(user_home=user_home)
+        self.assertIn("已删除 Provider：my_proxy", output)
+        self.assertIn("已退出 Provider 连接向导", output)
+        self.assertNotIn("sk-delete-confirm-secret", output)
+        self.assertNotIn("my_proxy", config.get("provider") or {})
+        self.assertNotIn("my_proxy", auth.get("providers") or {})
+        self.assertNotIn("my_proxy/qwen-max", str(config.get("roles") or {}))
+
     def test_chat_loop_expands_mcp_prompt_command_before_kernel_facade(self):
         import lucode.shell.chat_loop as chat_loop_module
         from runtime.config.settings import RuntimeSettings
@@ -4314,6 +5877,42 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("runtime/app.py", running)
         self.assertIn("[✓]", completed)
 
+    def test_progress_snapshot_print_is_safe_for_gbk_console(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.progress import _print_progress_snapshot
+
+        class GbkStdout(io.StringIO):
+            encoding = "gbk"
+
+            def write(self, value):
+                str(value).encode(self.encoding)
+                return super().write(value)
+
+        plan = PlannerResult(
+            route_type="multi_agent",
+            reason="test",
+            refined_request="验证状态输出",
+            tasks=[
+                PlannedTask(
+                    id="inspect",
+                    title="扫描相关文件",
+                    instruction="扫描。",
+                    skill_id="project_explorer",
+                    model="local_model",
+                    mcp=["code_locator"],
+                )
+            ],
+        )
+        state = PipelineRunState.create("验证状态输出", plan)
+        state.record_task_result(plan.tasks[0], "done")
+        stream = GbkStdout()
+
+        with patch("sys.stdout", stream):
+            _print_progress_snapshot(state, mode="serial", attempt=1, active="已完成：扫描相关文件")
+
+        self.assertIn("[?]", stream.getvalue())
+
     def test_c5_task_status_board_shows_failed_state_and_error(self):
         from planning.planner_schema import PlannedTask, PlannerResult
         from runtime.execution.pipeline import PipelineRunState
@@ -4819,6 +6418,35 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("workspace_edit", plan.tasks[0].mcp)
         self.assertNotIn("command_runner", plan.tasks[0].mcp)
 
+    def test_explicit_readonly_file_analysis_gets_locator_without_write_or_command(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import apply_pipeline_gate
+
+        plan = PlannerResult(
+            route_type="multi_agent",
+            reason="只读检查文件",
+            refined_request="只读分析 runtime/safety/auditor.py，不修改文件，不运行命令。",
+            tasks=[
+                PlannedTask(
+                    id="inspect_auditor",
+                    title="检查 auditor.py",
+                    instruction="只读分析 runtime/safety/auditor.py 中语义提醒折叠。",
+                    skill_id="project_explorer",
+                    model="local_model",
+                    mcp=["project_filesystem_readonly"],
+                )
+            ],
+        )
+
+        decision = apply_pipeline_gate(plan, plan.refined_request)
+
+        self.assertFalse(decision.needs_code_pipeline)
+        self.assertIn("code_locator", plan.tasks[0].mcp)
+        self.assertIn("project_filesystem_readonly", plan.tasks[0].mcp)
+        self.assertNotIn("workspace_edit", plan.tasks[0].mcp)
+        self.assertNotIn("command_runner", plan.tasks[0].mcp)
+        self.assertIn("先定位后少量读取", plan.tasks[0].risk_notes)
+
     def test_dependency_context_is_added_to_later_task_prompt(self):
         from planning.planner_schema import PlannedTask
         from runtime.execution.dynamic import _dependency_context_for_task, _task_prompt
@@ -5010,6 +6638,129 @@ class AgentFactorySoloTests(unittest.TestCase):
         self.assertIn("如果目标文件过大", instructions)
         self.assertIn("先获取文件信息", instructions)
         self.assertIn("分段", instructions)
+        self.assertIn("`locate_code` 最多调用 1 次", instructions)
+        self.assertIn("`get_file_outline` 最多调用 1 次", instructions)
+        self.assertIn("`read_file` / `read_multiple_files` 合计最多 2 次", instructions)
+        self.assertIn("不要继续搜索相邻文件", instructions)
+
+
+class ModelRoleConfigTests(unittest.TestCase):
+    def test_normalize_model_role_supports_four_brains(self):
+        from runtime.config.model_config import normalize_model_role, model_role_label
+
+        self.assertEqual(normalize_model_role("主脑"), "orchestrator")
+        self.assertEqual(normalize_model_role("执行"), "executor")
+        self.assertEqual(normalize_model_role("汇总脑"), "final_synthesizer")
+        self.assertEqual(normalize_model_role("前置优化脑"), "query_refiner")
+        self.assertEqual(normalize_model_role("executor"), "executor")
+        self.assertEqual(normalize_model_role("solo_agent"), "executor")
+
+    def test_normalize_model_role_rejects_unknown_role(self):
+        from runtime.config.model_config import normalize_model_role
+
+        with self.assertRaises(ValueError):
+            normalize_model_role("不存在的脑")
+
+    def test_model_role_label_returns_chinese(self):
+        from runtime.config.model_config import model_role_label
+
+        self.assertEqual(model_role_label("executor"), "执行专家脑")
+        self.assertEqual(model_role_label("orchestrator"), "主脑规划脑")
+        self.assertEqual(model_role_label("query_refiner"), "前置优化脑")
+        self.assertEqual(model_role_label("final_synthesizer"), "汇总脑")
+
+    def test_iter_model_roles_returns_four_roles_in_order(self):
+        from runtime.config.model_config import iter_model_roles
+
+        roles = list(iter_model_roles())
+        self.assertEqual(len(roles), 4)
+        self.assertEqual(roles[0][0], "query_refiner")
+        self.assertEqual(roles[1][0], "orchestrator")
+        self.assertEqual(roles[2][0], "executor")
+        self.assertEqual(roles[3][0], "final_synthesizer")
+        self.assertEqual(roles[2][1]["label"], "执行专家脑")
+
+
+class ModelTunerTests(unittest.TestCase):
+    def test_model_tuner_builds_snapshot_and_applies_role_selection(self):
+        from runtime.config.model_config import load_lucode_config
+        from runtime.config.model_tuner import (
+            apply_model_tuner_selection,
+            build_model_tuner_state,
+            model_tuner_command_items,
+            render_model_tuner_snapshot,
+            resolve_model_selection,
+            resolve_role_selection,
+        )
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"model_tuner_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"model_tuner_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        settings = RuntimeSettings(
+            orchestrator_model_priority=["deepseek_v4_pro_model"],
+            executor_model_priority=["mimo_v25_model"],
+        )
+        fake_catalog = {
+            "models": [
+                {
+                    "id": "deepseek_v4_pro_model",
+                    "display_name_zh": "DeepSeek deepseek-v4-pro",
+                    "provider": "deepseek",
+                    "model_name": "deepseek-v4-pro",
+                    "provider_ref": "deepseek/deepseek-v4-pro",
+                    "configured": True,
+                    "supports_tools": True,
+                    "planner_suitable": True,
+                    "execution_suitable": True,
+                },
+                {
+                    "id": "mimo_v25_model",
+                    "display_name_zh": "MiMo mimo-v2.5",
+                    "provider": "mimo",
+                    "model_name": "mimo-v2.5",
+                    "provider_ref": "mimo/mimo-v2.5",
+                    "configured": True,
+                    "supports_tools": True,
+                },
+            ]
+        }
+
+        state = build_model_tuner_state(settings, context, selected_role="执行", catalog=fake_catalog)
+        output = render_model_tuner_snapshot(state)
+
+        self.assertIn("Lucode 多脑模型调音台", output)
+        self.assertIn("当前脑位：执行专家脑", output)
+        self.assertIn("role 1-4", output)
+        self.assertIn("select 1", output)
+        self.assertEqual(resolve_role_selection("3"), "executor")
+        self.assertEqual(resolve_model_selection("1", state), "deepseek/deepseek-v4-pro")
+        menu_items = model_tuner_command_items(state)
+        self.assertIn("q", [item.command for item in menu_items])
+        self.assertIn("role 3", [item.command for item in menu_items])
+        self.assertIn("select 1", [item.command for item in menu_items])
+        self.assertTrue(any(item.display.startswith("应用模型") for item in menu_items))
+        result = apply_model_tuner_selection(
+            settings,
+            context,
+            role="执行",
+            refs=["deepseek/deepseek-v4-pro"],
+        )
+
+        self.assertIn("已切换执行专家脑", result.message)
+        self.assertEqual(settings.executor_model_priority, ["deepseek_v4_pro_model"])
+        config = load_lucode_config(workspace_root=workspace)
+        self.assertEqual(config["roles"]["executor"], ["deepseek/deepseek-v4-pro"])
 
 
 class SoloModeTests(unittest.TestCase):
@@ -5111,6 +6862,30 @@ class SoloModeTests(unittest.TestCase):
 
         self.assertNotIn("context7_docs", mcp_ids)
         self.assertNotIn("grep_code_search", mcp_ids)
+
+
+    def test_solo_uses_executor_role_not_orchestrator(self):
+        from runtime.config.settings import RuntimeSettings
+
+        class FakeRegistry:
+            def __init__(self):
+                self.received = []
+
+            def first_configured(self, preferred):
+                self.received.append(list(preferred))
+                return preferred[0]
+
+        settings = RuntimeSettings(
+            executor_model_priority=["deepseek_v4_flash_model"],
+            orchestrator_model_priority=["deepseek_v4_pro_model"],
+        )
+        mr = FakeRegistry()
+        # solo should select executor model
+        model_id = settings.select_model_id(mr, "executor")
+        self.assertEqual(model_id, "deepseek_v4_flash_model")
+        # It should NOT select orchestrator model
+        orch_model_id = settings.select_model_id(mr, "orchestrator")
+        self.assertNotEqual(model_id, orch_model_id)
 
 
 class PlannerSchemaN3Tests(unittest.TestCase):
@@ -5765,7 +7540,7 @@ class AuditorLoopTests(unittest.TestCase):
 
     def test_auditor_semantic_acceptance_is_soft_for_readonly_analysis(self):
         from planning.planner_schema import PlannedTask, PlannerResult
-        from runtime.safety.auditor import audit_execution
+        from runtime.safety.auditor import audit_execution, format_final_report
         from runtime.execution.pipeline import PipelineRunState
 
         plan = PlannerResult(
@@ -5792,6 +7567,40 @@ class AuditorLoopTests(unittest.TestCase):
         self.assertTrue(audit.passed, audit.remaining_issues)
         self.assertTrue(any("语义验收未完全确认" in warning for warning in audit.warnings))
         self.assertFalse(audit.needs_replan)
+        self.assertIn("审核提醒（不影响通过）", format_final_report("只做了非常笼统的说明。", audit))
+
+    def test_auditor_compacts_soft_semantic_warnings_for_readonly_analysis(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.safety.auditor import audit_execution
+        from runtime.execution.pipeline import PipelineRunState
+
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="analyze runtime",
+            refined_request="说明 runtime 关键点",
+            tasks=[
+                PlannedTask(
+                    id="inspect_runtime",
+                    title="说明 runtime 关键点",
+                    instruction="分析 runtime 关键点。",
+                    skill_id="project_explorer",
+                    model="local_model",
+                    mcp=["project_filesystem_readonly"],
+                    acceptance_criteria=["覆盖 ALPHA_ONLY_42", "覆盖 BETA_ONLY_42"],
+                    expected_outputs=["输出 GAMMA_ONLY_42", "输出 DELTA_ONLY_42"],
+                )
+            ],
+        )
+        state = PipelineRunState.create(plan.refined_request, plan)
+        state.record_task_result(plan.tasks[0], "runtime 有一些 Python 文件。")
+
+        audit = audit_execution(plan, state, "只做了笼统说明。")
+        semantic_warnings = [warning for warning in audit.warnings if "语义验收未完全确认" in warning]
+
+        self.assertTrue(audit.passed, audit.remaining_issues)
+        self.assertEqual(len(semantic_warnings), 1)
+        self.assertIn("共 4 条只读语义提醒", semantic_warnings[0])
+        self.assertIn("另有 2 条已折叠", semantic_warnings[0])
 
     def test_auditor_semantic_acceptance_stays_hard_for_write_tasks(self):
         from planning.planner_schema import PlannedTask, PlannerResult
@@ -6194,6 +8003,7 @@ class RuntimeSettingsTests(unittest.TestCase):
             "AGENTS_QUERY_REFINER_ENABLED",
             "AGENTS_QUERY_REFINER_MODEL_PRIORITY",
             "AGENTS_ORCHESTRATOR_MODEL_PRIORITY",
+            "AGENTS_EXECUTOR_MODEL_PRIORITY",
             "AGENTS_FINAL_SYNTHESIZER_MODEL_PRIORITY",
             "AGENTS_PRIVACY_MODE",
             "AGENTS_OFFLINE_NETWORK_MCP_POLICY",
@@ -6259,7 +8069,9 @@ class RuntimeSettingsTests(unittest.TestCase):
             ]
         }
 
-        with patch("runtime.config.settings.load_model_catalog", return_value=fake_catalog):
+        with patch("runtime.config.settings.load_model_catalog", return_value=fake_catalog), patch(
+            "runtime.config.settings.load_effective_lucode_config", return_value={}
+        ):
             settings = RuntimeSettings.from_env()
 
         all_priority_ids = (
@@ -6306,6 +8118,46 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertEqual(settings.query_refiner_model_priority, ["local_model"])
         self.assertEqual(settings.orchestrator_model_priority, ["local_model"])
         self.assertEqual(settings.final_synthesizer_model_priority, ["local_model"])
+
+    def test_stale_lucode_role_refs_fall_back_to_available_models(self):
+        from runtime.config.model_config import select_role_model_priority
+        from runtime.config.settings import RuntimeSettings
+
+        workspace = TEMP_ROOT / f"runtime_stale_roles_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"runtime_stale_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        select_role_model_priority(workspace_root=workspace, role="executor", refs=["my_proxy/qwen-max"])
+
+        fake_catalog = {
+            "models": [
+                {
+                    "id": "local_model",
+                    "configured": True,
+                    "is_local": True,
+                    "supports_tools": True,
+                    "reasoning_level": "medium",
+                    "cost_level": "low",
+                    "best_for_skills": [],
+                    "model_tier": "small",
+                    "probe": {"status": "ok"},
+                }
+            ]
+        }
+
+        with patch.dict(
+            os.environ,
+            {
+                "LUCODE_WORKSPACE_ROOT": str(workspace),
+                "LUCODE_USER_HOME": str(user_home),
+            },
+            clear=False,
+        ), patch("runtime.config.settings.load_model_catalog", return_value=fake_catalog):
+            settings = RuntimeSettings.from_env()
+
+        self.assertEqual(settings.executor_model_priority, ["local_model"])
 
     def test_unprobed_local_model_is_excluded_from_default_priorities(self):
         from runtime.config.settings import RuntimeSettings
@@ -6511,6 +8363,8 @@ class ModelBackendPrivacyTests(unittest.TestCase):
             "AGENTS_OFFLINE_NETWORK_MCP_POLICY",
         ]:
             os.environ.pop(key, None)
+        from catalog_system.model_catalog import clear_model_catalog_cache
+        clear_model_catalog_cache()
 
     def test_ollama_model_is_configured_without_api_key_and_has_local_privacy(self):
         from catalog_system.model_catalog import load_model_catalog
@@ -6596,6 +8450,49 @@ class ModelBackendPrivacyTests(unittest.TestCase):
             "deepseek-ai/DeepSeek-R1",
         )
 
+    def test_model_registry_refreshes_after_lucode_provider_is_added_mid_session(self):
+        from catalog_system.model_catalog import ModelRegistry, clear_model_catalog_cache
+        from runtime.config.model_config import connect_provider
+
+        workspace = TEMP_ROOT / "registry_refresh_workspace"
+        user_home = TEMP_ROOT / "registry_refresh_user"
+        _safe_rmtree(workspace)
+        _safe_rmtree(user_home)
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        old_user_home = os.environ.get("LUCODE_USER_HOME")
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        os.environ["LUCODE_USER_HOME"] = str(user_home)
+        self.addCleanup(_restore_env, "LUCODE_WORKSPACE_ROOT", old_workspace)
+        self.addCleanup(_restore_env, "LUCODE_USER_HOME", old_user_home)
+
+        clear_model_catalog_cache()
+        registry = ModelRegistry()
+        self.assertNotIn("my_proxy_gpt_5_5_model", registry.definitions)
+
+        connect_provider(
+            "my_proxy",
+            custom=True,
+            api_key="test-key",
+            workspace_root=workspace,
+            user_home=user_home,
+            homepage="https://proxy.example.com",
+            base_url="https://api.proxy.example.com/v1",
+            models=["gpt-5.5"],
+        )
+        clear_model_catalog_cache()
+        registry.provider_registry.create_model = lambda **kwargs: kwargs
+
+        model = registry.get_model("my_proxy_gpt_5_5_model")
+
+        self.assertIn("my_proxy_gpt_5_5_model", registry.definitions)
+        self.assertEqual(model["provider_id"], "my_proxy")
+        self.assertEqual(model["model_name"], "gpt-5.5")
+        self.assertEqual(model["base_url"], "https://api.proxy.example.com/v1")
+
     def test_shared_provider_model_pairs_accept_plain_model_names(self):
         from catalog_system.model_catalog import load_model_catalog
 
@@ -6632,14 +8529,20 @@ class ModelBackendPrivacyTests(unittest.TestCase):
         os.environ["MODEL_LOCAL_MODEL"] = "deepseek-r1:7b"
         os.environ["MODEL_LOCAL_BACKEND"] = "ollama"
         cache = {
-            "version": 1,
+            "version": 4,
             "results": {
                 "local_model": {
+                    "status": "ok",
                     "model_id": "local_model",
                     "model_name": "deepseek-r1:7b",
                     "supports_basic_chat": True,
                     "supports_json_output": True,
                     "supports_tools": True,
+                    "tools_api_accepted": True,
+                    "tools_auto_call": True,
+                    "tools_forced_choice": True,
+                    "tools_result_roundtrip": True,
+                    "supports_streaming": True,
                     "planner_suitable": True,
                     "execution_suitable": True,
                     "fingerprint": "",
@@ -6840,10 +8743,10 @@ class ModelProbeTests(unittest.TestCase):
         from catalog_system import model_probe
 
         class FakeResponse:
-            def __init__(self, status_code, payload):
+            def __init__(self, status_code, payload=None, text=""):
                 self.status_code = status_code
-                self._payload = payload
-                self.text = json.dumps(payload)
+                self._payload = payload or {}
+                self.text = text or json.dumps(self._payload)
 
             def json(self):
                 return self._payload
@@ -6853,10 +8756,8 @@ class ModelProbeTests(unittest.TestCase):
                 200,
                 {"choices": [{"message": {"content": '{"ok": true}'}}]},
             ),
-            FakeResponse(
-                400,
-                {"error": {"message": "registry.ollama.ai/library/deepseek-r1:7b does not support tools"}},
-            ),
+            FakeResponse(400, {"error": {"message": "tools are not supported"}}),
+            FakeResponse(200, text='data: {"choices":[{"delta":{"content":"pong"}}]}\n\n'),
         ]
 
         with patch.object(model_probe, "_post_json", side_effect=responses):
@@ -6871,7 +8772,245 @@ class ModelProbeTests(unittest.TestCase):
 
         self.assertTrue(result["supports_basic_chat"])
         self.assertFalse(result["supports_tools"])
+        self.assertFalse(result["tools_api_accepted"])
+        self.assertFalse(result["tools_auto_call"])
+        self.assertFalse(result["tools_forced_choice"])
         self.assertEqual(result["status"], "tools_unsupported")
+        self.assertTrue(result["supports_streaming"])
+
+    def test_probe_model_capabilities_allows_auto_tools_without_forced_choice(self):
+        from catalog_system import model_probe
+
+        class FakeResponse:
+            def __init__(self, status_code, payload=None, text=""):
+                self.status_code = status_code
+                self._payload = payload or {}
+                self.text = text or json.dumps(self._payload)
+
+            def json(self):
+                return self._payload
+
+        responses = [
+            FakeResponse(200, {"choices": [{"message": {"content": '{"ok": true}'}}]}),
+            FakeResponse(200, {"choices": [{"message": {"content": "tools accepted"}}]}),
+            FakeResponse(200, {"choices": [{"message": {"tool_calls": [{"id": "call_auto", "function": {"name": "capability_probe", "arguments": "{\"value\":\"ping\"}"}}]}}]}),
+            FakeResponse(200, {"choices": [{"message": {"content": "tool result accepted"}}]}),
+            FakeResponse(200, text='data: {"choices":[{"delta":{"content":"pong"}}]}\n\n'),
+        ]
+
+        with patch.object(model_probe, "_post_json", side_effect=responses):
+            result = model_probe.probe_model_capabilities(
+                {
+                    "model_name": "deepseek-reasoner",
+                    "backend_type": "openai_compatible",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_key": "sk-test",
+                },
+                timeout=0.1,
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["supports_tools"])
+        self.assertTrue(result["tools_api_accepted"])
+        self.assertTrue(result["tools_auto_call"])
+        self.assertFalse(result["tools_forced_choice"])
+        self.assertTrue(result["tools_result_roundtrip"])
+        self.assertEqual(result["forced_tool_error"], "")
+
+    def test_probe_model_capabilities_keeps_chat_when_tool_probe_times_out(self):
+        from catalog_system import model_probe
+
+        class FakeResponse:
+            def __init__(self, status_code, payload=None, text=""):
+                self.status_code = status_code
+                self._payload = payload or {}
+                self.text = text or json.dumps(self._payload)
+
+            def json(self):
+                return self._payload
+
+        responses = [
+            FakeResponse(200, {"choices": [{"message": {"content": '{"ok": true}'}}]}),
+            TimeoutError("tool accept timeout"),
+            FakeResponse(200, text='data: {"choices":[{"delta":{"content":"pong"}}]}\n\n'),
+        ]
+
+        with patch.object(model_probe, "_post_json", side_effect=responses):
+            result = model_probe.probe_model_capabilities(
+                {
+                    "model_name": "slow-tools-model",
+                    "backend_type": "openai_compatible",
+                    "base_url": "https://api.example.com/v1",
+                    "api_key": "sk-test",
+                },
+                timeout=0.1,
+            )
+
+        self.assertEqual(result["status"], "partial")
+        self.assertTrue(result["supports_basic_chat"])
+        self.assertTrue(result["supports_json_output"])
+        self.assertIsNone(result["supports_tools"])
+        self.assertTrue(result["supports_streaming"])
+        self.assertIn("tool accept timeout", result["tool_api_error"])
+
+    def test_probe_model_capabilities_uses_wider_chat_timeout_than_tool_timeout(self):
+        from catalog_system import model_probe
+
+        class FakeResponse:
+            def __init__(self, status_code, payload=None, text=""):
+                self.status_code = status_code
+                self._payload = payload or {}
+                self.text = text or json.dumps(self._payload)
+
+            def json(self):
+                return self._payload
+
+        seen_timeouts = []
+
+        def fake_post_json(_endpoint, _headers, _payload, timeout):
+            seen_timeouts.append(timeout)
+            return FakeResponse(200, {"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+        with patch.dict(os.environ, {"MODEL_PROBE_CHAT_TIMEOUT_SECONDS": "6", "MODEL_PROBE_TOOL_TIMEOUT_SECONDS": "1"}, clear=False):
+            with patch.object(model_probe, "_post_json", side_effect=fake_post_json):
+                model_probe.probe_model_capabilities(
+                    {
+                        "model_name": "slow-chat-model",
+                        "backend_type": "openai_compatible",
+                        "base_url": "https://api.example.com/v1",
+                        "api_key": "sk-test",
+                    },
+                    timeout=0.1,
+                )
+
+        self.assertGreaterEqual(len(seen_timeouts), 2)
+        self.assertEqual(seen_timeouts[0], 6.0)
+        self.assertEqual(seen_timeouts[1], 1.0)
+
+    def test_probe_model_capabilities_keeps_tools_unknown_when_api_accepts_but_auto_does_not_call(self):
+        from catalog_system import model_probe
+
+        class FakeResponse:
+            def __init__(self, status_code, payload=None, text=""):
+                self.status_code = status_code
+                self._payload = payload or {}
+                self.text = text or json.dumps(self._payload)
+
+            def json(self):
+                return self._payload
+
+        responses = [
+            FakeResponse(200, {"choices": [{"message": {"content": '{"ok": true}'}}]}),
+            FakeResponse(200, {"choices": [{"message": {"content": "tools accepted"}}]}),
+            FakeResponse(200, {"choices": [{"message": {"content": "I can help."}}]}),
+            FakeResponse(200, text='data: {"choices":[{"delta":{"content":"pong"}}]}\n\n'),
+        ]
+
+        with patch.object(model_probe, "_post_json", side_effect=responses):
+            result = model_probe.probe_model_capabilities(
+                {
+                    "model_name": "mimo/mimo-v2.5",
+                    "backend_type": "openai_compatible",
+                    "base_url": "https://api.xiaomimimo.com/v1",
+                    "api_key": "sk-test",
+                },
+                timeout=0.1,
+            )
+
+        self.assertEqual(result["status"], "partial")
+        self.assertTrue(result["tools_api_accepted"])
+        self.assertIsNone(result["supports_tools"])
+        self.assertFalse(result["tools_auto_call"])
+        self.assertTrue(result["supports_streaming"])
+
+    def test_probe_profile_prefers_auto_only_for_deepseek_and_siliconflow(self):
+        from catalog_system import model_probe
+
+        deepseek = model_probe.probe_profile_for_model(
+            {"base_url": "https://api.deepseek.com/v1", "model_name": "deepseek-reasoner"}
+        )
+        siliconflow = model_probe.probe_profile_for_model(
+            {"base_url": "https://api.siliconflow.cn/v1", "model_name": "Qwen/Qwen3-8B"}
+        )
+        openai = model_probe.probe_profile_for_model(
+            {"base_url": "https://api.openai.com/v1", "model_name": "gpt-5.2"}
+        )
+
+        self.assertEqual(deepseek["tool_choice_modes"], ["auto"])
+        self.assertEqual(siliconflow["tool_choice_modes"], ["auto"])
+        self.assertIn("forced", openai["tool_choice_modes"])
+
+    def test_probe_model_capabilities_detects_json_tools_and_stream(self):
+        from catalog_system import model_probe
+
+        class FakeResponse:
+            def __init__(self, status_code, payload=None, text=""):
+                self.status_code = status_code
+                self._payload = payload or {}
+                self.text = text or json.dumps(self._payload)
+
+            def json(self):
+                return self._payload
+
+        responses = [
+            FakeResponse(200, {"choices": [{"message": {"content": '{"ok": true}'}}]}),
+            FakeResponse(200, {"choices": [{"message": {"content": "tools accepted"}}]}),
+            FakeResponse(200, {"choices": [{"message": {"tool_calls": [{"id": "call_auto", "function": {"name": "capability_probe", "arguments": "{\"value\":\"ping\"}"}}]}}]}),
+            FakeResponse(200, {"choices": [{"message": {"tool_calls": [{"id": "call_1"}]}}]}),
+            FakeResponse(200, {"choices": [{"message": {"content": "tool result accepted"}}]}),
+            FakeResponse(200, text='data: {"choices":[{"delta":{"content":"pong"}}]}\n\n'),
+        ]
+
+        with patch.object(model_probe, "_post_json", side_effect=responses):
+            result = model_probe.probe_model_capabilities(
+                {
+                    "model_name": "gpt-test",
+                    "backend_type": "openai_compatible",
+                    "base_url": "https://api.example.com/v1",
+                    "api_key": "sk-test",
+                },
+                timeout=0.1,
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["supports_basic_chat"])
+        self.assertTrue(result["supports_json_output"])
+        self.assertTrue(result["supports_tools"])
+        self.assertTrue(result["tools_api_accepted"])
+        self.assertTrue(result["tools_auto_call"])
+        self.assertTrue(result["tools_forced_choice"])
+        self.assertTrue(result["tools_result_roundtrip"])
+        self.assertTrue(result["supports_streaming"])
+
+    def test_refresh_model_probe_cache_records_config_incomplete_without_network(self):
+        from catalog_system import model_probe
+
+        project_root = TEMP_ROOT / "probe_config_incomplete"
+        project_root.mkdir(parents=True, exist_ok=True)
+        catalog = {
+            "models": [
+                {
+                    "id": "cloud_model",
+                    "configured": True,
+                    "is_local": False,
+                    "model_name": "",
+                    "backend_type": "openai_compatible",
+                    "base_url": "https://api.example.com/v1",
+                }
+            ]
+        }
+
+        with patch.object(model_probe, "probe_model_capabilities") as capability_probe:
+            cache = model_probe.refresh_model_probe_cache(project_root, catalog, force=True, local_only=False)
+
+        capability_probe.assert_not_called()
+        result = cache["results"]["cloud_model"]
+        self.assertEqual(result["status"], "config_incomplete")
+        self.assertFalse(result["supports_basic_chat"])
+        self.assertFalse(result["supports_json_output"])
+        self.assertFalse(result["supports_tools"])
+        self.assertFalse(result["supports_streaming"])
+        self.assertIn("model_name", result["missing"])
 
     def test_refresh_model_probe_cache_records_failures_without_raising(self):
         from catalog_system import model_probe
@@ -6979,6 +9118,55 @@ class ModelProbeTests(unittest.TestCase):
         self.assertTrue(result["model_present"])
         self.assertIn("generation timeout", result["error"])
 
+    def test_executor_role_priority_is_loaded_from_env(self):
+        from runtime.config.settings import RuntimeSettings
+
+        os.environ["AGENTS_EXECUTOR_MODEL_PRIORITY"] = "deepseek_v4_flash_model,mimo_v25_pro_model"
+        try:
+            settings = RuntimeSettings.from_env()
+            self.assertIn("deepseek_v4_flash_model", settings.executor_model_priority)
+            self.assertIn("mimo_v25_pro_model", settings.executor_model_priority)
+        finally:
+            os.environ.pop("AGENTS_EXECUTOR_MODEL_PRIORITY", None)
+
+    def test_model_priority_for_executor_role(self):
+        from runtime.config.settings import RuntimeSettings
+
+        settings = RuntimeSettings(executor_model_priority=["deepseek_v4_flash_model"])
+        self.assertEqual(settings.model_priority_for("executor"), ["deepseek_v4_flash_model"])
+        self.assertEqual(settings.model_priority_for("执行"), ["deepseek_v4_flash_model"])
+        self.assertEqual(settings.model_priority_for("执行专家脑"), ["deepseek_v4_flash_model"])
+        settings.query_refiner_model_priority = ["query_model"]
+        settings.orchestrator_model_priority = ["planner_model"]
+        settings.final_synthesizer_model_priority = ["final_model"]
+        self.assertEqual(settings.model_priority_for("前置优化脑"), ["query_model"])
+        self.assertEqual(settings.model_priority_for("主脑规划脑"), ["planner_model"])
+        self.assertEqual(settings.model_priority_for("汇总脑"), ["final_model"])
+
+    def test_executor_inherits_default_model_when_not_explicitly_configured(self):
+        from runtime.config.settings import RuntimeSettings
+
+        fake_catalog = {
+            "models": [
+                {
+                    "id": "local_model",
+                    "configured": True,
+                    "is_local": True,
+                    "supports_tools": True,
+                    "reasoning_level": "medium",
+                    "cost_level": "low",
+                    "best_for_skills": [],
+                    "model_tier": "small",
+                    "probe": {"status": "ok"},
+                }
+            ]
+        }
+        with patch("runtime.config.settings.load_model_catalog", return_value=fake_catalog):
+            settings = RuntimeSettings.from_env()
+
+        self.assertEqual(len(settings.executor_model_priority), 1)
+        self.assertEqual(settings.executor_model_priority[0], "local_model")
+
 
 class ReadonlyCliConfigTests(unittest.TestCase):
     def tearDown(self):
@@ -7058,8 +9246,11 @@ class ReadonlyCliConfigTests(unittest.TestCase):
         with patch("runtime.config.cli.load_model_catalog", return_value=fake_catalog):
             output = render_readonly_command("/config", RuntimeSettings.from_env())
 
-        self.assertIn("能力：工具 否 | 主脑 否 | 执行 否", output)
-        self.assertIn("能力：工具 是 | 主脑 是 | 执行 是", output)
+        self.assertIn("模型能力表", output)
+        self.assertIn("本地 DeepSeek R1（local_model）", output)
+        self.assertIn("DeepSeek Cloud（cloud_model）", output)
+        self.assertIn("否", output)
+        self.assertIn("是", output)
         self.assertIn("探测：不支持工具调用", output)
         self.assertIn("探测：正常", output)
 
@@ -7084,7 +9275,8 @@ class ReadonlyCliConfigTests(unittest.TestCase):
         with patch("runtime.config.cli.load_model_catalog", return_value=fake_catalog):
             output = render_readonly_command("/config", RuntimeSettings.from_env())
 
-        self.assertIn("能力：工具 是（保守判断） | 主脑 可尝试（未探测） | 执行 是（保守判断）", output)
+        self.assertIn("是（保守判断）", output)
+        self.assertIn("可尝试（未探测）", output)
         self.assertIn("探测：未探测（使用保守判断）", output)
 
     def test_readonly_commands_use_human_readable_chinese_values(self):
@@ -7106,13 +9298,13 @@ class ReadonlyCliConfigTests(unittest.TestCase):
         self.assertIn("本地优先", privacy)
         self.assertIn("离线模式", privacy)
         self.assertIn("允许云端", privacy)
-        self.assertIn("主脑模型优先级", model)
+        self.assertIn("主脑规划脑", model)
         self.assertNotIn("backend=", combined)
         self.assertNotIn("configured=True", combined)
         self.assertNotIn("privacy=cloud", combined)
         self.assertNotIn("privacy=local", combined)
 
-    def test_config_command_uses_compact_multiline_model_cards(self):
+    def test_config_command_uses_compact_model_tables(self):
         from runtime.config.cli import render_readonly_command
         from runtime.config.settings import RuntimeSettings
 
@@ -7135,10 +9327,15 @@ class ReadonlyCliConfigTests(unittest.TestCase):
         with patch("runtime.config.cli.load_model_catalog", return_value=fake_catalog):
             output = render_readonly_command("/config", RuntimeSettings.from_env())
 
-        self.assertIn("- 本地 DeepSeek R1（local_model）", output)
-        self.assertIn("  基础：Ollama 本地服务 | 配置完整 | 可聊天，不支持工具 | 本地", output)
-        self.assertIn("  能力：工具 否 | 主脑 否 | 执行 否", output)
-        self.assertIn("  探测：不支持工具调用", output)
+        self.assertIn("Lucode 配置概览", output)
+        self.assertIn("╭", output)
+        self.assertIn("本地 DeepSeek R1（local_model）", output)
+        self.assertIn("Ollama 本地服务", output)
+        self.assertIn("配置完整", output)
+        self.assertIn("可聊天，不支持工具", output)
+        self.assertIn("不支持工具调用", output)
+        self.assertNotIn("  基础：", output)
+        self.assertNotIn("  能力：", output)
         self.assertNotIn("local_model | 本地 DeepSeek R1 | 接口类型", output)
 
     def test_api_and_model_commands_use_compact_multiline_blocks(self):
@@ -7152,11 +9349,11 @@ class ReadonlyCliConfigTests(unittest.TestCase):
         self.assertIn("- 本地 Qwen3（local_model）", api_show)
         self.assertIn("  地址：http://localhost:11434", api_show)
         self.assertIn("  状态：配置完整 | 未确认可用 | 本地", api_show)
-        self.assertIn("前置优化副脑", model)
+        self.assertIn("前置优化脑", model)
         self.assertIn("当前隐私模式：本地优先", model)
         self.assertIn("本地 Qwen3（local_model）", model)
         self.assertNotIn("当前优先级里的模型都没有在 .env 注册", model)
-        self.assertNotIn("前置优化副脑：", model)
+        self.assertNotIn("前置优化脑：", model)
         self.assertNotIn(" → ", model)
 
     def test_model_available_command_shows_only_runtime_available_models(self):
@@ -7191,11 +9388,13 @@ class ReadonlyCliConfigTests(unittest.TestCase):
         }
         with patch("runtime.config.cli.load_model_catalog", return_value=fake_catalog):
             output = render_readonly_command("/model available", RuntimeSettings.from_env())
+            alias_output = render_readonly_command("/models available", RuntimeSettings.from_env())
 
         self.assertIn("可用模型（紧凑视图）", output)
         self.assertIn("DeepSeek Pro（deepseek_v4_pro_model）", output)
         self.assertNotIn("本地 DeepSeek R1", output)
         self.assertNotIn("暂不可用", output)
+        self.assertEqual(alias_output, output)
 
     def test_model_available_command_explains_when_no_available_models(self):
         from runtime.config.cli import render_readonly_command
@@ -7244,7 +9443,8 @@ class ReadonlyCliConfigTests(unittest.TestCase):
             config = render_readonly_command("/config", RuntimeSettings.from_env())
 
         self.assertIn("配置完整 | 未确认可用", output)
-        self.assertIn("配置完整 | 未确认可用", config)
+        self.assertIn("配置完整", config)
+        self.assertIn("未确认可用", config)
         self.assertNotIn("已配置 | 本地", output)
         self.assertNotIn("可加入优先级的候选模型", output)
         self.assertIn("暂不可用模型", output)
@@ -7334,6 +9534,7 @@ class ReadonlyCliConfigTests(unittest.TestCase):
             query_refiner_enabled=True,
             query_refiner_model_priority=["mimo_model"],
             orchestrator_model_priority=["mimo_model"],
+            executor_model_priority=["mimo_model"],
             final_synthesizer_model_priority=["mimo_model"],
             privacy_mode="cloud_allowed",
         )
@@ -7342,7 +9543,7 @@ class ReadonlyCliConfigTests(unittest.TestCase):
 
         self.assertIn("可加入优先级的候选模型", output)
         self.assertIn("Qwen Coder（qwen_coder_model）", output)
-        self.assertIn("建议角色：前置优化副脑, 主脑模型优先级, 汇总副脑", output)
+        self.assertIn("建议角色：前置优化脑, 主脑规划脑, 执行专家脑, 汇总脑", output)
 
     def test_probe_failed_model_is_not_shown_as_priority_candidate(self):
         from runtime.config.cli import render_readonly_command
@@ -7575,7 +9776,7 @@ class ReadonlyCliConfigTests(unittest.TestCase):
         switch_hint = render_readonly_command("/privacy offline", settings)
 
         self.assertIn("只读查看", privacy)
-        self.assertIn("主脑模型优先级", model)
+        self.assertIn("主脑规划脑", model)
         self.assertIn("当前版本不会直接改写 .env", switch_hint)
 
     def test_mode_command_shows_execution_mode_readonly(self):
@@ -7594,6 +9795,40 @@ class ReadonlyCliConfigTests(unittest.TestCase):
         self.assertIn("可以读写文件、联网、跑命令和测试", output)
         self.assertIn("支持直接切换", switch_hint)
         self.assertIn("正确命令：/mode serial", model_typo_hint)
+
+    def test_models_command_shows_four_brain_tuner(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+
+        settings = RuntimeSettings.from_env()
+        settings.orchestrator_model_priority = ["deepseek_v4_pro_model"]
+        settings.executor_model_priority = ["mimo_v25_pro_model"]
+
+        output = render_readonly_command("/models", settings)
+        self.assertIn("多脑模型调音台", output)
+        self.assertIn("前置优化脑", output)
+        self.assertIn("主脑规划脑", output)
+        self.assertIn("执行专家脑", output)
+        self.assertIn("汇总脑", output)
+        self.assertIn("/models brain", output)
+        self.assertLessEqual(len(output.splitlines()), 16)
+
+    def test_models_brain_command_shows_tuner(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+
+        settings = RuntimeSettings.from_env()
+        output = render_readonly_command("/models brain", settings)
+        self.assertIn("多脑模型调音台", output)
+
+    def test_models_roles_shows_four_brains(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+
+        settings = RuntimeSettings.from_env()
+        output = render_readonly_command("/models roles", settings)
+        self.assertIn("四脑角色模型配置", output)
+        self.assertIn("executor", output)
 
 
 class WritableCliConfigTests(unittest.TestCase):
@@ -7650,6 +9885,252 @@ class WritableCliConfigTests(unittest.TestCase):
         self.assertFalse(updated)
         self.assertIn("无法识别", output)
         self.assertEqual(self.env_path.read_text(encoding="utf-8"), before)
+
+    def test_models_brain_write_parsing(self):
+        from runtime.config.cli import parse_writable_config_command
+
+        reset = parse_writable_config_command("/models brain reset")
+        self.assertIsNotNone(reset)
+        self.assertEqual(reset[0], "models_brain_reset")
+
+        parsed = parse_writable_config_command("/models brain 主脑 dashscope/qwen-max")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed[0], "models_brain")
+
+        parsed2 = parse_writable_config_command("/models brain 执行 deepseek/deepseek-chat")
+        self.assertIsNotNone(parsed2)
+        self.assertEqual(parsed2[0], "models_brain")
+
+    def test_models_brain_does_not_break_old_role_command(self):
+        from runtime.config.cli import parse_writable_config_command
+
+        parsed = parse_writable_config_command("/models role executor openai/gpt-4.1-mini")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed[0], "models_role")
+
+    def test_models_brain_parsing_for_all_four_brains(self):
+        from runtime.config.cli import parse_writable_config_command
+
+        for brain_keyword in ["前置优化", "主脑", "执行", "汇总"]:
+            parsed = parse_writable_config_command(f"/models brain {brain_keyword} deepseek/deepseek-chat")
+            self.assertIsNotNone(parsed)
+            self.assertEqual(parsed[0], "models_brain")
+
+    def test_model_brain_alias_works(self):
+        from runtime.config.cli import parse_writable_config_command
+
+        parsed = parse_writable_config_command("/model brain 主脑 dashscope/qwen-max")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed[0], "models_brain")
+
+    def test_brain_write_immediately_affects_settings(self):
+        from runtime.config.cli import _apply_role_priority_to_settings
+        from runtime.config.settings import RuntimeSettings
+
+        settings = RuntimeSettings()
+        _apply_role_priority_to_settings(settings, "executor", ["deepseek/deepseek-chat"])
+        self.assertEqual(settings.executor_model_priority, ["deepseek/deepseek-chat"])
+
+        _apply_role_priority_to_settings(settings, "主脑", ["dashscope/qwen-max"])
+        self.assertEqual(settings.orchestrator_model_priority, ["dashscope/qwen-max"])
+
+    def test_models_brain_reset_removes_project_roles_and_refreshes_runtime(self):
+        from runtime.config.cli import apply_writable_config_command
+        from runtime.config.model_config import load_lucode_config, select_role_model_priority
+        from runtime.config.settings import RuntimeSettings
+
+        workspace = TEMP_ROOT / f"models_reset_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"models_reset_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True, exist_ok=True)
+        user_home.mkdir(parents=True, exist_ok=True)
+        select_role_model_priority(workspace_root=workspace, role="执行", refs=["deepseek/deepseek-chat"])
+
+        class Context:
+            pass
+
+        Context.workspace_root = workspace
+        Context.user_home = user_home
+
+        fake_catalog = {
+            "models": [
+                {
+                    "id": "local_model",
+                    "configured": True,
+                    "is_local": True,
+                    "supports_tools": True,
+                    "reasoning_level": "medium",
+                    "cost_level": "low",
+                    "best_for_skills": [],
+                    "model_tier": "small",
+                    "probe": {"status": "ok"},
+                }
+            ]
+        }
+        settings = RuntimeSettings(executor_model_priority=["deepseek_chat_model"])
+        with patch("runtime.config.settings.load_model_catalog", return_value=fake_catalog):
+            output, updated = apply_writable_config_command(
+                "/models brain reset",
+                self.env_path,
+                settings,
+                Context(),
+            )
+
+        self.assertTrue(updated, output)
+        self.assertIn("已重置多脑模型覆盖配置", output)
+        self.assertNotIn("roles", load_lucode_config(workspace_root=workspace))
+        self.assertEqual(settings.executor_model_priority, ["local_model"])
+
+    def test_models_select_immediately_updates_executor_too(self):
+        from runtime.config.cli import apply_writable_config_command
+        from runtime.config.settings import RuntimeSettings
+
+        workspace = TEMP_ROOT / f"models_select_workspace_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        class Context:
+            workspace_root = workspace
+            user_home = TEMP_ROOT / f"models_select_user_{uuid.uuid4().hex}"
+
+        settings = RuntimeSettings()
+        output, updated = apply_writable_config_command(
+            "/models select deepseek/deepseek-chat openai/gpt-4.1-mini",
+            self.env_path,
+            settings,
+            Context(),
+        )
+
+        self.assertTrue(updated, output)
+        self.assertEqual(settings.executor_model_priority[:2], ["deepseek_chat_model", "openai_gpt_4_1_mini_model"])
+
+    def test_models_probe_command_refreshes_probe_cache(self):
+        from runtime.config.cli import apply_writable_config_command, parse_writable_config_command
+        from runtime.config.settings import RuntimeSettings
+
+        workspace = TEMP_ROOT / f"models_probe_workspace_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        class Context:
+            workspace_root = workspace
+            user_home = TEMP_ROOT / f"models_probe_user_{uuid.uuid4().hex}"
+
+        fake_catalog = {
+            "models": [
+                {
+                    "id": "cloud_model",
+                    "display_name_zh": "Cloud Test",
+                    "configured": True,
+                    "is_local": False,
+                    "supports_tools": True,
+                    "backend_type": "openai_compatible",
+                    "privacy_level": "cloud",
+                    "base_url": "https://api.example.com/v1",
+                    "model_name": "gpt-test",
+                    "probe": {},
+                }
+            ]
+        }
+        fake_cache = {
+            "version": 4,
+            "results": {
+                "cloud_model": {
+                    "status": "ok",
+                    "supports_basic_chat": True,
+                    "supports_json_output": True,
+                    "supports_tools": True,
+                    "tools_api_accepted": True,
+                    "tools_auto_call": True,
+                    "tools_forced_choice": True,
+                    "tools_result_roundtrip": True,
+                    "supports_streaming": True,
+                }
+            },
+        }
+
+        parsed = parse_writable_config_command("/models probe force")
+        with patch("runtime.config.cli.load_model_catalog", return_value=fake_catalog), patch(
+            "catalog_system.model_probe.refresh_model_probe_cache", return_value=fake_cache
+        ) as refresh:
+            output, updated = apply_writable_config_command(
+                "/models probe force",
+                self.env_path,
+                RuntimeSettings(),
+                Context(),
+            )
+
+        self.assertEqual(parsed, ("models_probe", "force"))
+        self.assertTrue(updated, output)
+        self.assertIn("模型能力探测", output)
+        self.assertIn("stream", output)
+        refresh.assert_called_once()
+        self.assertFalse(refresh.call_args.kwargs["local_only"])
+        self.assertTrue(refresh.call_args.kwargs["force"])
+
+    def test_connect_remove_command_deletes_provider_and_refreshes_settings(self):
+        from runtime.config.cli import apply_writable_config_command, parse_writable_config_command
+        from runtime.config.model_config import (
+            connect_provider,
+            load_auth,
+            load_lucode_config,
+            select_role_model_priority,
+        )
+        from runtime.config.settings import RuntimeSettings
+
+        workspace = TEMP_ROOT / f"connect_remove_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_remove_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True, exist_ok=True)
+        user_home.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        class Context:
+            pass
+
+        Context.workspace_root = workspace
+        Context.user_home = user_home
+
+        connect_provider(
+            "my_proxy",
+            api_key="sk-remove-secret",
+            workspace_root=workspace,
+            user_home=user_home,
+            homepage="https://proxy.example.com",
+            base_url="https://api.proxy.example.com/v1",
+            models=["qwen-max"],
+            custom=True,
+        )
+        select_role_model_priority(workspace_root=workspace, role="executor", refs=["my_proxy/qwen-max"])
+        fake_catalog = {
+            "models": [
+                {
+                    "id": "local_model",
+                    "configured": True,
+                    "is_local": True,
+                    "supports_tools": True,
+                    "reasoning_level": "medium",
+                    "cost_level": "low",
+                    "best_for_skills": [],
+                    "model_tier": "small",
+                    "probe": {"status": "ok"},
+                }
+            ]
+        }
+        settings = RuntimeSettings(executor_model_priority=["my_proxy_qwen_max_model"])
+
+        parsed = parse_writable_config_command("/connect remove my_proxy")
+        with patch("runtime.config.settings.load_model_catalog", return_value=fake_catalog):
+            output, updated = apply_writable_config_command(
+                "/connect remove my_proxy",
+                self.env_path,
+                settings,
+                Context(),
+            )
+
+        self.assertIsNotNone(parsed)
+        self.assertTrue(updated, output)
+        self.assertIn("已删除 Provider：my_proxy", output)
+        self.assertNotIn("my_proxy", load_lucode_config(workspace_root=workspace).get("provider") or {})
+        self.assertNotIn("my_proxy", load_auth(user_home=user_home).get("providers") or {})
+        self.assertEqual(settings.executor_model_priority, ["local_model"])
 
 
 class PlannerRefinerToggleTests(unittest.TestCase):
@@ -7908,6 +10389,188 @@ class LocalModelPlannerCompatibilityTests(unittest.TestCase):
         self.assertIn("不支持工具调用", plan.direct_answer_instruction)
         validation = validate_plan(plan, privacy_policy=PrivacyPolicy.from_env())
         self.assertTrue(validation.valid, validation.errors)
+
+
+class DynamicExecutionModelTests(unittest.TestCase):
+    def setUp(self):
+        from dotenv import load_dotenv
+        from pathlib import Path
+        from catalog_system.model_catalog import clear_model_catalog_cache, BASE_DIR
+        load_dotenv(BASE_DIR / ".env", override=True)
+        clear_model_catalog_cache()
+
+    def test_empty_task_model_is_filled_with_executor(self):
+        from planning.planner_schema import PlannerResult, PlannedTask
+        from runtime.config.settings import RuntimeSettings
+        from catalog_system.model_catalog import ModelRegistry
+        from runtime.execution.dynamic import _apply_executor_model_defaults
+
+        plan = PlannerResult(
+            route_type="multi_agent",
+            reason="test",
+            refined_request="test",
+            tasks=[
+                PlannedTask(id="t1", title="Task 1", instruction="do something", skill_id="project_explorer", model=""),
+            ],
+        )
+        settings = RuntimeSettings(executor_model_priority=["deepseek_v4_flash_model"])
+        mr = ModelRegistry()
+        _apply_executor_model_defaults(plan, settings, mr)
+
+        self.assertNotEqual(plan.tasks[0].model, "")
+        self.assertTrue(mr.get_model_info(plan.tasks[0].model))
+
+    def test_invalid_task_model_is_replaced_with_executor(self):
+        from planning.planner_schema import PlannerResult, PlannedTask
+        from runtime.config.settings import RuntimeSettings
+        from catalog_system.model_catalog import ModelRegistry
+        from runtime.execution.dynamic import _apply_executor_model_defaults
+
+        plan = PlannerResult(
+            route_type="multi_agent",
+            reason="test",
+            refined_request="test",
+            tasks=[
+                PlannedTask(id="t1", title="Task 1", instruction="do something", skill_id="project_explorer", model="nonexistent_model_xyz"),
+            ],
+        )
+        settings = RuntimeSettings(executor_model_priority=["deepseek_v4_flash_model"])
+        mr = ModelRegistry()
+        _apply_executor_model_defaults(plan, settings, mr)
+
+        self.assertNotEqual(plan.tasks[0].model, "nonexistent_model_xyz")
+        self.assertTrue(mr.get_model_info(plan.tasks[0].model))
+
+    def test_valid_task_model_is_preserved(self):
+        from planning.planner_schema import PlannerResult, PlannedTask
+        from runtime.config.settings import RuntimeSettings
+        from catalog_system.model_catalog import ModelRegistry
+        from runtime.execution.dynamic import _apply_executor_model_defaults
+
+        plan = PlannerResult(
+            route_type="multi_agent",
+            reason="test",
+            refined_request="test",
+            tasks=[
+                PlannedTask(id="t1", title="Task 1", instruction="do something", skill_id="project_explorer", model="deepseek_v4_flash_model"),
+            ],
+        )
+        settings = RuntimeSettings(executor_model_priority=["deepseek_v4_flash_model"])
+        mr = ModelRegistry()
+        _apply_executor_model_defaults(plan, settings, mr)
+
+        self.assertEqual(plan.tasks[0].model, "deepseek_v4_flash_model")
+
+    def test_executor_fills_multiple_tasks(self):
+        from planning.planner_schema import PlannerResult, PlannedTask
+        from runtime.config.settings import RuntimeSettings
+        from catalog_system.model_catalog import ModelRegistry
+        from runtime.execution.dynamic import _apply_executor_model_defaults
+
+        plan = PlannerResult(
+            route_type="multi_agent",
+            reason="test",
+            refined_request="test",
+            tasks=[
+                PlannedTask(id="t1", title="Task 1", instruction="do something", skill_id="project_explorer", model=""),
+                PlannedTask(id="t2", title="Task 2", instruction="do something else", skill_id="jpc_now_skill", model="nonexistent"),
+                PlannedTask(id="t3", title="Task 3", instruction="valid task", skill_id="project_explorer", model="deepseek_v4_flash_model"),
+            ],
+        )
+        settings = RuntimeSettings(executor_model_priority=["deepseek_v4_flash_model"])
+        mr = ModelRegistry()
+        _apply_executor_model_defaults(plan, settings, mr)
+
+        self.assertNotEqual(plan.tasks[0].model, "")
+        self.assertNotEqual(plan.tasks[1].model, "nonexistent")
+        self.assertEqual(plan.tasks[2].model, "deepseek_v4_flash_model")
+
+    def test_executor_defaults_use_passed_registry_for_validity(self):
+        from planning.planner_schema import PlannerResult, PlannedTask
+        from runtime.config.settings import RuntimeSettings
+        from runtime.execution.dynamic import _apply_executor_model_defaults
+
+        class FakeRegistry:
+            def __init__(self):
+                self.lookups = []
+
+            def first_configured(self, preferred):
+                return preferred[0]
+
+            def get_model_info(self, model_id):
+                self.lookups.append(model_id)
+                if model_id in {"executor_model", "valid_task_model"}:
+                    return {"id": model_id, "configured": True, "supports_tools": True, "probe": {"status": "ok"}}
+                raise KeyError(model_id)
+
+        plan = PlannerResult(
+            route_type="multi_agent",
+            reason="test",
+            refined_request="test",
+            tasks=[
+                PlannedTask(id="t1", title="Keep", instruction="keep", skill_id="project_explorer", model="valid_task_model"),
+                PlannedTask(id="t2", title="Fix", instruction="fix", skill_id="project_explorer", model="missing_model"),
+            ],
+        )
+        registry = FakeRegistry()
+        settings = RuntimeSettings(executor_model_priority=["executor_model"])
+
+        _apply_executor_model_defaults(plan, settings, registry)
+
+        self.assertEqual(plan.tasks[0].model, "valid_task_model")
+        self.assertEqual(plan.tasks[1].model, "executor_model")
+        self.assertIn("valid_task_model", registry.lookups)
+        self.assertIn("missing_model", registry.lookups)
+
+    def test_planned_task_max_turns_returns_structured_failure(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.task_runner import _run_planned_task
+
+        class MaxTurnsExceeded(Exception):
+            pass
+
+        class FakeFactory:
+            async def create_task_agent(self, task):
+                return f"agent:{task.id}"
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20):
+            raise MaxTurnsExceeded("Max turns (12) exceeded")
+
+        task = PlannedTask(
+            id="inspect",
+            title="检查文件",
+            instruction="检查文件。",
+            skill_id="project_explorer",
+            model="model",
+            mcp=["project_filesystem_readonly"],
+        )
+        state = PipelineRunState.create(
+            "检查文件",
+            PlannerResult(
+                route_type="multi_agent",
+                reason="test",
+                refined_request="检查文件",
+                tasks=[task],
+            ),
+        )
+
+        title, output = asyncio.run(
+            _run_planned_task(
+                "检查文件",
+                task,
+                PROJECT_ROOT,
+                FakeFactory(),
+                hooks=None,
+                run_agent=fake_run_agent,
+                run_state=state,
+            )
+        )
+
+        self.assertEqual(title, "检查文件")
+        self.assertIn("任务失败", output)
+        self.assertIn("超过最大工具/模型轮数", output)
+        self.assertEqual(state.tasks[0].status, "failed")
 
 
 if __name__ == "__main__":

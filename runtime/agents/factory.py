@@ -89,12 +89,13 @@ class AgentFactory:
                     )
                 return (
                     "\n\n## 本次工具预算\n"
-                    "- `locate_code` 最多调用 2 次。\n"
-                    "- `get_file_outline` 最多调用 2 次。\n"
+                    "- `locate_code` 最多调用 1 次。\n"
+                    "- `get_file_outline` 最多调用 1 次。\n"
                     "- 文件读取前必须先说明要读哪些文件以及为什么。\n"
                     "- 如果目标文件过大，先获取文件信息，再用 locate_code/search_files 定位关键词，"
                     "按相关片段分段读取；不要为了完整性反复读取整份大文件。\n"
-                    "- `read_file` / `read_multiple_files` 合计最多 4 次；读取到足够上下文后停止。"
+                    "- `read_file` / `read_multiple_files` 合计最多 2 次；读取到足够上下文后停止。"
+                    "- 拿到目标文件或关键片段后必须直接总结，不要继续搜索相邻文件或请求更多预算。"
                     "- 如果预算不足以覆盖全文，明确说明只完成了部分分析，不要把部分结论伪装成全文结论。"
                     + command_budget
                 )

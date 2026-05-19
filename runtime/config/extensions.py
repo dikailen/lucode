@@ -201,8 +201,9 @@ def _render_skill_items(items: list[dict[str, Any]]) -> list[str]:
     lines = []
     for item in items:
         status = item.get("status") or ("已阻止：核心系统 Skill 不能被覆盖" if item.get("blocked") else "可用")
-        summary = item.get("summary_zh") or "无说明"
-        lines.append(f"- {item.get('id')} | {item.get('display_name_zh')} | {status}")
+        summary = _compact_text(item.get("summary_zh") or "无说明", limit=92)
+        display_name = _compact_text(item.get("display_name_zh") or item.get("id") or "", limit=44)
+        lines.append(f"- {item.get('id')} | {display_name} | {status}")
         lines.append(f"  说明：{summary}")
         lines.append(f"  来源：{_source_label(item.get('source'))}")
     return lines
@@ -213,7 +214,7 @@ def _render_mcp_items(items: list[dict[str, Any]]) -> list[str]:
     for item in items:
         trusted = "已信任" if item.get("trusted") else "未信任"
         enabled = "已启用" if item.get("enabled") else "未启用"
-        tools = ", ".join(item.get("tools") or []) or "未声明"
+        tools = _join_compact(item.get("tools") or [], limit=92) or "未声明"
         lines.append(
             f"- {item.get('id')} | {item.get('display_name_zh')} | "
             f"{trusted} | {enabled} | 风险 {item.get('risk_level') or 'unknown'}"
@@ -221,9 +222,38 @@ def _render_mcp_items(items: list[dict[str, Any]]) -> list[str]:
         lines.append(f"  工具：{tools}")
         prompts = _mcp_prompt_names(item.get("prompts"))
         if prompts:
-            lines.append(f"  Prompts：{', '.join(prompts)}")
+            lines.append(f"  Prompts：{_join_compact(prompts, limit=92)}")
         lines.append(f"  来源：{_source_label(item.get('source'))}")
     return lines
+
+
+def _join_compact(values, *, limit: int) -> str:
+    items = [str(item).strip() for item in values if str(item).strip()]
+    if not items:
+        return ""
+    joined = ", ".join(items)
+    if len(joined) <= limit:
+        return joined
+    kept: list[str] = []
+    used = 0
+    for item in items:
+        next_used = used + (2 if kept else 0) + len(item)
+        if next_used > max(8, limit - 12):
+            break
+        kept.append(item)
+        used = next_used
+    remaining = len(items) - len(kept)
+    if not kept:
+        return _compact_text(items[0], limit=max(8, limit - 8)) + f"，另有 {remaining} 个"
+    suffix = f"，另有 {remaining} 个" if remaining > 0 else ""
+    return ", ".join(kept) + suffix
+
+
+def _compact_text(value, *, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
 
 
 def _source_label(source: str | None) -> str:

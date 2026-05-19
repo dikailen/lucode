@@ -19,6 +19,27 @@ DEFAULT_PROVIDER_CATALOG_PATH = PROJECT_ROOT / "catalogs" / "provider_catalog.js
 
 SENSITIVE_PROVIDER_KEYS = {"api_key", "token", "secret", "authorization", "password"}
 
+MODEL_ROLES = {
+    "query_refiner": {
+        "label": "前置优化脑",
+        "aliases": ("refiner", "query_refiner", "前置优化", "前置优化脑", "前置优化副脑"),
+    },
+    "orchestrator": {
+        "label": "主脑规划脑",
+        "aliases": ("planner", "main", "main_brain", "orchestrator", "主脑", "主脑规划", "主脑规划脑"),
+    },
+    "executor": {
+        "label": "执行专家脑",
+        "aliases": ("executor", "execution", "worker", "agent", "specialist", "solo", "执行", "执行脑", "执行专家", "执行专家脑", "专家脑", "solo_agent"),
+    },
+    "final_synthesizer": {
+        "label": "汇总脑",
+        "aliases": ("synthesizer", "final", "final_brain", "final_synthesizer", "汇总", "汇总脑", "汇总副脑"),
+    },
+}
+
+ROLE_ORDER = ("query_refiner", "orchestrator", "executor", "final_synthesizer")
+
 
 def load_provider_catalog(path: Path | str | None = None) -> dict[str, dict[str, Any]]:
     catalog_path = Path(path) if path is not None else DEFAULT_PROVIDER_CATALOG_PATH
@@ -139,6 +160,11 @@ def connect_provider(
 
     resolved_local = bool(preset.get("local", False) if local is None else local)
     resolved_models = _as_string_list(models if models is not None else preset.get("models") or [])
+    if custom:
+        if not resolved_models:
+            raise ValueError("自定义中转必须至少提供一个模型名，例如 --model qwen-max。")
+        if not resolved_local and not str(api_key or "").strip():
+            raise ValueError("自定义中转必须提供 API key；密钥只会保存到用户级 auth.json。")
     provider_config: dict[str, Any] = {
         "display_name": display_name or preset.get("display_name") or provider_id,
         "homepage": resolved_homepage,
@@ -180,6 +206,36 @@ def remove_provider_auth(provider_id: str, user_home: Path | str | None = None) 
     auth["providers"] = providers
     save_auth(auth, user_home=user_home)
     return existed
+
+
+def remove_provider_config(
+    provider_id: str,
+    *,
+    workspace_root: Path | str | None = None,
+    user_home: Path | str | None = None,
+    remove_auth: bool = True,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_id(provider_id)
+    config = load_lucode_config(workspace_root=workspace_root)
+    providers = dict(config.get("provider") or {})
+    provider_removed = provider_id in providers
+    providers.pop(provider_id, None)
+    if providers:
+        config["provider"] = providers
+    else:
+        config.pop("provider", None)
+
+    cleanup = prune_model_refs_from_config(config, removed_provider=provider_id)
+    if provider_removed or cleanup["changed"]:
+        save_lucode_config(config, workspace_root=workspace_root)
+
+    auth_removed = remove_provider_auth(provider_id, user_home=user_home) if remove_auth else False
+    return {
+        "provider_id": provider_id,
+        "provider_removed": provider_removed,
+        "auth_removed": auth_removed,
+        **cleanup,
+    }
 
 
 def load_lucode_config(
@@ -251,27 +307,101 @@ def select_role_model_priority(
     return roles
 
 
+def reset_role_model_priorities(*, workspace_root: Path | str | None = None) -> dict[str, Any]:
+    config = load_lucode_config(workspace_root=workspace_root)
+    config.pop("roles", None)
+    save_lucode_config(config, workspace_root=workspace_root)
+    return config
+
+
+def prune_model_refs_from_config(
+    config: dict[str, Any],
+    *,
+    removed_provider: str | None = None,
+    valid_refs: set[str] | None = None,
+) -> dict[str, Any]:
+    before = deepcopy({"model": config.get("model"), "roles": config.get("roles")})
+    provider_id = normalize_provider_id(removed_provider) if removed_provider else ""
+    valid_normalized = {normalize_model_ref(item) for item in valid_refs} if valid_refs is not None else None
+    removed_count = 0
+    removed_roles: list[str] = []
+
+    model_config = config.get("model")
+    if isinstance(model_config, dict):
+        model_refs = []
+        primary = str(model_config.get("primary") or "").strip()
+        if primary:
+            model_refs.append(primary)
+        model_refs.extend(_as_string_list(model_config.get("fallback") or []))
+        cleaned_refs, removed = _clean_model_refs(
+            model_refs,
+            removed_provider=provider_id,
+            valid_refs=valid_normalized,
+        )
+        removed_count += removed
+        extra_model_config = {key: value for key, value in model_config.items() if key not in {"primary", "fallback"}}
+        if cleaned_refs:
+            config["model"] = {
+                **extra_model_config,
+                "primary": cleaned_refs[0],
+                "fallback": cleaned_refs[1:],
+            }
+        elif extra_model_config:
+            config["model"] = extra_model_config
+        else:
+            config.pop("model", None)
+
+    roles_config = config.get("roles")
+    if isinstance(roles_config, dict):
+        cleaned_roles: dict[str, list[str]] = {}
+        for raw_role, refs_value in roles_config.items():
+            try:
+                role_id = normalize_model_role(str(raw_role))
+            except ValueError:
+                role_id = str(raw_role or "").strip()
+            cleaned_refs, removed = _clean_model_refs(
+                refs_value,
+                removed_provider=provider_id,
+                valid_refs=valid_normalized,
+            )
+            removed_count += removed
+            if cleaned_refs and role_id:
+                merged = cleaned_roles.setdefault(role_id, [])
+                for ref in cleaned_refs:
+                    if ref not in merged:
+                        merged.append(ref)
+            elif role_id:
+                removed_roles.append(role_id)
+        if cleaned_roles:
+            config["roles"] = cleaned_roles
+        else:
+            config.pop("roles", None)
+
+    after = {"model": config.get("model"), "roles": config.get("roles")}
+    return {
+        "changed": before != after,
+        "removed_model_refs": removed_count,
+        "removed_roles": sorted(set(removed_roles)),
+    }
+
+
 def normalize_model_role(role: str) -> str:
     value = str(role or "").strip().lower().replace("-", "_")
-    aliases = {
-        "refiner": "query_refiner",
-        "query_refiner": "query_refiner",
-        "前置优化": "query_refiner",
-        "前置优化副脑": "query_refiner",
-        "planner": "orchestrator",
-        "main": "orchestrator",
-        "main_brain": "orchestrator",
-        "orchestrator": "orchestrator",
-        "主脑": "orchestrator",
-        "synthesizer": "final_synthesizer",
-        "final": "final_synthesizer",
-        "final_brain": "final_synthesizer",
-        "final_synthesizer": "final_synthesizer",
-        "汇总副脑": "final_synthesizer",
-    }
-    if value not in aliases:
-        raise ValueError("未知角色。可用角色：query_refiner、orchestrator、final_synthesizer。")
-    return aliases[value]
+    for canonical, info in MODEL_ROLES.items():
+        if value in info["aliases"] or value == canonical:
+            return canonical
+    labels = "、".join(info["label"] for info in MODEL_ROLES.values())
+    raise ValueError(f"未知角色。可用角色：{labels}。也可用英文别名：{', '.join(MODEL_ROLES)}。")
+
+
+def model_role_label(role: str) -> str:
+    canonical = normalize_model_role(role)
+    return MODEL_ROLES[canonical]["label"]
+
+
+def iter_model_roles():
+    for role_id in ROLE_ORDER:
+        yield role_id, MODEL_ROLES[role_id]
 
 
 def configured_provider_model_definitions(
@@ -377,6 +507,33 @@ def model_id_for_provider_model(provider_id: str, model_name: str) -> str:
     if model_alias == provider_alias or model_alias.startswith(f"{provider_alias}_"):
         return _normalize_model_id(model_alias)
     return _normalize_model_id(f"{provider_alias}_{model_alias}")
+
+
+def _clean_model_refs(
+    refs: list[str] | tuple[str, ...] | str | None,
+    *,
+    removed_provider: str = "",
+    valid_refs: set[str] | None = None,
+) -> tuple[list[str], int]:
+    cleaned: list[str] = []
+    removed = 0
+    for raw_ref in _as_string_list(refs or []):
+        if not str(raw_ref).strip():
+            continue
+        try:
+            ref = normalize_model_ref(raw_ref)
+        except ValueError:
+            removed += 1
+            continue
+        if removed_provider and "/" in ref and ref.split("/", 1)[0] == removed_provider:
+            removed += 1
+            continue
+        if valid_refs is not None and ref not in valid_refs:
+            removed += 1
+            continue
+        if ref not in cleaned:
+            cleaned.append(ref)
+    return cleaned, removed
 
 
 def lucode_config_signature(

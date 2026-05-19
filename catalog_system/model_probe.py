@@ -11,7 +11,7 @@ import requests
 from dotenv import dotenv_values
 
 
-CACHE_VERSION = 1
+CACHE_VERSION = 4
 CACHE_RELATIVE_PATH = Path(".agent_cache") / "model_capabilities.json"
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -50,7 +50,12 @@ def cached_probe_for_model(project_root: Path, model_info: dict) -> dict | None:
     return entry
 
 
-def refresh_model_probe_cache(project_root: Path, model_catalog: dict, force: bool = False) -> dict:
+def refresh_model_probe_cache(
+    project_root: Path,
+    model_catalog: dict,
+    force: bool = False,
+    local_only: bool | None = None,
+) -> dict:
     """Best-effort local model capability probing. Failures are cached, never raised."""
 
     if not _env_bool("MODEL_PROBE_ENABLED", True):
@@ -62,7 +67,7 @@ def refresh_model_probe_cache(project_root: Path, model_catalog: dict, force: bo
     service_timeout = _env_float("MODEL_SERVICE_PROBE_TIMEOUT_SECONDS", 1.0)
     ttl_seconds = _env_int("MODEL_PROBE_CACHE_TTL_SECONDS", 86400)
     failure_ttl_seconds = _env_int("MODEL_PROBE_FAILURE_TTL_SECONDS", 300)
-    local_only = _env_bool("MODEL_PROBE_LOCAL_ONLY", True)
+    local_only = _env_bool("MODEL_PROBE_LOCAL_ONLY", True) if local_only is None else bool(local_only)
 
     for model in model_catalog.get("models", []):
         if not model.get("configured"):
@@ -71,9 +76,24 @@ def refresh_model_probe_cache(project_root: Path, model_catalog: dict, force: bo
             continue
 
         probe_input = _probe_input_for_model(model)
+        fingerprint = model_fingerprint(model)
+        config_result = validate_probe_input(probe_input)
+        if config_result.get("status") != "config_ok":
+            result = {
+                **config_result,
+                "model_id": model["id"],
+                "model_name": model.get("model_name") or "",
+                "backend_type": model.get("backend_type") or "",
+                "fingerprint": fingerprint,
+                "probed_at": time.time(),
+                "planner_suitable": False,
+                "execution_suitable": False,
+            }
+            results[model["id"]] = result
+            continue
+
         service_result = probe_model_service(probe_input, timeout=service_timeout)
         service_block_status = _service_block_status(service_result)
-        fingerprint = model_fingerprint(model)
 
         if service_block_status:
             result = {
@@ -81,6 +101,11 @@ def refresh_model_probe_cache(project_root: Path, model_catalog: dict, force: bo
                 "supports_basic_chat": False,
                 "supports_json_output": False,
                 "supports_tools": False,
+                "tools_api_accepted": False,
+                "tools_auto_call": False,
+                "tools_forced_choice": False,
+                "tools_result_roundtrip": False,
+                "supports_streaming": False,
             }
             result.update(service_result)
             result.update(
@@ -120,6 +145,11 @@ def refresh_model_probe_cache(project_root: Path, model_catalog: dict, force: bo
                 "supports_basic_chat": None,
                 "supports_json_output": None,
                 "supports_tools": None,
+                "tools_api_accepted": None,
+                "tools_auto_call": None,
+                "tools_forced_choice": None,
+                "tools_result_roundtrip": None,
+                "supports_streaming": None,
             }
         result.update(service_result)
 
@@ -151,6 +181,43 @@ def probe_model_service(model_info: dict, timeout: float = 1.0) -> dict:
         "service_error": "",
         "model_present": None,
         "service_probed_at": time.time(),
+    }
+
+
+def validate_probe_input(model_info: dict) -> dict:
+    backend_type = str(model_info.get("backend_type") or "").strip()
+    is_local = backend_type in {"ollama", "llama_cpp", "local"}
+    missing = []
+    if not str(model_info.get("base_url") or "").strip() and backend_type != "llama_cpp":
+        missing.append("base_url")
+    if not str(model_info.get("model_name") or "").strip():
+        missing.append("model_name")
+    if not is_local and not str(model_info.get("api_key") or "").strip():
+        missing.append("api_key")
+    if missing:
+        return {
+            "status": "config_incomplete",
+            "missing": missing,
+            "config_complete": False,
+            "api_key_configured": bool(str(model_info.get("api_key") or "").strip()) or is_local,
+            "base_url_configured": bool(str(model_info.get("base_url") or "").strip()),
+            "model_name_configured": bool(str(model_info.get("model_name") or "").strip()),
+            "supports_basic_chat": False,
+            "supports_json_output": False,
+            "supports_tools": False,
+            "tools_api_accepted": False,
+            "tools_auto_call": False,
+            "tools_forced_choice": False,
+            "tools_result_roundtrip": False,
+            "supports_streaming": False,
+        }
+    return {
+        "status": "config_ok",
+        "missing": [],
+        "config_complete": True,
+        "api_key_configured": bool(str(model_info.get("api_key") or "").strip()) or is_local,
+        "base_url_configured": bool(str(model_info.get("base_url") or "").strip()) or backend_type == "llama_cpp",
+        "model_name_configured": True,
     }
 
 
@@ -200,11 +267,17 @@ def probe_ollama_service(model_info: dict, timeout: float = 1.0) -> dict:
 
 
 def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
+    profile = probe_profile_for_model(model_info)
+    chat_timeout = _probe_step_timeout("MODEL_PROBE_CHAT_TIMEOUT_SECONDS", max(timeout, 6.0), profile, "chat_timeout")
+    tool_timeout = _probe_step_timeout("MODEL_PROBE_TOOL_TIMEOUT_SECONDS", timeout, profile, "tool_timeout")
+    stream_timeout = _probe_step_timeout(
+        "MODEL_PROBE_STREAM_TIMEOUT_SECONDS", timeout, profile, "stream_timeout"
+    )
     endpoint = _chat_completions_endpoint(model_info)
     headers = _headers(model_info)
     model_name = model_info.get("model_name") or ""
 
-    basic = _post_json(
+    basic, basic_exception = _safe_post_json(
         endpoint,
         headers,
         {
@@ -212,57 +285,172 @@ def probe_model_capabilities(model_info: dict, timeout: float = 2.0) -> dict:
             "messages": [{"role": "user", "content": 'Return exactly this JSON: {"ok": true}'}],
             "stream": False,
         },
-        timeout,
+        chat_timeout,
     )
-    supports_basic_chat = 200 <= basic.status_code < 300
+    supports_basic_chat = basic is not None and 200 <= basic.status_code < 300
     supports_json_output = False
     basic_error = ""
     if supports_basic_chat:
         supports_json_output = _response_contains_json_ok(basic)
     else:
-        basic_error = _response_error_text(basic)
+        basic_error = str(basic_exception) if basic_exception else _response_error_text(basic)
+        return {
+            "status": "chat_failed",
+            "supports_basic_chat": False,
+            "supports_json_output": False,
+            "supports_tools": False,
+            "tools_api_accepted": False,
+            "tools_auto_call": False,
+            "tools_forced_choice": False,
+            "tools_result_roundtrip": False,
+            "supports_streaming": False,
+            "chat_error": basic_error,
+            "tool_error": "",
+            "tool_api_error": "",
+            "auto_tool_error": "",
+            "forced_tool_error": "",
+            "tool_roundtrip_error": "",
+            "stream_error": "",
+        }
 
-    tool_payload = {
+    tools = [_capability_probe_tool_schema()]
+    tool_accept_payload = {
         "model": model_name,
-        "messages": [{"role": "user", "content": "Call the capability_probe tool with value ping."}],
-        "tools": [
-            {
-                "type": "function",
-                "function": {
-                    "name": "capability_probe",
-                    "description": "Probe tool calling support.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"value": {"type": "string"}},
-                        "required": ["value"],
-                    },
-                },
-            }
-        ],
-        "tool_choice": {"type": "function", "function": {"name": "capability_probe"}},
+        "messages": [{"role": "user", "content": "Reply with exactly: tools accepted"}],
+        "tools": tools,
         "stream": False,
     }
-    tool_response = _post_json(endpoint, headers, tool_payload, timeout)
-    supports_tools = False
-    tool_error = ""
-    if 200 <= tool_response.status_code < 300:
-        supports_tools = _response_has_tool_call(tool_response)
-        if not supports_tools:
-            tool_error = "tool probe returned without tool_calls"
-    else:
-        tool_error = _response_error_text(tool_response)
+    tool_accept_response, tool_accept_exception = _safe_post_json(
+        endpoint, headers, tool_accept_payload, tool_timeout
+    )
+    tools_api_accepted = tool_accept_response is not None and 200 <= tool_accept_response.status_code < 300
+    tool_api_error = ""
+    if not tools_api_accepted:
+        tool_api_error = str(tool_accept_exception) if tool_accept_exception else _response_error_text(tool_accept_response)
+        if tool_accept_exception is not None:
+            tools_api_accepted = None
 
-    status = "ok" if supports_basic_chat else "chat_failed"
-    if not supports_tools and _looks_like_tools_unsupported(tool_error):
+    auto_response = None
+    auto_exception = None
+    if tools_api_accepted and "auto" in profile["tool_choice_modes"]:
+        auto_response, auto_exception = _safe_post_json(
+            endpoint,
+            headers,
+            _tool_probe_payload(model_name, tools, "auto", profile),
+            tool_timeout,
+        )
+    tools_auto_call = False
+    auto_tool_error = tool_api_error
+    auto_tool_call = None
+    if auto_response is not None:
+        if 200 <= auto_response.status_code < 300:
+            auto_tool_call = _first_tool_call(auto_response)
+            tools_auto_call = auto_tool_call is not None
+            auto_tool_error = "" if tools_auto_call else "auto tool probe returned without tool_calls"
+        else:
+            auto_tool_error = _response_error_text(auto_response)
+    elif auto_exception is not None:
+        auto_tool_error = str(auto_exception)
+
+    forced_response = None
+    forced_exception = None
+    if tools_api_accepted and "forced" in profile["tool_choice_modes"]:
+        forced_response, forced_exception = _safe_post_json(
+            endpoint,
+            headers,
+            _tool_probe_payload(model_name, tools, "forced", profile),
+            tool_timeout,
+        )
+    tools_forced_choice = False
+    forced_tool_error = tool_api_error
+    if forced_response is not None:
+        if 200 <= forced_response.status_code < 300:
+            tools_forced_choice = _response_has_tool_call(forced_response)
+            forced_tool_error = "" if tools_forced_choice else "forced tool probe returned without tool_calls"
+        else:
+            forced_tool_error = _response_error_text(forced_response)
+    elif forced_exception is not None:
+        forced_tool_error = str(forced_exception)
+
+    tools_result_roundtrip = False
+    tool_roundtrip_error = ""
+    if auto_tool_call:
+        roundtrip_response, roundtrip_exception = _safe_post_json(
+            endpoint,
+            headers,
+            _tool_roundtrip_payload(model_name, auto_tool_call),
+            tool_timeout,
+        )
+        if roundtrip_response is not None and 200 <= roundtrip_response.status_code < 300:
+            tools_result_roundtrip = True
+        else:
+            tool_roundtrip_error = str(roundtrip_exception) if roundtrip_exception else _response_error_text(roundtrip_response)
+
+    tool_probe_completed = tool_accept_response is not None or bool(tool_api_error and tool_accept_exception is None)
+    supports_tools = True if bool(tools_auto_call or tools_forced_choice or tools_result_roundtrip) else None
+    if supports_tools is None and not tool_probe_completed:
+        supports_tools = None
+    elif supports_tools is None and not tools_api_accepted and _looks_like_tools_unsupported(tool_api_error):
+        supports_tools = False
+    tool_error = ""
+    if not tools_api_accepted:
+        tool_error = tool_api_error
+    elif supports_tools is True:
+        tool_error = forced_tool_error if not tools_forced_choice else ""
+    else:
+        tool_error = auto_tool_error or forced_tool_error
+
+    stream_payload = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": "Reply with exactly: pong"}],
+        "stream": True,
+    }
+    stream_response, stream_exception = _safe_post_json(endpoint, headers, stream_payload, stream_timeout)
+    supports_streaming = False
+    stream_error = ""
+    if stream_response is not None and 200 <= stream_response.status_code < 300:
+        supports_streaming = _response_has_stream_content(stream_response)
+        if not supports_streaming:
+            stream_error = "stream probe returned without visible chunks"
+    else:
+        supports_streaming = None if stream_exception is not None else False
+        stream_error = str(stream_exception) if stream_exception else _response_error_text(stream_response)
+
+    status = "ok"
+    if supports_tools is False and _looks_like_tools_unsupported(tool_error):
         status = "tools_unsupported"
+    elif supports_tools is None and tools_api_accepted is True:
+        status = "partial"
+    elif any(
+        [
+            tool_accept_exception,
+            auto_exception,
+            forced_exception,
+            stream_exception,
+            tool_roundtrip_error,
+        ]
+    ):
+        status = "partial"
 
     return {
         "status": status,
         "supports_basic_chat": supports_basic_chat,
         "supports_json_output": supports_json_output,
         "supports_tools": supports_tools,
+        "tools_api_accepted": tools_api_accepted,
+        "tools_auto_call": tools_auto_call,
+        "tools_forced_choice": tools_forced_choice,
+        "tools_result_roundtrip": tools_result_roundtrip,
+        "supports_streaming": supports_streaming,
         "chat_error": basic_error,
         "tool_error": tool_error,
+        "tool_api_error": tool_api_error,
+        "auto_tool_error": auto_tool_error,
+        "forced_tool_error": forced_tool_error,
+        "tool_roundtrip_error": tool_roundtrip_error,
+        "stream_error": stream_error,
+        "probe_profile": profile["provider_id"],
+        "probe_tool_choice_modes": profile["tool_choice_modes"],
     }
 
 
@@ -326,6 +514,8 @@ def _probe_input_for_model(model_info: dict) -> dict[str, Any]:
     elif model_id.endswith("_model"):
         prefix = model_id.removesuffix("_model").upper()
         api_key = env.get(f"MODEL_{prefix}_API_KEY") or ""
+    if not api_key:
+        api_key = _lucode_api_key_for_model_id(model_id)
 
     return {
         "id": model_id,
@@ -333,7 +523,117 @@ def _probe_input_for_model(model_info: dict) -> dict[str, Any]:
         "backend_type": model_info.get("backend_type") or "",
         "base_url": model_info.get("base_url") or "",
         "api_key": api_key,
+        "provider": model_info.get("provider") or model_info.get("provider_id") or "",
+        "provider_ref": model_info.get("provider_ref") or model_info.get("shared_config_group") or "",
     }
+
+
+def probe_profile_for_model(model_info: dict) -> dict[str, Any]:
+    """Return a provider-aware probe strategy.
+
+    Provider APIs are OpenAI-compatible in shape, but tool_choice support is not
+    identical. The profile keeps probing conservative: auto tool calls are the
+    main signal for broad compatibility, while forced tool_choice is only used
+    where the provider contract is stable enough.
+    """
+
+    base_url = str(model_info.get("base_url") or "").lower()
+    model_name = str(model_info.get("model_name") or "").lower()
+    provider = " ".join(
+        [
+            str(model_info.get("provider") or ""),
+            str(model_info.get("provider_ref") or ""),
+            str(model_info.get("backend_type") or ""),
+            base_url,
+            model_name,
+        ]
+    ).lower()
+
+    profile = {
+        "provider_id": "openai_compatible",
+        "tool_choice_modes": ["auto", "forced"],
+        "chat_timeout": 6.0,
+        "tool_timeout": 2.0,
+        "stream_timeout": 2.0,
+        "roundtrip_enabled": True,
+    }
+
+    if "api.openai.com" in provider or "openai/" in model_name or model_name.startswith("gpt-"):
+        profile["provider_id"] = "openai"
+        return profile
+    if "openrouter" in provider:
+        profile["provider_id"] = "openrouter"
+        profile["chat_timeout"] = 8.0
+        return profile
+    if "deepseek" in provider:
+        profile["provider_id"] = "deepseek"
+        profile["tool_choice_modes"] = ["auto"]
+        profile["chat_timeout"] = 8.0
+        profile["tool_timeout"] = 3.0
+        return profile
+    if "dashscope" in provider or "aliyuncs.com" in provider or "qwen" in model_name:
+        profile["provider_id"] = "dashscope"
+        profile["tool_choice_modes"] = ["auto"]
+        profile["chat_timeout"] = 8.0
+        return profile
+    if "siliconflow" in provider:
+        profile["provider_id"] = "siliconflow"
+        profile["tool_choice_modes"] = ["auto"]
+        profile["chat_timeout"] = 8.0
+        return profile
+    if "xiaomimimo" in provider or "mimo" in provider:
+        profile["provider_id"] = "mimo"
+        profile["tool_choice_modes"] = ["auto"]
+        profile["chat_timeout"] = 8.0
+        profile["tool_timeout"] = 3.0
+        return profile
+    if str(model_info.get("backend_type") or "") in {"ollama", "llama_cpp", "local"}:
+        profile["provider_id"] = "local_openai_compatible"
+        profile["tool_choice_modes"] = ["auto"]
+        profile["chat_timeout"] = 4.0
+        profile["tool_timeout"] = 2.0
+        return profile
+    return profile
+
+
+def _probe_step_timeout(env_name: str, fallback: float, profile: dict, profile_key: str) -> float:
+    return _env_float(env_name, float(profile.get(profile_key) or fallback))
+
+
+def _tool_probe_payload(model_name: str, tools: list[dict], mode: str, profile: dict) -> dict[str, Any]:
+    payload = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Please call the capability_probe function with value ping. Do not answer directly.",
+            }
+        ],
+        "tools": tools,
+        "stream": False,
+    }
+    if mode == "auto":
+        payload["tool_choice"] = "auto"
+    elif mode == "forced":
+        payload["tool_choice"] = {"type": "function", "function": {"name": "capability_probe"}}
+        payload["messages"] = [{"role": "user", "content": "Call the capability_probe tool with value ping."}]
+    elif mode == "required":
+        payload["tool_choice"] = "required"
+    if profile.get("provider_id") == "dashscope":
+        payload["enable_thinking"] = False
+    return payload
+
+
+def _lucode_api_key_for_model_id(model_id: str) -> str:
+    try:
+        from runtime.config.model_config import configured_provider_model_definitions
+
+        for item in configured_provider_model_definitions():
+            if item.get("id") == model_id:
+                return str(item.get("api_key_value") or "")
+    except Exception:
+        return ""
+    return ""
 
 
 def _post_json(endpoint: str, headers: dict[str, str], payload: dict[str, Any], timeout: float):
@@ -343,6 +643,13 @@ def _post_json(endpoint: str, headers: dict[str, str], payload: dict[str, Any], 
         return session.post(endpoint, headers=headers, json=payload, timeout=timeout)
     finally:
         session.close()
+
+
+def _safe_post_json(endpoint: str, headers: dict[str, str], payload: dict[str, Any], timeout: float):
+    try:
+        return _post_json(endpoint, headers, payload, timeout), None
+    except Exception as exc:
+        return None, exc
 
 
 def _response_contains_json_ok(response) -> bool:
@@ -365,15 +672,86 @@ def _response_contains_json_ok(response) -> bool:
 
 
 def _response_has_tool_call(response) -> bool:
+    return _first_tool_call(response) is not None
+
+
+def _first_tool_call(response) -> dict | None:
     try:
         payload = response.json()
     except ValueError:
-        return False
+        return None
     choices = payload.get("choices") or []
     if not choices:
-        return False
+        return None
     message = choices[0].get("message") or {}
-    return bool(message.get("tool_calls"))
+    tool_calls = message.get("tool_calls") or []
+    if not tool_calls:
+        return None
+    first = tool_calls[0]
+    return first if isinstance(first, dict) else None
+
+
+def _capability_probe_tool_schema() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "capability_probe",
+            "description": "Probe tool calling support.",
+            "parameters": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+            },
+        },
+    }
+
+
+def _tool_roundtrip_payload(model_name: str, tool_call: dict) -> dict:
+    call_id = str(tool_call.get("id") or "call_capability_probe")
+    function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+    name = str(function.get("name") or "capability_probe")
+    arguments = str(function.get("arguments") or '{"value":"ping"}')
+    return {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Please call the capability_probe function with value ping. Do not answer directly.",
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": name, "arguments": arguments},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": '{"ok": true, "value": "ping"}',
+            },
+        ],
+        "tools": [_capability_probe_tool_schema()],
+        "stream": False,
+    }
+
+
+def _response_has_stream_content(response) -> bool:
+    iter_lines = getattr(response, "iter_lines", None)
+    if callable(iter_lines):
+        try:
+            for raw_line in iter_lines(decode_unicode=True):
+                line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else str(raw_line or "")
+                if line.strip() and line.strip() != "data: [DONE]":
+                    return True
+        except TypeError:
+            pass
+    text = str(getattr(response, "text", "") or "")
+    return bool(text.strip())
 
 
 def _message_content(payload: dict) -> str:
@@ -427,6 +805,7 @@ def _failure_status(status: str | None) -> bool:
         "service_unavailable",
         "model_missing",
         "capability_probe_failed",
+        "config_incomplete",
     }
 
 

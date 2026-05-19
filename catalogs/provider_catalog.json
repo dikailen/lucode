@@ -5,12 +5,39 @@
     "base_url": "https://api.deepseek.com",
     "compatible_type": "openai_compatible",
     "models": [
+      "deepseek-v4-flash",
+      "deepseek-v4-pro",
       "deepseek-chat",
       "deepseek-reasoner"
     ],
     "supports_tools": true,
     "reasoning_level": "high",
     "cost_level": "medium"
+  },
+  "openai": {
+    "display_name": "OpenAI",
+    "homepage": "https://platform.openai.com",
+    "base_url": "https://api.openai.com/v1",
+    "compatible_type": "openai",
+    "models": [
+      "gpt-5.2",
+      "gpt-5-mini",
+      "gpt-5-nano"
+    ],
+    "supports_tools": true,
+    "reasoning_level": "high",
+    "cost_level": "high",
+    "strengths": [
+      "复杂规划",
+      "代码任务",
+      "工具调用",
+      "多模态理解"
+    ],
+    "best_for_skills": [
+      "orchestrator_planner",
+      "final_synthesizer",
+      "project_explorer"
+    ]
   },
   "mimo": {
     "display_name": "MiMo",

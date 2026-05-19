@@ -508,10 +508,22 @@ class ModelRegistry:
     """Create model objects by id using the current .env configuration."""
 
     def __init__(self):
-        self.definitions = {item["id"]: item for item in discover_model_definitions()}
+        self.definitions = self._load_definitions()
         self.provider_registry = ProviderRegistry()
 
+    def refresh(self) -> None:
+        self.definitions = self._load_definitions()
+
+    def _load_definitions(self) -> dict[str, dict]:
+        return {item["id"]: item for item in discover_model_definitions()}
+
+    def _ensure_definition(self, model_id: str) -> None:
+        if model_id in self.definitions:
+            return
+        self.refresh()
+
     def get_model(self, model_id: str):
+        self._ensure_definition(model_id)
         if model_id not in self.definitions:
             raise KeyError(f"Unknown model id: {model_id}")
 
@@ -544,6 +556,12 @@ class ModelRegistry:
         for item in catalog.get("models", []):
             if item.get("id") == model_id:
                 return item
+        clear_model_catalog_cache()
+        catalog = load_model_catalog(force_reload=True)
+        for item in catalog.get("models", []):
+            if item.get("id") == model_id:
+                self._ensure_definition(model_id)
+                return item
         raise KeyError(f"Unknown model id: {model_id}")
 
     def first_configured(self, preferred: list[str]) -> str:
@@ -566,7 +584,14 @@ class ModelRegistry:
 def _model_runtime_available(model_info: dict) -> bool:
     probe = model_info.get("probe") or {}
     status = str(probe.get("status") or "").strip()
-    if status in {"chat_failed", "probe_failed", "service_unavailable", "model_missing", "capability_probe_failed"}:
+    if status in {
+        "chat_failed",
+        "probe_failed",
+        "service_unavailable",
+        "model_missing",
+        "capability_probe_failed",
+        "config_incomplete",
+    }:
         return False
     return True
 

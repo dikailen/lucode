@@ -60,6 +60,7 @@ def audit_execution(
 ) -> AuditResult:
     remaining_issues: list[str] = []
     warnings: list[str] = []
+    soft_semantic_warnings: dict[str, list[str]] = {}
     modifications: list[str] = []
     verifications: list[str] = []
     models_used = sorted({task.model for task in plan.tasks if task.model})
@@ -107,7 +108,11 @@ def audit_execution(
                     if _should_enforce_semantic_acceptance(task):
                         remaining_issues.append(message)
                     else:
-                        warnings.append(message)
+                        _record_soft_semantic_warning(
+                            soft_semantic_warnings,
+                            task.id,
+                            f"验收：{criterion}",
+                        )
 
         if task.expected_outputs and record.status == "completed":
             for expected in task.expected_outputs:
@@ -125,12 +130,18 @@ def audit_execution(
                     if _should_enforce_semantic_acceptance(task):
                         remaining_issues.append(message)
                     else:
-                        warnings.append(message)
+                        _record_soft_semantic_warning(
+                            soft_semantic_warnings,
+                            task.id,
+                            f"预期输出：{expected_text}",
+                        )
 
         if "workspace_edit" in task.mcp and record.status == "completed" and not record.verification:
             remaining_issues.append(
                 f"任务 {task.id} 修改了文件，但没有 verification 结果，无法确认验收标准是否满足。"
             )
+
+    warnings.extend(_compact_soft_semantic_warnings(soft_semantic_warnings))
 
     if not final_output.strip():
         remaining_issues.append("最终回答为空。")
@@ -168,7 +179,7 @@ def format_final_report(final_output: str, audit: AuditResult) -> str:
 
     if audit.warnings:
         lines.append("")
-        lines.append("审核提醒：")
+        lines.append("审核提醒（不影响通过）：" if audit.passed else "审核提醒：")
         lines.extend(f"- {item}" for item in audit.warnings)
 
     if audit.remaining_issues:
@@ -191,6 +202,43 @@ def _should_enforce_semantic_acceptance(task) -> bool:
     if getattr(task, "write_intent", None):
         return True
     return False
+
+
+def _record_soft_semantic_warning(warnings_by_task: dict[str, list[str]], task_id: str, detail: str) -> None:
+    value = str(detail or "").strip()
+    if not value:
+        return
+    warnings_by_task.setdefault(str(task_id), []).append(value)
+
+
+def _compact_soft_semantic_warnings(warnings_by_task: dict[str, list[str]]) -> list[str]:
+    warnings: list[str] = []
+    for task_id, items in warnings_by_task.items():
+        unique_items = _dedupe_preserving_order(items)
+        if not unique_items:
+            continue
+        if len(unique_items) == 1:
+            warnings.append(f"任务 {task_id} 的语义验收未完全确认：{unique_items[0]}")
+            continue
+        preview = "；".join(unique_items[:2])
+        extra = len(unique_items) - 2
+        suffix = f"；另有 {extra} 条已折叠" if extra > 0 else ""
+        warnings.append(
+            f"任务 {task_id} 的语义验收未完全确认：共 {len(unique_items)} 条只读语义提醒，{preview}{suffix}。"
+        )
+    return warnings
+
+
+def _dedupe_preserving_order(items: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        key = _normalize_text(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
 
 
 def audit_plan_review_failure(review: PlanReview) -> AuditResult:

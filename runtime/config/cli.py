@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
+import unicodedata
 from pathlib import Path
 
 from catalog_system.model_catalog import load_model_catalog
+from runtime.config.connect_command import (
+    apply_provider_connect_request,
+    parse_slash_connect_command,
+    redact_connect_secret,
+    render_provider_connect_success,
+)
 from runtime.config.execution_mode import execution_mode_label_zh
 from runtime.config.model_config import (
     auth_path,
@@ -14,11 +22,18 @@ from runtime.config.model_config import (
     load_provider_catalog,
     model_ids_from_refs,
     model_refs_from_config,
+    model_role_label,
+    iter_model_roles,
+    normalize_provider_id,
+    normalize_model_role,
     project_config_path,
     provider_has_api_key,
+    remove_provider_config,
+    reset_role_model_priorities,
     select_role_model_priority,
     select_model_priority,
 )
+from runtime.config.model_tuner import build_model_tuner_state, render_model_tuner_snapshot
 from runtime.config.extensions import (
     render_all_mcp,
     render_all_skills,
@@ -32,6 +47,12 @@ from runtime.config.settings import RuntimeSettings
 from runtime.commands.registry import known_command_prefixes
 from runtime.tools.registry import render_tool_registry
 from runtime.ui.command_palette import render_command_palette
+
+LUCODE_BLUE = "\033[94m"
+LUCODE_CYAN = "\033[96m"
+LUCODE_DIM = "\033[90m"
+ANSI_RESET = "\033[0m"
+PANEL_WIDTH = 96
 
 
 def render_readonly_command(command: str, settings: RuntimeSettings, workspace_context=None) -> str:
@@ -56,14 +77,18 @@ def render_readonly_command(command: str, settings: RuntimeSettings, workspace_c
         return _render_mode(settings)
     if lower == "/model":
         return _render_model(settings)
-    if lower == "/model available":
+    if lower in {"/model available", "/models available"}:
         return _render_model_available(settings)
     if lower in {"/connect", "/connect list"}:
         return _render_connect(workspace_context)
-    if lower in {"/models", "/model select"}:
-        return _render_models(settings, workspace_context)
+    if lower in {"/models", "/model", "/model select"}:
+        return _render_model_brains(settings, workspace_context)
+    if lower in {"/models brain", "/model brain"}:
+        return _render_model_brains(settings, workspace_context)
     if lower in {"/models roles", "/model roles"}:
         return _render_model_roles(settings, workspace_context)
+    if lower in {"/models list", "/model list"}:
+        return _render_models(settings, workspace_context)
     if lower == "/skills":
         return render_workspace_skills(workspace_context)
     if lower == "/skills_all":
@@ -80,6 +105,30 @@ def render_readonly_command(command: str, settings: RuntimeSettings, workspace_c
         return render_permission_policy(_workspace_root(workspace_context))
     if lower in {"/audit", "/hooks"}:
         return render_tool_event_audit(_workspace_root(workspace_context))
+    remove_match = re.match(r"^/connect\s+(?:remove|delete|rm|logout)\s+([^\s]+)$", normalized, flags=re.IGNORECASE)
+    if remove_match:
+        provider_id = remove_match.group(1).strip()
+        return "\n".join(
+            [
+                f"删除 Provider：{provider_id}",
+                f"执行命令：/connect remove {provider_id}",
+                "会删除项目级 Provider 配置和用户级 API key，并清理 /models 与四脑脑位里的失效模型引用。",
+            ]
+        )
+    if lower.startswith("/connect ") and "--" in lower:
+        request = None
+        try:
+            request = parse_slash_connect_command(normalized)
+        except Exception:
+            pass
+        return "\n".join(
+            [
+                "连接命令包含写入参数。",
+                "请直接执行这条 /connect 命令完成写入；只读预览不会显示 API key。",
+                "API key 会保存到用户级 auth.json，不会写入项目配置。",
+                redact_connect_secret("命令：/connect <provider> --api-key <key>", request),
+            ]
+        )
     if lower.startswith("/connect "):
         return _render_connect_provider_hint(normalized, workspace_context)
     if lower.startswith("/models ") and not lower.startswith("/models select "):
@@ -97,6 +146,19 @@ def render_readonly_command(command: str, settings: RuntimeSettings, workspace_c
 
 def parse_writable_config_command(command: str) -> tuple[str, str] | None:
     normalized = (command or "").strip()
+    probe_match = re.match(r"^/(?:models|model)\s+probe(?:\s+(.*))?$", normalized, flags=re.IGNORECASE)
+    if probe_match:
+        return ("models_probe", (probe_match.group(1) or "").strip())
+    remove_match = re.match(r"^/connect\s+(?:remove|delete|rm|logout)\s+([^\s]+)$", normalized, flags=re.IGNORECASE)
+    if remove_match:
+        return ("connect_remove", remove_match.group(1).strip())
+    if normalized.lower().startswith("/connect ") and "--" in normalized:
+        return ("connect", normalized)
+    if re.match(r"^/(?:models|model)\s+brain\s+reset$", normalized, flags=re.IGNORECASE):
+        return ("models_brain_reset", "")
+    brain_match = re.match(r"^/(?:models|model)\s+brain\s+([^\s]+)\s+(.+)$", normalized, flags=re.IGNORECASE)
+    if brain_match:
+        return ("models_brain", f"{brain_match.group(1).strip()} {brain_match.group(2).strip()}")
     role_match = re.match(r"^/(?:models|model)\s+role\s+([^\s]+)\s+(.+)$", normalized, flags=re.IGNORECASE)
     if role_match:
         return ("models_role", f"{role_match.group(1).strip()} {role_match.group(2).strip()}")
@@ -130,6 +192,97 @@ def apply_writable_config_command(
         )
 
     kind, value = parsed
+    if kind == "models_probe":
+        return (_run_models_probe(value, workspace_context), True)
+
+    if kind == "connect":
+        request = None
+        try:
+            request = parse_slash_connect_command(value)
+            if request is None:
+                raise ValueError("请使用 /connect <provider> --api-key <key>，或输入 /connect <provider> 查看连接方式。")
+            result = apply_provider_connect_request(
+                request,
+                workspace_root=_workspace_root(workspace_context),
+                user_home=_user_home(workspace_context),
+            )
+            try:
+                from catalog_system.model_catalog import clear_model_catalog_cache
+                from runtime.commands.completion import clear_completion_caches
+
+                clear_model_catalog_cache()
+                clear_completion_caches()
+            except Exception:
+                pass
+        except Exception as exc:
+            return (f"连接失败：{redact_connect_secret(str(exc), request)}", False)
+        return (render_provider_connect_success(result, api_key_provided=bool(request.api_key)), True)
+
+    if kind == "connect_remove":
+        try:
+            result = remove_provider_config(
+                value,
+                workspace_root=_workspace_root(workspace_context),
+                user_home=_user_home(workspace_context),
+            )
+            try:
+                from catalog_system.model_catalog import clear_model_catalog_cache
+                from runtime.commands.completion import clear_completion_caches
+
+                clear_model_catalog_cache()
+                clear_completion_caches()
+            except Exception:
+                pass
+            _reload_model_priorities(settings, workspace_context)
+        except Exception as exc:
+            return (f"删除 Provider 失败：{exc}", False)
+        if not result["provider_removed"] and not result["auth_removed"]:
+            return (f"没有找到 Provider：{result['provider_id']}，未改动配置。", False)
+        role_text = "、".join(result.get("removed_roles") or []) or "无"
+        return (
+            f"已删除 Provider：{result['provider_id']}\n"
+            f"项目配置：{'已删除' if result['provider_removed'] else '未找到'}\n"
+            f"API key：{'已删除' if result['auth_removed'] else '未找到'}\n"
+            f"已清理失效模型引用：{result.get('removed_model_refs', 0)} 个\n"
+            f"已移除空脑位覆盖：{role_text}\n"
+            "当前会话已重新加载模型优先级；失效脑位会回到默认可用模型顺序。",
+            True,
+        )
+
+    if kind == "models_brain_reset":
+        try:
+            reset_role_model_priorities(workspace_root=_workspace_root(workspace_context))
+            _reload_model_priorities(settings, workspace_context)
+        except Exception as exc:
+            return (f"多脑模型重置失败：{exc}", False)
+        return (
+            "已重置多脑模型覆盖配置。\n"
+            "已删除项目配置中的 [roles]，当前会话已回到默认模型优先级。",
+            True,
+        )
+
+    if kind == "models_brain":
+        try:
+            role, refs = _parse_model_role_value(value)
+            normalized_role = normalize_model_role(role)
+            select_role_model_priority(
+                workspace_root=_workspace_root(workspace_context),
+                role=role,
+                refs=refs,
+            )
+            model_ids = model_ids_from_refs(refs)
+            _apply_role_priority_to_settings(settings, normalized_role, model_ids)
+        except Exception as exc:
+            return (f"脑位模型切换失败：{exc}", False)
+        label = model_role_label(normalized_role)
+        refs_text = ", ".join(refs)
+        return (
+            f"已切换{label}：{refs_text}\n"
+            "配置已写入：.lucode/config.toml\n"
+            "当前会话已立即生效。",
+            True,
+        )
+
     if kind == "models_role":
         try:
             role, refs = _parse_model_role_value(value)
@@ -161,6 +314,7 @@ def apply_writable_config_command(
             model_ids = model_ids_from_refs([primary_ref, *fallback_refs])
             settings.query_refiner_model_priority = list(model_ids)
             settings.orchestrator_model_priority = list(model_ids)
+            settings.executor_model_priority = list(model_ids)
             settings.final_synthesizer_model_priority = list(model_ids)
         except Exception as exc:
             return (f"模型选择失败：{exc}", False)
@@ -194,6 +348,53 @@ def apply_writable_config_command(
     )
 
 
+def _run_models_probe(value: str, workspace_context=None) -> str:
+    force = str(value or "").strip().lower() in {"force", "--force", "-f", "all", "全部", "刷新"}
+    try:
+        from catalog_system.model_catalog import clear_model_catalog_cache
+        from catalog_system.model_probe import refresh_model_probe_cache
+
+        workspace_root = _workspace_root(workspace_context)
+        catalog = load_model_catalog(force_reload=True)
+        cache = refresh_model_probe_cache(workspace_root, catalog, force=force, local_only=False)
+        clear_model_catalog_cache()
+        refreshed = load_model_catalog(force_reload=True)
+    except Exception as exc:
+        return _render_lucode_panel(
+            "模型能力探测",
+            [
+                "探测失败，但程序没有退出。",
+                f"错误：{exc}",
+                "建议：检查网络、API key、base_url 和模型名；也可以稍后重试 /models probe force。",
+            ],
+        )
+
+    results = cache.get("results") or {}
+    configured_models = [item for item in refreshed.get("models", []) if item.get("configured")]
+    lines = [
+        "已完成模型能力探测 v2.2。",
+        f"范围：已配置模型 {len(configured_models)} 个；云端和本地都会探测；结果已写入 .agent_cache/model_capabilities.json。",
+        "检测项：key / base_url / model name / chat / JSON / tools(auto/强制/回填) / stream。",
+        "",
+    ]
+    for model in configured_models:
+        probe = results.get(model.get("id") or "") or model.get("probe") or {}
+        lines.append(
+            f"- {_format_model_title(model)} | {_format_probe_status({'probe': probe})} | "
+            f"chat {_format_bool_zh(probe.get('supports_basic_chat'))} | "
+            f"JSON {_format_bool_zh(probe.get('supports_json_output'))} | "
+            f"tools {_format_tools_probe_summary(probe)} | "
+            f"stream {_format_bool_zh(probe.get('supports_streaming'))}"
+        )
+        missing = probe.get("missing") or []
+        if missing:
+            lines.append(f"  缺少：{', '.join(str(item) for item in missing)}")
+        error = probe.get("chat_error") or probe.get("tool_error") or probe.get("stream_error") or probe.get("error")
+        if error:
+            lines.append(f"  提示：{str(error)[:120]}")
+    return _render_lucode_panel("模型能力探测", lines)
+
+
 def render_status_command(
     project_root: Path,
     settings: RuntimeSettings,
@@ -207,7 +408,6 @@ def render_status_command(
     refiner = "开启" if settings.query_refiner_enabled else "关闭"
     mcp_text = ", ".join(started_mcp_ids or []) or "本轮尚未启动 MCP"
     lines = [
-        "运行状态",
         f"当前模式：{execution_mode_label_zh(settings.execution_mode)}",
         f"隐私模式：{_format_privacy_mode(settings.privacy_mode)}",
         f"前置优化副脑：{refiner}",
@@ -217,7 +417,7 @@ def render_status_command(
     ]
     if rollback_status:
         lines.append(rollback_status)
-    return "\n".join(lines)
+    return _render_lucode_panel("运行状态", lines)
 
 
 def render_diff_command(project_root: Path, max_chars: int = 4000) -> str:
@@ -256,8 +456,10 @@ def _render_config(settings: RuntimeSettings) -> str:
     local_models, cloud_models = _split_models(catalog["models"])
 
     lines = [
-        "当前配置总览",
         f"当前隐私模式：{_format_privacy_mode(settings.privacy_mode)}",
+        "操作入口：/models 进入调音台；/models list 查看来源；/connect 管理连接和删除。",
+        "",
+        "模型能力表",
         "",
         "本地模型",
     ]
@@ -266,21 +468,20 @@ def _render_config(settings: RuntimeSettings) -> str:
     lines.append("云端模型")
     lines.extend(_render_model_block(cloud_models))
     lines.append("")
-    lines.append("说明：这是只读查看命令。切换执行模式请用 /mode solo|serial|full，切换前置优化请用 /refiner on|off。")
-    return "\n".join(lines)
+    lines.append("提示：未探测表示还没有做真实能力测试；保守判断不会阻止你手动选择。")
+    return _render_lucode_panel("Lucode 配置概览", lines)
 
 
 def _render_api_show(settings: RuntimeSettings) -> str:
     catalog = load_model_catalog()
     lines = [
-        "API 配置",
         f"当前隐私模式：{_format_privacy_mode(settings.privacy_mode)}",
     ]
     for item in sorted(catalog["models"], key=lambda model: (not model.get("is_local"), model["id"])):
         lines.extend(_render_api_model_card(item))
     lines.append("")
     lines.append("说明：只显示地址和状态，不显示任何 API key。")
-    return "\n".join(lines)
+    return _render_lucode_panel("API 配置", lines)
 
 
 def _render_connect(workspace_context=None) -> str:
@@ -294,14 +495,14 @@ def _render_connect(workspace_context=None) -> str:
     connected_ids = sorted(set(configured_providers) | set(auth_providers))
 
     lines = [
-        "Provider 连接",
         f"用户凭据：{auth_path(user_home)}",
         f"项目配置：{project_config_path(workspace_root)}",
+        "说明：API key 只保存到用户级 auth.json；项目里只保存 Provider 和模型名。",
         "",
         "已连接 Provider",
     ]
     if not connected_ids:
-        lines.append("- 无")
+        lines.append("  无")
     for provider_id in connected_ids:
         provider_config = dict(provider_catalog.get(provider_id) or {})
         provider_config.update(configured_providers.get(provider_id) or {})
@@ -311,47 +512,57 @@ def _render_connect(workspace_context=None) -> str:
         key_state = "本地无需 key" if provider_config.get("local") else (
             "已保存 key" if provider_has_api_key(provider_id, user_home=user_home) else "未保存 key"
         )
-        lines.append(f"- {display_name}（{provider_id}） | {key_state}")
-        lines.append(f"  官网：{homepage}")
-        lines.append(f"  请求地址：{base_url}")
+        lines.append(f"  {display_name}（{provider_id}）  {key_state}")
+        lines.append(f"    官网：{homepage}")
+        lines.append(f"    请求地址：{base_url}")
 
     lines.extend(["", "可连接厂商"])
     for provider_id, item in sorted(provider_catalog.items()):
         display_name = item.get("display_name") or provider_id
         homepage = item.get("homepage") or "需自定义"
         base_url = item.get("base_url") or "需自定义"
-        lines.append(f"- {display_name}（{provider_id}）")
-        lines.append(f"  官网：{homepage}")
-        lines.append(f"  请求地址：{base_url}")
+        lines.append(f"  {display_name}（{provider_id}）")
+        lines.append(f"    官网：{homepage}")
+        lines.append(f"    请求地址：{base_url}")
 
     lines.extend(
         [
             "",
-            "命令：lucode connect <provider> --api-key <key>",
+            "交互入口：聊天里输入 /connect，可用上下键/鼠标选择连接或删除模型/Provider。",
+            "命令入口：lucode connect <provider> --api-key <key>",
             "自定义中转：lucode connect my_proxy --custom --homepage <官网> --base-url <请求地址> --api-key <key> --model <模型名>",
-            "说明：homepage 只用于展示和控制台入口，模型请求只走 base_url；API key 不写入项目配置。",
         ]
     )
-    return "\n".join(lines)
+    return _render_lucode_panel("Lucode Provider 连接", lines)
 
 
 def _render_connect_provider_hint(command: str, workspace_context=None) -> str:
     parts = command.split(maxsplit=1)
-    provider_id = parts[1].strip() if len(parts) > 1 else ""
+    raw_provider_id = parts[1].strip() if len(parts) > 1 else ""
+    try:
+        provider_id = normalize_provider_id(raw_provider_id)
+    except ValueError:
+        provider_id = raw_provider_id
     catalog = load_provider_catalog()
-    item = catalog.get(provider_id.lower())
+    item = catalog.get(provider_id)
     if not item:
         return "\n".join(
             [
-                f"Provider：{provider_id}",
-                "未找到内置预设。若这是中转服务，请使用 lucode connect 的 --custom、--homepage 和 --base-url 参数配置。",
+                f"Provider：{raw_provider_id or provider_id}",
+                "未找到内置预设。若这是中转服务，请使用 lucode connect 的 --custom、--homepage、--base-url、--model 和 --api-key 参数配置。",
             ]
         )
+    is_local = bool(item.get("local"))
+    key_state = "本地无需 API key" if is_local else (
+        "已保存 API key" if provider_has_api_key(provider_id, user_home=_user_home(workspace_context)) else "还缺 API key"
+    )
     return "\n".join(
         [
             f"Provider：{item.get('display_name') or provider_id}",
             f"官网：{item.get('homepage') or '未配置'}",
             f"请求地址：{item.get('base_url') or '未配置'}",
+            f"接口：{_format_backend_type(item.get('compatible_type'))}",
+            f"状态：{key_state}",
             f"推荐模型：{', '.join(item.get('models') or []) or '需手动填写'}",
             "",
             f"连接命令：lucode connect {provider_id} --api-key <key>",
@@ -364,50 +575,150 @@ def _render_models(settings: RuntimeSettings, workspace_context=None) -> str:
     user_home = _user_home(workspace_context)
     workspace_root = _workspace_root(workspace_context)
     config = load_effective_lucode_config(workspace_root=workspace_root, user_home=user_home)
-    configured_refs = model_refs_from_config(config)
-    catalog = load_model_catalog()
-    models = catalog.get("models", [])
-    model_infos = {item.get("id"): item for item in models}
-    current_ids = list(settings.orchestrator_model_priority or [])
-    current_primary = _model_label(current_ids[0], model_infos) if current_ids else "未设置"
-    current_fallback = [_model_label(model_id, model_infos) for model_id in current_ids[1:]]
+    provider_catalog = load_provider_catalog()
+    configured_providers = config.get("provider") or {}
+    auth_providers = (load_auth(user_home=user_home).get("providers") or {})
+    provider_ids = sorted(set(provider_catalog) | set(configured_providers) | set(auth_providers))
 
     lines = [
-        "模型选择",
-        f"当前主模型：{current_primary}",
-        f"当前 Fallback：{', '.join(current_fallback) if current_fallback else '无'}",
+        f"用户凭据：{auth_path(user_home)}",
+        f"项目配置：{project_config_path(workspace_root)}",
+        "说明：这里按模型来源分组；API key 不会在此处显示。",
     ]
-    if configured_refs:
-        lines.append(f"项目配置：{', '.join(configured_refs)}")
-    lines.extend(["", "已连接 Provider 模型"])
 
-    provider_models = [item for item in models if item.get("source") == "lucode_config"]
-    if not provider_models:
-        lines.append("- 无；请先使用 /connect 查看连接方式。")
-    for item in sorted(provider_models, key=lambda model: (model.get("provider") or "", model.get("model_name") or "")):
-        ref = item.get("provider_ref") or f"{item.get('provider')}/{item.get('model_name')}"
-        lines.append(
-            f"- {ref} | "
-            f"{_format_configured(item.get('configured'))} | "
-            f"{_format_availability(item)} | "
-            f"{_format_backend_type(item.get('backend_type'))} | "
-            f"{_format_privacy_level(item.get('privacy_level'))} | "
-            f"工具 {_format_tool_support(item)}"
-        )
-        if item.get("homepage"):
-            lines.append(f"  官网：{item.get('homepage')}")
-        lines.append(f"  请求地址：{_safe_base_url(item)}")
+    grouped_rows = {
+        "configured_key": [],
+        "missing_key": [],
+        "local": [],
+        "custom": [],
+    }
+    for provider_id in provider_ids:
+        if provider_id == "custom_openai_compatible" and provider_id not in configured_providers:
+            continue
+        row = _provider_source_row(provider_id, provider_catalog, configured_providers, user_home)
+        grouped_rows[_provider_source_group(row)].append(row)
 
     lines.extend(
         [
             "",
-            "切换命令：/models select provider/model [fallback_provider/model...]",
-            "角色命令：/models role orchestrator provider/model [fallback_provider/model...]",
-            "示例：/models select deepseek/deepseek-chat deepseek/deepseek-reasoner",
-            "说明：这里写入的是模型顺序；API key 仍只保存在用户级 auth.json。",
+            *_render_provider_source_section("已配置 key", grouped_rows["configured_key"]),
+            "",
+            *_render_provider_source_section("缺 API key", grouped_rows["missing_key"]),
+            "",
+            *_render_provider_source_section("本地 Provider", grouped_rows["local"]),
+            "",
+            *_render_provider_source_section("自定义中转", grouped_rows["custom"]),
+            "",
+            "下一步：/models select provider/model，或 /models brain <脑位> provider/model。",
+            "配置 key：/connect <provider> --api-key <key>",
+            "自定义中转：/connect my_proxy --custom --homepage <官网> --base-url <请求地址> --api-key <key> --model <模型名>",
         ]
     )
-    return "\n".join(lines)
+    return _render_lucode_panel("Provider 模型列表", lines)
+
+
+def _provider_source_row(provider_id: str, provider_catalog: dict, configured_providers: dict, user_home: Path) -> dict:
+    provider_config = dict(provider_catalog.get(provider_id) or {})
+    configured = configured_providers.get(provider_id) if isinstance(configured_providers, dict) else None
+    if isinstance(configured, dict):
+        provider_config.update(configured)
+    provider_id = normalize_provider_id(provider_id)
+    models = _nonempty_strings(provider_config.get("models") or [])
+    has_key = provider_has_api_key(provider_id, user_home=user_home)
+    is_local = bool(provider_config.get("local"))
+    is_custom = (
+        provider_id not in provider_catalog
+        or provider_id == "custom_openai_compatible"
+        or str(provider_config.get("cost_level") or "").strip().lower() == "custom"
+    )
+    return {
+        "provider_id": provider_id,
+        "display_name": str(provider_config.get("display_name") or provider_id),
+        "homepage": str(provider_config.get("homepage") or "未配置"),
+        "base_url": str(provider_config.get("base_url") or "未配置"),
+        "backend": str(provider_config.get("compatible_type") or provider_config.get("backend_type") or "openai_compatible"),
+        "models": models,
+        "configured": isinstance(configured, dict),
+        "has_key": has_key,
+        "local": is_local,
+        "custom": is_custom,
+    }
+
+
+def _provider_source_group(row: dict) -> str:
+    if row.get("custom"):
+        return "custom"
+    if row.get("local"):
+        return "local"
+    if row.get("has_key"):
+        return "configured_key"
+    return "missing_key"
+
+
+def _render_provider_source_section(title: str, rows: list[dict]) -> list[str]:
+    lines = [title]
+    if not rows:
+        lines.append("  无")
+        return lines
+    for row in sorted(rows, key=lambda item: (str(item.get("display_name") or ""), str(item.get("provider_id") or ""))):
+        lines.extend(_render_provider_source_card(row))
+    return lines
+
+
+def _render_provider_source_row(row: dict) -> list[str]:
+    return _render_provider_source_card(row)
+
+
+def _render_provider_source_card(row: dict) -> list[str]:
+    provider_id = row.get("provider_id") or ""
+    display_name = row.get("display_name") or provider_id
+    models = row.get("models") or []
+    configured_text = "项目已连接" if row.get("configured") else "项目未连接"
+    if row.get("local"):
+        key_text = "本地无需 key"
+        next_step = f"下一步：/models select {_first_provider_ref(provider_id, models)}" if models else f"下一步：/connect {provider_id} --model <本地模型名>"
+    elif row.get("has_key"):
+        key_text = "已保存 key"
+        next_step = f"下一步：/models select {_first_provider_ref(provider_id, models)}" if models else f"下一步：/connect {provider_id} --model <模型名>"
+    else:
+        key_text = "缺 API key"
+        next_step = f"下一步：/connect {provider_id} --api-key <key>"
+
+    model_refs = _provider_model_refs(provider_id, models)
+    return [
+        f"  {display_name}（{provider_id}）  {key_text} · {configured_text} · {_format_backend_type(row.get('backend'))}",
+        f"    地址：{row.get('base_url') or '未配置'}",
+        f"    模型：{', '.join(model_refs) if model_refs else '未配置'}",
+        f"    {next_step}",
+    ]
+
+
+def _provider_model_refs(provider_id: str, models: list[str]) -> list[str]:
+    refs = [f"{provider_id}/{model}" for model in _nonempty_strings(models)]
+    if len(refs) <= 2:
+        return refs
+    remaining = len(refs) - 2
+    return [*refs[:2], f"另有 {remaining} 个"]
+
+
+def _first_provider_ref(provider_id: str, models: list[str]) -> str:
+    names = _nonempty_strings(models)
+    if not names:
+        return f"{provider_id}/<model>"
+    return f"{provider_id}/{names[0]}"
+
+
+def _nonempty_strings(values) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    result = []
+    for item in values:
+        value = str(item or "").strip()
+        if value:
+            result.append(value)
+    return result
 
 
 def _render_model_roles(settings: RuntimeSettings, workspace_context=None) -> str:
@@ -417,37 +728,57 @@ def _render_model_roles(settings: RuntimeSettings, workspace_context=None) -> st
     )
     roles = config.get("roles") or {}
     lines = [
-        "三脑角色模型配置",
-        "可用角色：query_refiner、orchestrator、final_synthesizer",
+        "可用角色：query_refiner、orchestrator、executor、final_synthesizer",
         "",
         "当前运行时优先级",
-        f"- query_refiner：{', '.join(settings.query_refiner_model_priority) or '未设置'}",
-        f"- orchestrator：{', '.join(settings.orchestrator_model_priority) or '未设置'}",
-        f"- final_synthesizer：{', '.join(settings.final_synthesizer_model_priority) or '未设置'}",
+        f"- query_refiner：{_compact_role_priority(settings.query_refiner_model_priority)}",
+        f"- orchestrator：{_compact_role_priority(settings.orchestrator_model_priority)}",
+        f"- executor：{_compact_role_priority(settings.executor_model_priority)}",
+        f"- final_synthesizer：{_compact_role_priority(settings.final_synthesizer_model_priority)}",
         "",
         "项目配置 roles",
     ]
     if isinstance(roles, dict) and roles:
-        for role in ["query_refiner", "orchestrator", "final_synthesizer"]:
-            value = roles.get(role)
-            lines.append(f"- {role}：{', '.join(value) if isinstance(value, list) else value or '未配置'}")
+        for role_id in ["query_refiner", "orchestrator", "executor", "final_synthesizer"]:
+            value = roles.get(role_id)
+            label = model_role_label(role_id)
+            lines.append(f"- {label}（{role_id}）：{', '.join(value) if isinstance(value, list) else value or '未配置'}")
     else:
         lines.append("- 未配置；默认使用 /models select 的主模型和 fallback。")
     lines.extend(
         [
             "",
-            "写入命令：/models role <role> provider/model [fallback...]",
-            "示例：/models role orchestrator deepseek/deepseek-chat openrouter/openai/gpt-4o",
+            "写入命令：/models brain <脑位> provider/model [fallback...]",
+            "示例：/models brain 主脑 deepseek/deepseek-chat openrouter/openai/gpt-4o",
         ]
     )
-    return "\n".join(lines)
+    return _render_lucode_panel("四脑角色模型配置", lines)
+
+
+def _compact_role_priority(values: list[str]) -> str:
+    items = [str(item).strip() for item in values or [] if str(item).strip()]
+    if not items:
+        return "未设置"
+    if len(items) <= 2:
+        return ", ".join(items)
+    return f"{items[0]}, {items[1]}，另有 {len(items) - 2} 个"
+
+
+def _render_model_brains(settings: RuntimeSettings, workspace_context=None) -> str:
+    state = build_model_tuner_state(settings, workspace_context)
+    return render_model_tuner_snapshot(
+        state,
+        max_options=4,
+        message="交互式终端输入 /models 会进入独立调音台；非交互环境仅显示这个快照。",
+    )
 
 
 def _render_privacy(settings: RuntimeSettings) -> str:
     policy = PrivacyPolicy(settings.privacy_mode)
-    return "\n".join(
+    return _render_lucode_panel(
+        "隐私模式状态",
         [
-            "隐私模式状态（只读查看）",
+            "只读查看",
             f"当前模式：{_format_privacy_mode(policy.mode)}",
             f"允许云端模型：{'是' if policy.allows_cloud_models else '否'}",
             f"允许联网 MCP：{'是' if policy.allows_network_tools else '否'}",
@@ -455,14 +786,14 @@ def _render_privacy(settings: RuntimeSettings) -> str:
             "可选模式：离线模式 / 本地优先 / 允许云端",
             "对应配置值：offline / local_first / cloud_allowed",
             "说明：隐私模式当前仍是只读查看，后续会再加入一键切换。",
-        ]
+        ],
     )
 
 
 def _render_mode(settings: RuntimeSettings) -> str:
-    return "\n".join(
+    return _render_lucode_panel(
+        "执行模式状态",
         [
-            "执行模式状态",
             f"当前模式：{execution_mode_label_zh(settings.execution_mode)}",
             "",
             "可选模式：solo / serial / full",
@@ -471,7 +802,7 @@ def _render_mode(settings: RuntimeSettings) -> str:
             "full：显式高级并行多 Agent，只有通过安全门的批次才允许并行。",
             "",
             "说明：输入 /mode solo、/mode serial 或 /mode full 可立即切换并写入 .env。",
-        ]
+        ],
     )
 
 
@@ -479,17 +810,20 @@ def _render_model(settings: RuntimeSettings) -> str:
     catalog = load_model_catalog()
     model_names = {item["id"]: item for item in catalog.get("models", [])}
     lines = [
-        "模型优先级（只读查看）",
+        "只读查看",
         f"当前隐私模式：{_format_privacy_mode(settings.privacy_mode)}",
         "",
-        "前置优化副脑",
+        "前置优化脑",
     ]
     lines.extend(_render_model_priority_block(settings.query_refiner_model_priority, model_names))
     lines.append("")
-    lines.append("主脑模型优先级")
+    lines.append("主脑规划脑")
     lines.extend(_render_model_priority_block(settings.orchestrator_model_priority, model_names))
     lines.append("")
-    lines.append("汇总副脑")
+    lines.append("执行专家脑")
+    lines.extend(_render_model_priority_block(settings.executor_model_priority, model_names))
+    lines.append("")
+    lines.append("汇总脑")
     lines.extend(_render_model_priority_block(settings.final_synthesizer_model_priority, model_names))
     candidate_lines = _render_priority_candidate_block(catalog.get("models", []), settings)
     if candidate_lines:
@@ -503,7 +837,7 @@ def _render_model(settings: RuntimeSettings) -> str:
         lines.extend(unavailable_lines)
     lines.append("")
     lines.append("说明：模型优先级当前仍是只读查看，后续会再加入一键切换。")
-    return "\n".join(lines)
+    return _render_lucode_panel("模型优先级", lines)
 
 
 def _render_model_available(settings: RuntimeSettings) -> str:
@@ -512,7 +846,7 @@ def _render_model_available(settings: RuntimeSettings) -> str:
         item for item in catalog.get("models", []) if item.get("configured") and _is_runtime_available(item, settings)
     ]
     lines = [
-        "可用模型（紧凑视图）",
+        "紧凑视图",
         f"当前隐私模式：{_format_privacy_mode(settings.privacy_mode)}",
     ]
     if not available_models:
@@ -523,7 +857,7 @@ def _render_model_available(settings: RuntimeSettings) -> str:
                 "你可以先用 /config 或 /api show 检查模型连接状态。",
             ]
         )
-        return "\n".join(lines)
+        return _render_lucode_panel("可用模型（紧凑视图）", lines)
 
     for item in sorted(available_models, key=lambda model: (not model.get("is_local"), model.get("id") or "")):
         lines.append(
@@ -534,7 +868,7 @@ def _render_model_available(settings: RuntimeSettings) -> str:
         )
     lines.append("")
     lines.append("说明：这里只显示当前可运行的模型。")
-    return "\n".join(lines)
+    return _render_lucode_panel("可用模型（紧凑视图）", lines)
 
 
 def _render_readonly_switch_hint(command_name: str, value: str) -> str:
@@ -664,8 +998,34 @@ def _apply_role_priority_to_settings(settings: RuntimeSettings, role: str, model
         settings.query_refiner_model_priority = list(model_ids)
     elif normalized in {"planner", "main", "main_brain", "orchestrator", "主脑"}:
         settings.orchestrator_model_priority = list(model_ids)
-    elif normalized in {"synthesizer", "final", "final_brain", "final_synthesizer", "汇总副脑"}:
+    elif normalized in {"executor", "execution", "worker", "agent", "specialist", "solo", "执行", "执行脑", "执行专家", "专家脑", "solo_agent"}:
+        settings.executor_model_priority = list(model_ids)
+    elif normalized in {"synthesizer", "final", "final_brain", "final_synthesizer", "汇总", "汇总脑", "汇总副脑"}:
         settings.final_synthesizer_model_priority = list(model_ids)
+
+
+def _reload_model_priorities(settings: RuntimeSettings, workspace_context=None) -> None:
+    old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+    old_user_home = os.environ.get("LUCODE_USER_HOME")
+    try:
+        if workspace_context is not None:
+            os.environ["LUCODE_WORKSPACE_ROOT"] = str(_workspace_root(workspace_context))
+            os.environ["LUCODE_USER_HOME"] = str(_user_home(workspace_context))
+        fresh = RuntimeSettings.from_env()
+    finally:
+        if old_workspace is None:
+            os.environ.pop("LUCODE_WORKSPACE_ROOT", None)
+        else:
+            os.environ["LUCODE_WORKSPACE_ROOT"] = old_workspace
+        if old_user_home is None:
+            os.environ.pop("LUCODE_USER_HOME", None)
+        else:
+            os.environ["LUCODE_USER_HOME"] = old_user_home
+
+    settings.query_refiner_model_priority = list(fresh.query_refiner_model_priority)
+    settings.orchestrator_model_priority = list(fresh.orchestrator_model_priority)
+    settings.executor_model_priority = list(fresh.executor_model_priority)
+    settings.final_synthesizer_model_priority = list(fresh.final_synthesizer_model_priority)
 
 
 _KNOWN_COMMAND_PREFIXES = known_command_prefixes()
@@ -700,6 +1060,23 @@ def _model_label(model_id: str, model_infos: dict[str, dict]) -> str:
     return model_id or "未设置"
 
 
+def _compact_model_label(model_id: str, model_infos: dict[str, dict], max_chars: int = 42) -> str:
+    label = _model_label(model_id, model_infos).replace("（", " (").replace("）", ")")
+    if len(label) <= max_chars:
+        return label
+    return f"{label[: max_chars - 1]}…"
+
+
+def _fallback_summary(model_ids: list[str], model_infos: dict[str, dict]) -> str:
+    fallback = list(model_ids or [])[1:]
+    if not fallback:
+        return "-"
+    first = _compact_model_label(fallback[0], model_infos, max_chars=32)
+    if len(fallback) == 1:
+        return first
+    return f"{first} +{len(fallback) - 1}"
+
+
 def _split_models(models: list[dict]) -> tuple[list[dict], list[dict]]:
     local_models = [item for item in models if item.get("is_local")]
     cloud_models = [item for item in models if not item.get("is_local")]
@@ -708,11 +1085,180 @@ def _split_models(models: list[dict]) -> tuple[list[dict], list[dict]]:
 
 def _render_model_block(models: list[dict]) -> list[str]:
     if not models:
-        return ["- 无"]
-    lines = []
+        return ["  无"]
+    lines: list[str] = []
     for item in models:
-        lines.extend(_render_config_model_card(item))
+        lines.extend(_render_config_model_panel_card(item))
     return lines
+
+
+def _render_config_model_panel_card(model_info: dict) -> list[str]:
+    return [
+        f"  {_format_model_title(model_info)}",
+        (
+            "    状态："
+            f"{_format_backend_type(model_info.get('backend_type'))} · "
+            f"{_format_configured(model_info.get('configured'))} · "
+            f"{_format_availability(model_info)} · "
+            f"{_format_privacy_level(model_info.get('privacy_level'))}"
+        ),
+        (
+            "    能力 "
+            f"工具 {_format_tool_support(model_info)} · "
+            f"主脑 {_format_planner_suitability(model_info)} · "
+            f"执行 {_format_execution_suitability(model_info)}"
+        ),
+        f"    探测：{_format_probe_status(model_info)}",
+    ]
+
+
+def _render_lucode_panel(title: str, lines: list[str], *, width: int = PANEL_WIDTH) -> str:
+    body_width = _resolved_panel_body_width(width)
+    rendered = [_panel_top(title, body_width)]
+    for line in lines:
+        if line == "":
+            rendered.append(_panel_line("", body_width))
+            continue
+        if _is_section_heading(line):
+            rendered.append(_panel_section(line, body_width))
+            continue
+        for wrapped in _wrap_visible(line, body_width):
+            rendered.append(_panel_line(wrapped, body_width))
+    rendered.append(_panel_bottom(body_width))
+    return "\n".join(rendered)
+
+
+def _resolved_panel_body_width(width: int) -> int:
+    columns = shutil.get_terminal_size((width + 10, 24)).columns
+    safe_width = max(60, min(int(width or PANEL_WIDTH), columns - 10))
+    return max(48, safe_width - 4)
+
+
+def _panel_top(title: str, body_width: int) -> str:
+    label = f" {title} "
+    line = "╭─" + label + "─" * max(0, body_width + 1 - _display_width(label)) + "╮"
+    return _ansi_blue(line)
+
+
+def _panel_bottom(body_width: int) -> str:
+    return _ansi_blue("╰" + "─" * (body_width + 2) + "╯")
+
+
+def _panel_section(title: str, body_width: int) -> str:
+    label = f" {title} "
+    line = "├─" + label + "─" * max(0, body_width + 1 - _display_width(label)) + "┤"
+    return _ansi_blue(line)
+
+
+def _panel_line(value: str, body_width: int) -> str:
+    return f"{_ansi_blue('│')} {value}{' ' * max(0, body_width - _display_width(value))} {_ansi_blue('│')}"
+
+
+def _is_section_heading(value: str) -> bool:
+    text = str(value or "").strip()
+    return text in {
+        "模型能力表",
+        "本地模型",
+        "云端模型",
+        "已连接 Provider",
+        "可连接厂商",
+        "已配置 key",
+        "缺 API key",
+        "本地 Provider",
+        "自定义中转",
+        "当前运行时优先级",
+        "项目配置 roles",
+        "前置优化脑",
+        "主脑规划脑",
+        "执行专家脑",
+        "汇总脑",
+        "可加入优先级的候选模型",
+        "暂不可用模型",
+    }
+
+
+def _wrap_visible(value: str, width: int) -> list[str]:
+    text = str(value or "")
+    if _display_width(text) <= width:
+        return [text]
+    indent = len(text) - len(text.lstrip(" "))
+    prefix = " " * min(indent, 6)
+    lines: list[str] = []
+    current = ""
+    current_width = 0
+    for char in text:
+        char_width = _display_width(char)
+        if current and current_width + char_width > width:
+            lines.append(current.rstrip())
+            current = prefix + char.lstrip() if char == " " else prefix + char
+            current_width = _display_width(current)
+            continue
+        current += char
+        current_width += char_width
+    if current:
+        lines.append(current.rstrip())
+    return lines or [""]
+
+
+def _ansi_blue(value: str) -> str:
+    if os.environ.get("NO_COLOR"):
+        return value
+    return f"{LUCODE_BLUE}{value}{ANSI_RESET}"
+
+
+def _render_table(headers: list[str], rows: list[list[str]], *, max_widths: list[int] | None = None) -> list[str]:
+    if not rows:
+        return ["无"]
+    string_rows = [[str(cell or "") for cell in row] for row in rows]
+    max_widths = max_widths or [40] * len(headers)
+    widths: list[int] = []
+    for index, header in enumerate(headers):
+        cells = [header, *[row[index] if index < len(row) else "" for row in string_rows]]
+        target = max(_display_width(cell) for cell in cells)
+        limit = max_widths[index] if index < len(max_widths) else 40
+        widths.append(max(2, min(target, limit)))
+
+    def border(left: str, middle: str, right: str) -> str:
+        return left + middle.join("─" * (width + 2) for width in widths) + right
+
+    def row_line(values: list[str]) -> str:
+        cells = []
+        for index, width in enumerate(widths):
+            value = values[index] if index < len(values) else ""
+            fitted = _fit_cell(value, width)
+            cells.append(f" {fitted}{' ' * max(0, width - _display_width(fitted))} ")
+        return "│" + "│".join(cells) + "│"
+
+    lines = [border("┌", "┬", "┐"), row_line(headers), border("├", "┼", "┤")]
+    lines.extend(row_line(row) for row in string_rows)
+    lines.append(border("└", "┴", "┘"))
+    return lines
+
+
+def _fit_cell(value: str, width: int) -> str:
+    text = str(value or "")
+    if _display_width(text) <= width:
+        return text
+    if width <= 1:
+        return "…"[:width]
+    result = ""
+    used = 0
+    for char in text:
+        char_width = _display_width(char)
+        if used + char_width > width - 1:
+            break
+        result += char
+        used += char_width
+    return result + "…"
+
+
+def _display_width(value: str) -> int:
+    width = 0
+    for char in str(value or ""):
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+    return width
 
 
 def _render_config_model_card(model_info: dict) -> list[str]:
@@ -771,6 +1317,7 @@ def _render_model_priority_block(model_ids: list[str], model_infos: dict[str, di
 def _render_priority_candidate_block(models: list[dict], settings: RuntimeSettings) -> list[str]:
     priority_ids = set(settings.query_refiner_model_priority)
     priority_ids.update(settings.orchestrator_model_priority)
+    priority_ids.update(settings.executor_model_priority)
     priority_ids.update(settings.final_synthesizer_model_priority)
     candidates = [
         item
@@ -785,13 +1332,15 @@ def _render_priority_candidate_block(models: list[dict], settings: RuntimeSettin
     lines = []
     for item in sorted(candidates, key=lambda model: (model.get("is_local") is not True, model.get("id") or "")):
         roles = _suggest_priority_roles(item)
-        lines.append(
+        lines.extend(
+            [
             f"- {_format_model_title(item)} | "
             f"{_format_backend_type(item.get('backend_type'))} | "
             f"{_format_configured(item.get('configured'))} | "
             f"{_format_availability(item)} | "
-            f"{_format_privacy_level(item.get('privacy_level'))} | "
-            f"建议角色：{', '.join(roles)}"
+            f"{_format_privacy_level(item.get('privacy_level'))}",
+            f"  建议角色：{', '.join(roles)}",
+            ]
         )
     return lines
 
@@ -807,13 +1356,15 @@ def _render_unavailable_model_block(models: list[dict], settings: RuntimeSetting
 
     lines = []
     for item in sorted(unavailable, key=lambda model: (model.get("is_local") is not True, model.get("id") or "")):
-        lines.append(
+        lines.extend(
+            [
             f"- {_format_model_title(item)} | "
             f"{_format_backend_type(item.get('backend_type'))} | "
             f"{_format_configured(item.get('configured'))} | "
             f"{_format_availability(item)} | "
-            f"{_format_privacy_level(item.get('privacy_level'))} | "
-            f"处理建议：{_unavailable_reason(item, settings)}"
+            f"{_format_privacy_level(item.get('privacy_level'))}",
+            f"  处理建议：{_unavailable_reason(item, settings)}",
+            ]
         )
     return lines
 
@@ -843,11 +1394,13 @@ def _suggest_priority_roles(model_info: dict) -> list[str]:
     reasoning = str(model_info.get("reasoning_level") or "").lower()
     tier = str(model_info.get("model_tier") or "").lower()
     if best_for.intersection({"project_explorer", "humanizer_zh"}) or tier in {"small", "medium", "large"}:
-        roles.append("前置优化副脑")
+        roles.append("前置优化脑")
     if reasoning == "high" or tier in {"large", "medium"}:
-        roles.append("主脑模型优先级")
+        roles.append("主脑规划脑")
+    if "jpc_now_skill" in best_for:
+        roles.append("执行专家脑")
     if reasoning == "high" or tier in {"large", "medium"}:
-        roles.append("汇总副脑")
+        roles.append("汇总脑")
     if not roles:
         roles.append("按任务手动选择")
     return roles
@@ -856,7 +1409,14 @@ def _suggest_priority_roles(model_info: dict) -> list[str]:
 def _availability_blocks_runtime(model_info: dict) -> bool:
     probe = model_info.get("probe") or {}
     status = str(probe.get("status") or "").strip()
-    if status in {"chat_failed", "probe_failed", "service_unavailable", "model_missing", "capability_probe_failed"}:
+    if status in {
+        "chat_failed",
+        "probe_failed",
+        "service_unavailable",
+        "model_missing",
+        "capability_probe_failed",
+        "config_incomplete",
+    }:
         return True
     return bool(model_info.get("is_local") and not status)
 
@@ -910,6 +1470,8 @@ def _format_availability(model_info: dict) -> str:
         return "服务在线，模型未安装"
     if status == "tools_unsupported":
         return "可聊天，不支持工具"
+    if status == "config_incomplete":
+        return "配置不完整"
     if model_info.get("is_local"):
         return "未确认可用"
     return "未探测"
@@ -977,11 +1539,34 @@ def _format_probe_status(model_info: dict) -> str:
         "chat_failed": "基础聊天失败",
         "probe_failed": "探测失败",
         "capability_probe_failed": "服务在线，能力探测失败",
+        "partial": "部分探测成功",
         "service_unavailable": "本地服务未连通",
         "model_missing": "服务在线，模型未安装",
+        "config_incomplete": "配置不完整",
         "disabled": "已关闭",
     }
     return status_labels.get(status, status)
+
+
+def _format_tools_probe_summary(probe: dict) -> str:
+    if not probe:
+        return "未知"
+    if probe.get("supports_tools") is True:
+        parts = []
+        if probe.get("tools_auto_call") is True:
+            parts.append("auto")
+        if probe.get("tools_forced_choice") is True:
+            parts.append("强制")
+        elif "forced" in (probe.get("probe_tool_choice_modes") or []) and probe.get("tools_api_accepted") is True:
+            parts.append("不支持强制")
+        if probe.get("tools_result_roundtrip") is True:
+            parts.append("回填")
+        return "是（" + "、".join(parts or ["已探测"]) + "）"
+    if probe.get("supports_tools") is False:
+        if probe.get("tools_api_accepted") is True:
+            return "否（接口接受但未触发）"
+        return "否"
+    return "未知"
 
 
 def _format_bool_zh(value, unknown: str = "未知", suffix: str = "") -> str:

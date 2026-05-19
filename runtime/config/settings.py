@@ -3,7 +3,12 @@ from dataclasses import dataclass, field
 
 from catalog_system.model_catalog import load_model_catalog
 from runtime.config.execution_mode import normalize_execution_mode
-from runtime.config.model_config import load_effective_lucode_config, model_ids_from_refs, model_refs_from_config
+from runtime.config.model_config import (
+    load_effective_lucode_config,
+    model_ids_from_refs,
+    model_refs_from_config,
+    normalize_model_role,
+)
 from runtime.safety.privacy import normalize_privacy_mode
 
 
@@ -19,6 +24,7 @@ class RuntimeSettings:
     query_refiner_enabled: bool = False
     query_refiner_model_priority: list[str] = field(default_factory=lambda: list(DEFAULT_QUERY_REFINER_MODELS))
     orchestrator_model_priority: list[str] = field(default_factory=lambda: list(DEFAULT_ORCHESTRATOR_MODELS))
+    executor_model_priority: list[str] = field(default_factory=list)
     final_synthesizer_model_priority: list[str] = field(
         default_factory=lambda: list(DEFAULT_FINAL_SYNTHESIZER_MODELS)
     )
@@ -38,6 +44,10 @@ class RuntimeSettings:
                 "AGENTS_ORCHESTRATOR_MODEL_PRIORITY",
                 default_priorities["orchestrator"],
             ),
+            executor_model_priority=_env_list(
+                "AGENTS_EXECUTOR_MODEL_PRIORITY",
+                default_priorities["executor"],
+            ),
             final_synthesizer_model_priority=_env_list(
                 "AGENTS_FINAL_SYNTHESIZER_MODEL_PRIORITY",
                 default_priorities["final_synthesizer"],
@@ -48,12 +58,17 @@ class RuntimeSettings:
         return _apply_lucode_config_overrides(settings)
 
     def model_priority_for(self, role: str) -> list[str]:
-        normalized = role.strip().lower().replace("-", "_")
-        if normalized in {"query_refiner", "refiner", "前置优化副脑"}:
+        try:
+            normalized = normalize_model_role(role)
+        except ValueError as exc:
+            raise KeyError(f"Unknown runtime model role: {role}") from exc
+        if normalized == "query_refiner":
             return list(self.query_refiner_model_priority)
-        if normalized in {"orchestrator", "planner", "main_brain", "主脑"}:
+        if normalized == "orchestrator":
             return list(self.orchestrator_model_priority)
-        if normalized in {"final_synthesizer", "synthesizer", "final_brain", "汇总副脑"}:
+        if normalized == "executor":
+            return list(self.executor_model_priority)
+        if normalized == "final_synthesizer":
             return list(self.final_synthesizer_model_priority)
         raise KeyError(f"Unknown runtime model role: {role}")
 
@@ -67,7 +82,8 @@ class RuntimeSettings:
             f"前置优化={refiner}；"
             f"前置优化模型优先级={','.join(self.query_refiner_model_priority)}；"
             f"主脑模型优先级={','.join(self.orchestrator_model_priority)}；"
-            f"汇总副脑模型优先级={','.join(self.final_synthesizer_model_priority)}；"
+            f"执行脑模型优先级={','.join(self.executor_model_priority)}；"
+            f"汇总脑模型优先级={','.join(self.final_synthesizer_model_priority)}；"
             f"隐私模式={self.privacy_mode}；"
             f"执行模式={self.execution_mode}"
         )
@@ -95,35 +111,71 @@ def _apply_lucode_config_overrides(settings: RuntimeSettings) -> RuntimeSettings
         return settings
 
     mode = str(config.get("mode") or "").strip()
-    if mode:
+    if mode and not str(os.environ.get("AGENTS_EXECUTION_MODE") or "").strip():
         settings.execution_mode = normalize_execution_mode(mode)
     privacy = str(config.get("privacy") or "").strip()
-    if privacy:
+    if privacy and not str(os.environ.get("AGENTS_PRIVACY_MODE") or "").strip():
         settings.privacy_mode = normalize_privacy_mode(privacy)
 
+    available_ids = _configured_runtime_model_ids()
     default_refs = model_refs_from_config(config)
-    default_ids = model_ids_from_refs(default_refs)
+    default_ids = _filter_priority_ids(model_ids_from_refs(default_refs), available_ids)
     role_config = config.get("roles") or {}
     if isinstance(role_config, dict):
-        query_refiner_ids = model_ids_from_refs(role_config.get("query_refiner") or [])
-        orchestrator_ids = model_ids_from_refs(role_config.get("orchestrator") or [])
-        final_ids = model_ids_from_refs(role_config.get("final_synthesizer") or [])
-        if query_refiner_ids:
+        query_refiner_ids = _filter_priority_ids(model_ids_from_refs(role_config.get("query_refiner") or []), available_ids)
+        orchestrator_ids = _filter_priority_ids(model_ids_from_refs(role_config.get("orchestrator") or []), available_ids)
+        executor_ids = _filter_priority_ids(model_ids_from_refs(role_config.get("executor") or []), available_ids)
+        final_ids = _filter_priority_ids(model_ids_from_refs(role_config.get("final_synthesizer") or []), available_ids)
+        if query_refiner_ids and not _env_has("AGENTS_QUERY_REFINER_MODEL_PRIORITY"):
             settings.query_refiner_model_priority = query_refiner_ids
-        if orchestrator_ids:
+        if orchestrator_ids and not _env_has("AGENTS_ORCHESTRATOR_MODEL_PRIORITY"):
             settings.orchestrator_model_priority = orchestrator_ids
-        if final_ids:
+        if executor_ids and not _env_has("AGENTS_EXECUTOR_MODEL_PRIORITY"):
+            settings.executor_model_priority = executor_ids
+        if final_ids and not _env_has("AGENTS_FINAL_SYNTHESIZER_MODEL_PRIORITY"):
             settings.final_synthesizer_model_priority = final_ids
 
     if default_ids:
-        if not isinstance(role_config, dict) or not role_config.get("query_refiner"):
+        if not _env_has("AGENTS_QUERY_REFINER_MODEL_PRIORITY") and (
+            not isinstance(role_config, dict) or not role_config.get("query_refiner")
+        ):
             settings.query_refiner_model_priority = list(default_ids)
-        if not isinstance(role_config, dict) or not role_config.get("orchestrator"):
+        if not _env_has("AGENTS_ORCHESTRATOR_MODEL_PRIORITY") and (
+            not isinstance(role_config, dict) or not role_config.get("orchestrator")
+        ):
             settings.orchestrator_model_priority = list(default_ids)
-        if not isinstance(role_config, dict) or not role_config.get("final_synthesizer"):
+        if not _env_has("AGENTS_EXECUTOR_MODEL_PRIORITY") and (
+            not isinstance(role_config, dict) or not role_config.get("executor")
+        ):
+            settings.executor_model_priority = list(default_ids)
+        if not _env_has("AGENTS_FINAL_SYNTHESIZER_MODEL_PRIORITY") and (
+            not isinstance(role_config, dict) or not role_config.get("final_synthesizer")
+        ):
             settings.final_synthesizer_model_priority = list(default_ids)
 
     return settings
+
+
+def _env_has(name: str) -> bool:
+    return bool(str(os.environ.get(name) or "").strip())
+
+
+def _configured_runtime_model_ids() -> set[str]:
+    try:
+        models = load_model_catalog().get("models", [])
+    except Exception:
+        return set()
+    return {
+        str(item.get("id") or "")
+        for item in models
+        if item.get("id") and item.get("configured") and _model_runtime_available(item)
+    }
+
+
+def _filter_priority_ids(model_ids: list[str], available_ids: set[str]) -> list[str]:
+    if not available_ids:
+        return list(model_ids)
+    return [model_id for model_id in model_ids if model_id in available_ids]
 
 
 def _dynamic_default_priorities() -> dict[str, list[str]]:
@@ -136,6 +188,7 @@ def _dynamic_default_priorities() -> dict[str, list[str]]:
     return {
         "query_refiner": _priority_for_role(configured, "query_refiner"),
         "orchestrator": _priority_for_role(configured, "orchestrator"),
+        "executor": _priority_for_role(configured, "executor"),
         "final_synthesizer": _priority_for_role(configured, "final_synthesizer"),
     }
 
@@ -163,6 +216,8 @@ def _eligible_models_for_role(models: list[dict], role: str) -> list[dict]:
         candidates = [item for item in models if item.get("supports_basic_chat") is not False]
     elif role == "orchestrator":
         candidates = [item for item in models if item.get("planner_suitable") is not False]
+    elif role == "executor":
+        candidates = [item for item in models if item.get("supports_tools") is not False]
     elif role == "final_synthesizer":
         candidates = [item for item in models if item.get("execution_suitable") is not False]
     else:
@@ -200,6 +255,17 @@ def _role_score(model_info: dict, role: str) -> int:
             score += 8
         if reasoning == "high":
             score += 5
+    elif role == "executor":
+        if "jpc_now_skill" in best_for:
+            score += 8
+        if model_info.get("execution_suitable") is True:
+            score += 6
+        if model_info.get("supports_tools") is True:
+            score += 4
+        if model_info.get("supports_json_output") is True:
+            score += 2
+        score += {"low": 5, "medium": 3, "high": 1}.get(cost, 1)
+        score += {"large": 3, "medium": 4, "small": 2}.get(tier, 1)
     elif role == "final_synthesizer":
         if "final_synthesizer" in best_for:
             score += 8
