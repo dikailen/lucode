@@ -842,6 +842,146 @@ class OperationLogTests(unittest.TestCase):
         self.assertEqual(self._records()[-2]["tool"], "runtime_fast_path.mcp_catalog_count")
         self.assertEqual(self._records()[-1]["tool"], "runtime_fast_path.readme_mcp_count")
 
+    def test_runtime_fast_path_summarizes_project_manifests(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.execution.fast_paths import (
+            _can_fast_path_project_manifest_summary,
+            _run_project_manifest_summary_fast_path,
+        )
+
+        workspace = TEMP_ROOT / f"manifest_summary_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        (workspace / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "demo-app",
+                    "version": "1.2.3",
+                    "scripts": {"test": "pytest", "build": "vite build"},
+                    "dependencies": {"rich": "^13.0.0"},
+                    "devDependencies": {"pytest": "^8.0.0"},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (workspace / "pyproject.toml").write_text(
+            '[project]\nname = "demo-py"\nversion = "0.4.0"\ndependencies = ["openai-agents"]\n',
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        os.environ["AGENTS_OPERATION_LOG_PATH"] = str(self.quarantine_dir / "operations.jsonl")
+        task = PlannedTask(
+            id="manifest",
+            title="分析 package.json 和 pyproject.toml",
+            instruction="请总结项目依赖、脚本和版本。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["project_filesystem_readonly"],
+        )
+
+        try:
+            self.assertTrue(_can_fast_path_project_manifest_summary(task))
+            output = _run_project_manifest_summary_fast_path(workspace, task)
+        finally:
+            os.environ.pop("AGENTS_OPERATION_LOG_PATH", None)
+
+        self.assertIn("package.json", output)
+        self.assertIn("demo-app", output)
+        self.assertIn("test", output)
+        self.assertIn("pyproject.toml", output)
+        self.assertIn("demo-py", output)
+        record = self._records()[-1]
+        self.assertEqual(record["tool"], "runtime_fast_path.project_manifest")
+        self.assertFalse(record["approval"]["required"])
+        self.assertEqual(record["params_summary"]["task_id"], "manifest")
+
+    def test_runtime_fast_path_summarizes_readonly_config_files(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.execution.fast_paths import (
+            _can_fast_path_config_summary,
+            _run_config_summary_fast_path,
+        )
+
+        workspace = TEMP_ROOT / f"config_summary_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        (workspace / "settings.json").write_text(
+            json.dumps({"provider": {"name": "demo", "api_key": "sk-secret"}, "models": ["a", "b"]}),
+            encoding="utf-8",
+        )
+        (workspace / "lucode.toml").write_text("[roles]\nexecutor = \"deepseek\"\n", encoding="utf-8")
+        (workspace / "config.yaml").write_text("server:\n  port: 8080\n  token: sk-hidden\n", encoding="utf-8")
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        os.environ["AGENTS_OPERATION_LOG_PATH"] = str(self.quarantine_dir / "operations.jsonl")
+        task = PlannedTask(
+            id="config",
+            title="读取配置文件",
+            instruction="总结 settings.json、lucode.toml 和 config.yaml 的配置结构。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["project_filesystem_readonly"],
+            read_set=["settings.json", "lucode.toml", "config.yaml"],
+        )
+
+        try:
+            self.assertTrue(_can_fast_path_config_summary(task))
+            output = _run_config_summary_fast_path(workspace, task)
+        finally:
+            os.environ.pop("AGENTS_OPERATION_LOG_PATH", None)
+
+        self.assertIn("settings.json", output)
+        self.assertIn("provider", output)
+        self.assertIn("lucode.toml", output)
+        self.assertIn("roles", output)
+        self.assertIn("config.yaml", output)
+        self.assertIn("server", output)
+        self.assertNotIn("sk-secret", output)
+        self.assertNotIn("sk-hidden", output)
+        record = self._records()[-1]
+        self.assertEqual(record["tool"], "runtime_fast_path.config_summary")
+        self.assertFalse(record["approval"]["required"])
+        self.assertEqual(record["params_summary"]["file_count"], 3)
+
+    def test_runtime_fast_path_git_diff_logs_readonly_summary(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.execution.fast_paths import _can_fast_path_git_diff, _run_git_diff_fast_path
+
+        workspace = TEMP_ROOT / f"git_diff_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+        (workspace / "demo.txt").write_text("old\n", encoding="utf-8")
+        subprocess.run(["git", "add", "demo.txt"], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "init"],
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (workspace / "demo.txt").write_text("old\nnew\n", encoding="utf-8")
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        os.environ["AGENTS_OPERATION_LOG_PATH"] = str(self.quarantine_dir / "operations.jsonl")
+        task = PlannedTask(
+            id="diff",
+            title="查看 git diff",
+            instruction="请总结当前 git diff 差异。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["git_tools"],
+        )
+
+        try:
+            self.assertTrue(_can_fast_path_git_diff(task))
+            output = _run_git_diff_fast_path(workspace, task)
+        finally:
+            os.environ.pop("AGENTS_OPERATION_LOG_PATH", None)
+
+        self.assertIn("demo.txt", output)
+        self.assertIn("diff --stat", output)
+        record = self._records()[-1]
+        self.assertEqual(record["tool"], "runtime_fast_path.git_diff")
+        self.assertFalse(record["approval"]["required"])
+        self.assertEqual(record["params_summary"]["task_id"], "diff")
+
 
 class SafeDeleteTests(unittest.TestCase):
     def setUp(self):

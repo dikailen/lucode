@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 
 
@@ -51,6 +52,15 @@ def _can_fast_path_git_status(task) -> bool:
     return wants_status and not asks_commit
 
 
+def _can_fast_path_git_diff(task) -> bool:
+    if task.mcp != ["git_tools"]:
+        return False
+    text = f"{task.title}\n{task.instruction}".lower()
+    wants_diff = any(marker in text for marker in ["git diff", "diff", "差异", "变更详情", "补丁"])
+    asks_commit = "commit" in text and "do not commit" not in text
+    return wants_diff and not asks_commit and not getattr(task, "write_intent", None)
+
+
 def _can_fast_path_mcp_catalog_count(task) -> bool:
     text = f"{task.title}\n{task.instruction}".lower()
     wants_count = any(marker in text for marker in ["count", "统计", "数量"])
@@ -61,6 +71,93 @@ def _can_fast_path_readme_mcp_count(task) -> bool:
     text = f"{task.title}\n{task.instruction}".lower()
     wants_count = any(marker in text for marker in ["count", "统计", "数量"])
     return "readme" in text and "mcp" in text and wants_count and not getattr(task, "write_intent", None)
+
+
+def _can_fast_path_project_manifest_summary(task) -> bool:
+    if getattr(task, "write_intent", None):
+        return False
+    text = _task_text(task)
+    if not any(marker in text for marker in ["package.json", "pyproject.toml"]):
+        return False
+    return any(
+        marker in text
+        for marker in [
+            "summary",
+            "summarize",
+            "analyze",
+            "dependenc",
+            "script",
+            "version",
+            "总结",
+            "分析",
+            "依赖",
+            "脚本",
+            "版本",
+        ]
+    )
+
+
+def _can_fast_path_config_summary(task) -> bool:
+    if getattr(task, "write_intent", None):
+        return False
+    text = _task_text(task)
+    if not any(suffix in text for suffix in [".json", ".toml", ".yaml", ".yml"]):
+        return False
+    return any(marker in text for marker in ["config", "配置", "读取", "read", "summary", "summarize", "结构"])
+
+
+def _task_text(task) -> str:
+    read_set = " ".join(str(item) for item in (getattr(task, "read_set", []) or []))
+    return f"{task.title}\n{task.instruction}\n{read_set}".lower()
+
+
+def _run_project_manifest_summary_fast_path(project_root: Path, task) -> str:
+    package_path = project_root / "package.json"
+    pyproject_path = project_root / "pyproject.toml"
+    sections: list[str] = ["项目清单摘要（只读 fast path）"]
+    file_count = 0
+
+    if package_path.exists():
+        file_count += 1
+        sections.extend(["", _summarize_package_json(package_path)])
+    if pyproject_path.exists():
+        file_count += 1
+        sections.extend(["", _summarize_pyproject(pyproject_path)])
+    if file_count == 0:
+        sections.append("- 未找到 package.json 或 pyproject.toml。")
+
+    output = "\n".join(sections)
+    _log_runtime_fast_path(
+        project_root,
+        tool="project_manifest",
+        action="summarize_project_manifests",
+        task=task,
+        params={"task_id": getattr(task, "id", ""), "file_count": file_count},
+        status="success",
+        result_summary=output,
+    )
+    return output
+
+
+def _run_config_summary_fast_path(project_root: Path, task) -> str:
+    candidates = _config_summary_paths(project_root, task)
+    sections = ["配置文件摘要（只读 fast path）"]
+    for path in candidates:
+        sections.extend(["", _summarize_config_file(path)])
+    if not candidates:
+        sections.append("- 未找到可读取的 JSON/TOML/YAML 配置文件。")
+
+    output = "\n".join(sections)
+    _log_runtime_fast_path(
+        project_root,
+        tool="config_summary",
+        action="summarize_config_files",
+        task=task,
+        params={"task_id": getattr(task, "id", ""), "file_count": len(candidates)},
+        status="success",
+        result_summary=output,
+    )
+    return output
 
 
 def _run_mcp_catalog_count_fast_path(project_root: Path, task) -> str:
@@ -185,6 +282,72 @@ def _run_git_status_fast_path(project_root: Path, task) -> str:
     return output
 
 
+def _run_git_diff_fast_path(project_root: Path, task) -> str:
+    stat_result = subprocess.run(
+        ["git", "diff", "--stat"],
+        cwd=project_root,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=30,
+        shell=False,
+    )
+    name_result = subprocess.run(
+        ["git", "diff", "--name-only"],
+        cwd=project_root,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=30,
+        shell=False,
+    )
+    if stat_result.returncode != 0:
+        output = (
+            "git diff 执行失败。\n"
+            f"returncode: {stat_result.returncode}\n"
+            f"stderr: {stat_result.stderr.strip() or '无'}"
+        )
+        _log_runtime_fast_path(
+            project_root,
+            tool="git_diff",
+            action="git_diff",
+            task=task,
+            params={"task_id": getattr(task, "id", ""), "command": "git diff --stat"},
+            status="failed",
+            result_summary=output,
+            error=stat_result.stderr.strip() or output,
+        )
+        return output
+
+    stat = stat_result.stdout.strip()
+    names = [line.strip() for line in name_result.stdout.splitlines() if line.strip()]
+    if not stat and not names:
+        output = "当前没有未暂存 git diff。"
+    else:
+        lines = ["git diff --stat", stat or "无统计信息", "", "变更文件："]
+        lines.extend(f"- {name}" for name in names[:50])
+        if len(names) > 50:
+            lines.append(f"- 其余 {len(names) - 50} 个文件已省略。")
+        output = "\n".join(lines)
+
+    _log_runtime_fast_path(
+        project_root,
+        tool="git_diff",
+        action="git_diff",
+        task=task,
+        params={
+            "task_id": getattr(task, "id", ""),
+            "command": "git diff --stat && git diff --name-only",
+            "changed_files": len(names),
+        },
+        status="success",
+        result_summary=output,
+    )
+    return output
+
+
 def _parse_git_status_short(stdout: str) -> list[dict[str, str]]:
     items = []
     status_names = {
@@ -212,6 +375,141 @@ def _parse_git_status_short(stdout: str) -> list[dict[str, str]]:
             }
         )
     return items
+
+
+def _summarize_package_json(path: Path) -> str:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return f"package.json\n- 读取失败: {exc}"
+    scripts = payload.get("scripts") or {}
+    dependencies = payload.get("dependencies") or {}
+    dev_dependencies = payload.get("devDependencies") or {}
+    return "\n".join(
+        [
+            "package.json",
+            f"- name: {payload.get('name') or '未填写'}",
+            f"- version: {payload.get('version') or '未填写'}",
+            f"- scripts: {_join_keys(scripts)}",
+            f"- dependencies: {len(dependencies)} 个",
+            f"- devDependencies: {len(dev_dependencies)} 个",
+        ]
+    )
+
+
+def _summarize_pyproject(path: Path) -> str:
+    try:
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return f"pyproject.toml\n- 读取失败: {exc}"
+    project = payload.get("project") or {}
+    dependencies = project.get("dependencies") or []
+    optional = project.get("optional-dependencies") or {}
+    tool = payload.get("tool") or {}
+    return "\n".join(
+        [
+            "pyproject.toml",
+            f"- name: {project.get('name') or '未填写'}",
+            f"- version: {project.get('version') or '未填写'}",
+            f"- dependencies: {len(dependencies)} 个",
+            f"- optional-dependencies: {_join_keys(optional)}",
+            f"- tool sections: {_join_keys(tool)}",
+        ]
+    )
+
+
+def _config_summary_paths(project_root: Path, task) -> list[Path]:
+    paths: list[Path] = []
+    for raw in getattr(task, "read_set", []) or []:
+        path = _resolve_readonly_config_path(project_root, str(raw))
+        if path and path not in paths:
+            paths.append(path)
+    if paths:
+        return paths[:8]
+
+    text = _task_text(task)
+    for candidate in sorted(project_root.iterdir() if project_root.exists() else []):
+        if candidate.is_file() and candidate.suffix.lower() in {".json", ".toml", ".yaml", ".yml"}:
+            if candidate.name.lower() in text:
+                paths.append(candidate)
+    return paths[:8]
+
+
+def _resolve_readonly_config_path(project_root: Path, raw_path: str) -> Path | None:
+    value = raw_path.strip().strip("\"'")
+    if not value:
+        return None
+    path = (project_root / value).resolve()
+    try:
+        path.relative_to(project_root.resolve())
+    except ValueError:
+        return None
+    if not path.is_file() or path.suffix.lower() not in {".json", ".toml", ".yaml", ".yml"}:
+        return None
+    return path
+
+
+def _summarize_config_file(path: Path) -> str:
+    suffix = path.suffix.lower()
+    try:
+        text = path.read_text(encoding="utf-8")
+        if suffix == ".json":
+            payload = json.loads(text)
+            return _summarize_mapping(path.name, payload)
+        if suffix == ".toml":
+            payload = tomllib.loads(text)
+            return _summarize_mapping(path.name, payload)
+        return _summarize_yaml_keys(path.name, text)
+    except Exception as exc:
+        return f"{path.name}\n- 读取失败: {exc}"
+
+
+def _summarize_mapping(name: str, payload) -> str:
+    if isinstance(payload, dict):
+        keys = list(payload)
+        sensitive = [key for key in keys if _looks_sensitive_key(str(key))]
+        lines = [
+            name,
+            f"- top-level keys: {_join_keys(keys)}",
+        ]
+        if sensitive:
+            lines.append(f"- sensitive keys: {_join_keys(sensitive)}（值已隐藏）")
+        return "\n".join(lines)
+    if isinstance(payload, list):
+        return "\n".join([name, f"- list items: {len(payload)} 个"])
+    return "\n".join([name, f"- type: {type(payload).__name__}"])
+
+
+def _summarize_yaml_keys(name: str, text: str) -> str:
+    keys: list[str] = []
+    sensitive: list[str] = []
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if ":" not in line:
+            continue
+        key = line.split(":", 1)[0].strip().strip("\"'")
+        if key and key not in keys:
+            keys.append(key)
+        if _looks_sensitive_key(key) and key not in sensitive:
+            sensitive.append(key)
+    lines = [name, f"- keys: {_join_keys(keys)}"]
+    if sensitive:
+        lines.append(f"- sensitive keys: {_join_keys(sensitive)}（值已隐藏）")
+    return "\n".join(lines)
+
+
+def _join_keys(value) -> str:
+    if isinstance(value, dict):
+        keys = list(value)
+    else:
+        keys = list(value or [])
+    return ", ".join(str(item) for item in keys[:8]) or "无"
+
+
+def _looks_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(marker in lowered for marker in ["key", "token", "secret", "password", "credential"])
 
 
 def web_search(query: str, max_results: int = 5) -> str:

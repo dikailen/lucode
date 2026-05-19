@@ -4,10 +4,16 @@ from pathlib import Path
 
 from planning.planner_schema import PlannerResult
 from runtime.execution.fast_paths import (
+    _can_fast_path_config_summary,
+    _can_fast_path_git_diff,
     _can_fast_path_mcp_catalog_count,
+    _can_fast_path_project_manifest_summary,
     _can_fast_path_readme_mcp_count,
     _is_url_only_task,
+    _run_config_summary_fast_path,
+    _run_git_diff_fast_path,
     _run_mcp_catalog_count_fast_path,
+    _run_project_manifest_summary_fast_path,
     _run_readme_mcp_count_fast_path,
 )
 from runtime.execution.inline_context import _latest_workspace_context
@@ -91,6 +97,12 @@ async def _run_planned_task(
 
 
 def _readonly_fast_path_output(project_root: Path, task) -> str | None:
+    if _can_fast_path_git_diff(task):
+        return _run_git_diff_fast_path(project_root, task)
+    if _can_fast_path_project_manifest_summary(task):
+        return _run_project_manifest_summary_fast_path(project_root, task)
+    if _can_fast_path_config_summary(task):
+        return _run_config_summary_fast_path(project_root, task)
     if _can_fast_path_mcp_catalog_count(task):
         return _run_mcp_catalog_count_fast_path(project_root, task)
     if _can_fast_path_readme_mcp_count(task):

@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from runtime.execution.fast_paths import (
+    _can_fast_path_git_diff,
     _can_fast_path_git_status,
     _can_fast_path_url_search,
+    _run_git_diff_fast_path,
     _run_git_status_fast_path,
     _run_url_search_fast_path,
 )
@@ -12,7 +14,12 @@ from runtime.execution.failure_memory import _record_flywheel_safely
 from runtime.execution.inline_context import _inline_project_file_context, _latest_workspace_context
 from runtime.execution.pipeline import PipelineRunState
 from runtime.execution.progress import _print_progress_snapshot
-from runtime.execution.task_runner import _max_turns_for_task, _task_prompt, _with_verification_report
+from runtime.execution.task_runner import (
+    _max_turns_for_task,
+    _readonly_fast_path_output,
+    _task_prompt,
+    _with_verification_report,
+)
 from runtime.memory.flywheel import FlywheelStore
 from runtime.safety.auditor import audit_execution, format_final_report
 
@@ -44,6 +51,24 @@ async def _run_single_agent(
         return format_final_report(output, audit), audit
     if _can_fast_path_git_status(task):
         output = _run_git_status_fast_path(project_root, task)
+        run_state.record_task_result(task, output)
+        if show_plan:
+            _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
+        _record_flywheel_safely(flywheel, run_state)
+        audit = audit_execution(plan, run_state, output)
+        return format_final_report(output, audit), audit
+    if _can_fast_path_git_diff(task):
+        output = _run_git_diff_fast_path(project_root, task)
+        run_state.record_task_result(task, output)
+        if show_plan:
+            _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
+        _record_flywheel_safely(flywheel, run_state)
+        audit = audit_execution(plan, run_state, output)
+        return format_final_report(output, audit), audit
+
+    fast_path_output = _readonly_fast_path_output(project_root, task)
+    if fast_path_output is not None:
+        output = _with_verification_report(project_root, task, fast_path_output, run_state)
         run_state.record_task_result(task, output)
         if show_plan:
             _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
