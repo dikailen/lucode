@@ -63,6 +63,8 @@ def render_readonly_command(command: str, settings: RuntimeSettings, workspace_c
         return _render_config(settings)
     if lower in {"/", "/help", "/?"}:
         return render_command_palette(workspace_context=workspace_context)
+    if lower.startswith("/help "):
+        return render_command_palette(normalized.split(maxsplit=1)[1], workspace_context=workspace_context)
     if lower in {"/api", "/refiner"}:
         return render_command_palette(normalized, workspace_context=workspace_context)
     if lower.startswith("/") and len(lower) > 1 and not lower.startswith(("/plan", "/diff", "/rollback", "/new", "/stop", "/exit")):

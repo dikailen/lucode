@@ -117,7 +117,10 @@ def load_tool_event_audit(workspace_root: str | Path | None = None, limit: int =
     if not path.exists():
         return []
     max_items = max(1, min(int(limit or DEFAULT_AUDIT_LIMIT), 100))
-    lines = path.read_text(encoding="utf-8").splitlines()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
     records: list[dict[str, Any]] = []
     for line in lines[-max_items:]:
         try:

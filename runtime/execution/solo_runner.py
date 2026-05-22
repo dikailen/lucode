@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
+from planning.planner_schema import PlannedTask
 from runtime.agents.factory import AgentFactory
 from runtime.config.settings import RuntimeSettings
+from runtime.execution.inline_context import _inline_project_file_context
+from runtime.execution.run_context import RunContextStore
 from runtime.safety.privacy import PrivacyPolicy
 
 
@@ -148,6 +152,7 @@ async def run_solo_request(
     hooks,
     run_agent,
     settings: RuntimeSettings | None = None,
+    project_root: Path | None = None,
 ) -> str:
     """Run one tool-capable Agent without planner/refiner/synthesizer."""
 
@@ -157,10 +162,48 @@ async def run_solo_request(
     mcp_ids = _solo_mcp_ids_for_input(run_input, settings)
     if "project_filesystem_readonly" in mcp_ids:
         mcp_manager.set_readonly_budget_profile("project_filesystem_readonly", SOLO_READONLY_BUDGET_PROFILE)
+    run_context = RunContextStore(project_root) if project_root else None
+    run_input = _solo_input_with_inline_context(run_input, model_id, project_root, run_context)
     servers = await mcp_manager.get_many(mcp_ids)
     agent = factory.create_solo_agent(model_id, mcp_servers=servers)
     result = await run_agent(agent, run_input, hooks, max_turns=20)
-    return str(result.final_output)
+    summary = run_context.render_for_task() if run_context else ""
+    return SoloExecutionResult(str(result.final_output), run_context_summary=summary)
+
+
+class SoloExecutionResult(str):
+    """String-compatible solo output with optional shared context metadata."""
+
+    def __new__(cls, value: str, *, run_context_summary: str = ""):
+        obj = str.__new__(cls, str(value or ""))
+        obj.run_context_summary = str(run_context_summary or "")
+        return obj
+
+
+def _solo_input_with_inline_context(
+    run_input: str,
+    model_id: str,
+    project_root: Path | None,
+    run_context: RunContextStore | None,
+) -> str:
+    if project_root is None or run_context is None:
+        return run_input
+    task = PlannedTask(
+        id="solo_context",
+        title="solo inline context",
+        instruction=run_input,
+        skill_id="project_explorer",
+        model=model_id,
+        mcp=["project_filesystem_readonly"],
+    )
+    inline_context = _inline_project_file_context(project_root, task, run_input, run_context=run_context)
+    if not inline_context.strip():
+        return run_input
+    return (
+        f"{run_input}\n\n"
+        "下面是系统已经只读读取到的项目文件片段，请基于这些真实上下文回答：\n"
+        f"{inline_context}"
+    )
 
 
 def _solo_mcp_ids_for_input(user_input: str, settings: RuntimeSettings) -> list[str]:

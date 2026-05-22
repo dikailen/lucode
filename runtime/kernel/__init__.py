@@ -20,6 +20,7 @@ class KernelResponse:
     stopped: bool = False
     turn_status: str = "完成"
     mcp_ids_used: list[str] = field(default_factory=list)
+    run_context_summary: str = ""
     output_already_printed: bool = False
     _summary_printer: Callable[[], None] | None = field(default=None, repr=False)
 
@@ -52,6 +53,7 @@ class KernelFacade:
         from runtime.config.settings import RuntimeSettings
         from runtime.kernel.session import create_token_logger_hooks
         from runtime.kernel.strategies import ExecutionContext, create_execution_strategy
+        from runtime.ui.output_visibility import streamed_output_is_sufficient
 
         user_input = str(prompt or "").strip()
         if not user_input:
@@ -92,11 +94,13 @@ class KernelFacade:
                 )
             )
             started_mcp_ids = list(mcp_manager.started_ids)
+            run_context_summary = str(getattr(output, "run_context_summary", "") or "")
 
         return KernelResponse(
             final_output=str(output or ""),
             turn_status="完成",
             mcp_ids_used=started_mcp_ids,
-            output_already_printed=bool(getattr(hooks, "streamed_output_seen", False)),
+            run_context_summary=run_context_summary,
+            output_already_printed=streamed_output_is_sufficient(hooks),
             _summary_printer=hooks.print_summary,
         )

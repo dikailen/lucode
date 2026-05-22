@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from lucode.shell.input_adapter import ConsoleChoice, ConsoleFormField, ConsoleFormResult, RuntimeCommandSession
@@ -39,6 +39,7 @@ from runtime.config.connect_wizard import (
     render_connect_wizard_snapshot,
 )
 from runtime.context.semantic_compaction import compact_messages_tiered
+from runtime.history import HistoryFacade, HistoryStore, render_history_panel, run_history_browser
 from runtime.kernel.session import create_token_logger_hooks
 from runtime.sessions import render_resume_preview, render_session_list
 from runtime.ui.welcome import render_welcome_dashboard
@@ -71,6 +72,7 @@ async def handle_slash_command(
     checkpoint_manager,
     session_store=None,
     current_session_id: str | None = None,
+    last_run_context_summary: str = "",
 ) -> SlashCommandResult:
     if is_exit_command(user_input):
         print("已退出。")
@@ -81,12 +83,9 @@ async def handle_slash_command(
         return SlashCommandResult(handled=True)
 
     if is_new_command(user_input):
-        new_session_id = session_store.start_session() if session_store is not None else None
         print("已创建新对话，历史上下文已清空。")
-        if new_session_id:
-            print(f"当前会话：{new_session_id}")
         print(render_welcome_dashboard(workspace_context, runtime_settings, use_color=use_color, show_logo=show_logo))
-        return SlashCommandResult(handled=True, reset_recent_turns=True, session_id=new_session_id)
+        return SlashCommandResult(handled=True, reset_recent_turns=True, session_id="")
 
     if not user_input:
         return SlashCommandResult()
@@ -100,6 +99,21 @@ async def handle_slash_command(
             model_registry=model_registry,
             runtime_settings=runtime_settings,
         )
+
+    if lower_input == "/history" or lower_input.startswith("/history "):
+        return await _handle_history_command(
+            user_input,
+            console=console,
+            session_store=session_store,
+            current_session_id=current_session_id,
+            workspace_context=workspace_context,
+            model_registry=model_registry,
+            runtime_settings=runtime_settings,
+        )
+
+    if lower_input == "/context":
+        print(_render_last_run_context(last_run_context_summary))
+        return SlashCommandResult(handled=True)
 
     if lower_input == "/models":
         if getattr(console, "interactive", False):
@@ -181,6 +195,20 @@ async def handle_slash_command(
         return SlashCommandResult(handled=True)
 
     return SlashCommandResult()
+
+
+def _render_last_run_context(summary: str) -> str:
+    text = str(summary or "").strip()
+    if not text:
+        return "最近一轮共享上下文：暂无记录。先执行一个会读取文件或工具结果的任务，再输入 /context 查看。"
+    return "最近一轮共享上下文\n" + text
+
+
+def _history_facade_for_session_store(session_store) -> HistoryFacade:
+    workspace_root = session_store.workspace_root
+    if isinstance(session_store, HistoryStore):
+        return HistoryFacade(workspace_root, history_store=session_store)
+    return HistoryFacade(workspace_root, session_store=session_store)
 
 
 async def _handle_model_tuner_session(*, console, runtime_settings, workspace_context, use_color: bool | None, show_logo: bool) -> None:
@@ -1007,35 +1035,313 @@ async def _handle_resume_command(
         print("当前运行环境没有启用会话存储。")
         return SlashCommandResult(handled=True)
 
+    facade = _history_facade_for_session_store(session_store)
+    session_view = facade.as_session_store()
     selector = user_input.split(maxsplit=1)[1].strip() if len(user_input.split(maxsplit=1)) > 1 else ""
+    include_context_summary = False
+    if selector.lower().startswith(("with-context", "context")):
+        include_context_summary = True
+        selector = selector.split(maxsplit=1)[1].strip() if len(selector.split(maxsplit=1)) > 1 else "last"
     if not selector or selector.lower() == "list":
-        print(render_session_list(session_store))
+        print(render_session_list(session_view))
         return SlashCommandResult(handled=True)
 
     try:
-        session_id = session_store.resolve_session_id(selector)
+        session_id = facade.resolve(selector)
     except ValueError as exc:
         print(f"恢复失败：{exc}")
-        print(render_session_list(session_store))
+        print(render_session_list(session_view))
         return SlashCommandResult(handled=True)
 
     if not session_id:
         print(f"没有找到会话：{selector}")
-        print(render_session_list(session_store))
+        print(render_session_list(session_view))
         return SlashCommandResult(handled=True)
 
+    return await _resume_session_result(
+        session_id,
+        session_store=session_view,
+        current_session_id=current_session_id,
+        model_registry=model_registry,
+        runtime_settings=runtime_settings,
+        include_context_summary=include_context_summary,
+    )
+
+
+async def _handle_history_command(
+    user_input: str,
+    *,
+    console,
+    session_store,
+    current_session_id: str | None,
+    workspace_context,
+    model_registry,
+    runtime_settings,
+) -> SlashCommandResult:
+    if session_store is None:
+        print("当前运行环境没有启用会话存储。")
+        return SlashCommandResult(handled=True)
+
+    facade = _history_facade_for_session_store(session_store)
+    session_view = facade.as_session_store()
+    selector = user_input.split(maxsplit=1)[1].strip() if len(user_input.split(maxsplit=1)) > 1 else ""
+    if selector.lower().startswith("search"):
+        query = selector.split(maxsplit=1)[1].strip() if len(selector.split(maxsplit=1)) > 1 else ""
+        return _handle_history_search_command(
+            query,
+            facade=facade,
+            workspace_context=workspace_context,
+            current_session_id=current_session_id,
+        )
+    if selector.lower().startswith("export"):
+        target = selector.split(maxsplit=1)[1].strip() if len(selector.split(maxsplit=1)) > 1 else ""
+        return await _handle_history_export_command(
+            target,
+            console=console,
+            facade=facade,
+            workspace_context=workspace_context,
+            current_session_id=current_session_id,
+        )
+    if selector.lower().startswith(("remove", "delete", "rm")):
+        target = selector.split(maxsplit=1)[1].strip() if len(selector.split(maxsplit=1)) > 1 else ""
+        return await _handle_history_remove_command(
+            target,
+            console=console,
+            facade=facade,
+            workspace_context=workspace_context,
+            current_session_id=current_session_id,
+        )
+    include_context_summary = False
+    if selector.lower().startswith(("with-context", "context")):
+        include_context_summary = True
+        selector = selector.split(maxsplit=1)[1].strip() if len(selector.split(maxsplit=1)) > 1 else "last"
+    if selector:
+        try:
+            session_id = facade.resolve(selector)
+        except ValueError as exc:
+            print(f"历史恢复失败：{exc}")
+            print(render_history_panel(workspace_root=workspace_context.workspace_root, items=facade.list_items(limit=12)))
+            return SlashCommandResult(handled=True)
+        if not session_id:
+            print(f"没有找到历史会话：{selector}")
+            print(render_history_panel(workspace_root=workspace_context.workspace_root, items=facade.list_items(limit=12)))
+            return SlashCommandResult(handled=True)
+        return await _resume_session_result(
+            session_id,
+            session_store=session_view,
+            current_session_id=current_session_id,
+            model_registry=model_registry,
+            runtime_settings=runtime_settings,
+            include_context_summary=include_context_summary,
+        )
+
+    items = facade.list_items(limit=20)
+    if getattr(console, "interactive", False):
+        selection = await run_history_browser(
+            console=console,
+            facade=facade,
+            workspace_root=workspace_context.workspace_root,
+        )
+        if selection.action != "resume" or not selection.history_id:
+            print("已退出历史面板。")
+            return SlashCommandResult(handled=True, session_id=current_session_id)
+        return await _resume_session_result(
+            selection.history_id,
+            session_store=session_view,
+            current_session_id=current_session_id,
+            model_registry=model_registry,
+            runtime_settings=runtime_settings,
+        )
+
+    preview = facade.preview(items[0].history_id) if items else None
+    print(
+        render_history_panel(
+            workspace_root=workspace_context.workspace_root,
+            items=items,
+            selected_index=0,
+            preview=preview,
+        )
+    )
+    return SlashCommandResult(handled=True, session_id=current_session_id)
+
+
+def _handle_history_search_command(
+    query: str,
+    *,
+    facade: HistoryFacade,
+    workspace_context,
+    current_session_id: str | None,
+) -> SlashCommandResult:
+    if not query:
+        print(render_history_panel(workspace_root=workspace_context.workspace_root, items=facade.list_items(limit=12), message="请输入 /history search <关键词>。"))
+        return SlashCommandResult(handled=True, session_id=current_session_id)
+    items = facade.search(query, limit=20)
+    preview = facade.preview(items[0].history_id) if items else None
+    message = f"搜索：{query}，命中 {len(items)} 个会话。" if items else f"搜索：{query}，没有命中历史会话。"
+    print(
+        render_history_panel(
+            workspace_root=workspace_context.workspace_root,
+            items=items,
+            selected_index=0,
+            preview=preview,
+            message=message,
+            highlight_terms=query.split(),
+            footer="输入 /history <会话ID前缀> 恢复，/history export <会话ID前缀> 导出",
+        )
+    )
+    return SlashCommandResult(handled=True, session_id=current_session_id)
+
+
+async def _handle_history_export_command(
+    selector: str,
+    *,
+    console,
+    facade: HistoryFacade,
+    workspace_context,
+    current_session_id: str | None,
+) -> SlashCommandResult:
+    if not selector and getattr(console, "interactive", False):
+        selection = await run_history_browser(
+            console=console,
+            facade=facade,
+            workspace_root=workspace_context.workspace_root,
+            purpose="export",
+        )
+        if selection.action != "resume" or not selection.history_id:
+            print("已取消导出历史会话。")
+            return SlashCommandResult(handled=True, session_id=current_session_id)
+        selector = selection.history_id
+    selector = selector or "last"
+    try:
+        export_path = facade.export(selector)
+    except ValueError as exc:
+        print(f"导出失败：{exc}")
+        return SlashCommandResult(handled=True, session_id=current_session_id)
+    print(f"已导出历史会话：{export_path}")
+    return SlashCommandResult(handled=True, session_id=current_session_id)
+
+
+async def _handle_history_remove_command(
+    selector: str,
+    *,
+    console,
+    facade: HistoryFacade,
+    workspace_context,
+    current_session_id: str | None,
+) -> SlashCommandResult:
+    items = facade.list_items(limit=20)
+    if not items:
+        print(render_history_panel(workspace_root=workspace_context.workspace_root, items=[], message="暂无可删除历史。"))
+        return SlashCommandResult(handled=True, session_id=current_session_id)
+
+    session_id = None
+    if selector:
+        try:
+            session_id = facade.resolve(selector)
+        except ValueError as exc:
+            print(f"删除失败：{exc}")
+            print(render_history_panel(workspace_root=workspace_context.workspace_root, items=items))
+            return SlashCommandResult(handled=True, session_id=current_session_id)
+    elif getattr(console, "interactive", False):
+        selection = await run_history_browser(
+            console=console,
+            facade=facade,
+            workspace_root=workspace_context.workspace_root,
+            purpose="remove",
+        )
+        if selection.action == "resume" and selection.history_id:
+            session_id = selection.history_id
+    else:
+        print(render_history_panel(workspace_root=workspace_context.workspace_root, items=items, message="请使用 /history remove <会话ID前缀> 删除。"))
+        return SlashCommandResult(handled=True, session_id=current_session_id)
+
+    if not session_id:
+        print("已取消删除历史会话。")
+        return SlashCommandResult(handled=True, session_id=current_session_id)
+
+    preview = facade.preview(session_id)
+    if not await _confirm_history_delete(console, preview):
+        print("已取消删除历史会话。")
+        return SlashCommandResult(handled=True, session_id=current_session_id)
+
+    try:
+        deleted = facade.delete(session_id)
+    except ValueError as exc:
+        print(f"删除失败：{exc}")
+        return SlashCommandResult(handled=True, session_id=current_session_id)
+    label = deleted.title or preview.last_user or session_id
+    if deleted.deleted:
+        print(f"已删除历史会话：{label} ({session_id})")
+    else:
+        print(f"历史会话文件已不存在：{label} ({session_id})")
+    next_session_id = None if current_session_id == session_id else current_session_id
+    return SlashCommandResult(handled=True, session_id=next_session_id or "")
+
+
+async def _confirm_history_delete(console, preview) -> bool:
+    title = preview.last_user or preview.first_user or preview.session_id
+    choices = [
+        ConsoleChoice("no", "取消", f"保留：{title}"),
+        ConsoleChoice("yes", "确认删除", f"删除：{title}"),
+    ]
+    choice_reader = getattr(console, "read_choice_line", None)
+    if callable(choice_reader):
+        try:
+            value = await choice_reader(
+                "\n确认删除历史> ",
+                choices,
+                bottom_toolbar="↑↓ 选择，Enter 确认；默认取消，删除后会移除本地 JSONL 会话文件",
+                reserve_space_for_menu=6,
+            )
+        except TypeError:
+            value = await choice_reader("\n确认删除历史> ", choices)
+    else:
+        print(f"确认删除历史会话：{title}")
+        reader = getattr(console, "read_line", None)
+        value = await reader("输入 yes 确认删除，其它输入取消> ") if callable(reader) else "no"
+    return str(value or "").strip().lower() in {"yes", "y", "确认", "确认删除"}
+
+
+async def _resume_session_result(
+    session_id: str,
+    *,
+    session_store,
+    current_session_id: str | None,
+    model_registry,
+    runtime_settings,
+    include_context_summary: bool = False,
+) -> SlashCommandResult:
     compacted = await compact_messages_tiered(
         session_store.load_messages(session_id),
         tail_messages=6,
         model_registry=model_registry,
         runtime_settings=runtime_settings,
     )
+    context_summary_attached = False
+    if include_context_summary:
+        context_loader = getattr(session_store, "load_context_summary", None)
+        context_summary = context_loader(session_id) if callable(context_loader) else ""
+        context_summary = str(context_summary or "").strip()
+        if context_summary:
+            context_summary_attached = True
+            summary = "\n\n".join(
+                part
+                for part in [
+                    compacted.summary,
+                    "已附加历史 Context 摘要。它是背景，不是本轮新任务。",
+                    context_summary,
+                ]
+                if str(part or "").strip()
+            )
+            compacted = replace(compacted, summary=summary)
     turns = compacted.recent_turns
     if not turns:
         print(f"会话没有可恢复消息：{session_id}")
         return SlashCommandResult(handled=True, session_id=current_session_id)
 
     print(render_resume_preview(session_store, session_id, compacted_context=compacted))
+    if context_summary_attached:
+        print("已附加历史 Context 摘要。")
     return SlashCommandResult(
         handled=True,
         resumed_recent_turns=turns,

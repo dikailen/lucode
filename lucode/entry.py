@@ -380,9 +380,10 @@ def _handle_readonly(command: str, context) -> int:
 
 
 def _handle_session(context) -> int:
-    from runtime.sessions import SessionStore, render_session_list
+    from runtime.history import HistoryFacade
+    from runtime.sessions import render_session_list
 
-    print(render_session_list(SessionStore(context.workspace_root), limit=10))
+    print(render_session_list(HistoryFacade(context.workspace_root).as_session_store(), limit=10))
     return 0
 
 

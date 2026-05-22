@@ -537,6 +537,20 @@ class CommandAnalyzerTests(unittest.TestCase):
 
 
 class ToolHookEventTests(unittest.TestCase):
+    def test_load_tool_event_audit_tolerates_disappearing_file(self):
+        from runtime.hooks import load_tool_event_audit
+
+        workspace = TEMP_ROOT / f"audit_disappearing_workspace_{uuid.uuid4().hex}"
+        audit_file = workspace / ".lucode" / "audit" / "tool_events.jsonl"
+        audit_file.parent.mkdir(parents=True)
+        audit_file.write_text('{"event_type":"pre_tool_use"}\n', encoding="utf-8")
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        with patch.object(Path, "read_text", side_effect=FileNotFoundError):
+            records = load_tool_event_audit(workspace)
+
+        self.assertEqual(records, [])
+
     def test_tool_hook_event_summarizes_command_risk_and_redacts_secrets(self):
         from runtime.hooks import build_tool_event
 
@@ -1590,6 +1604,19 @@ class RuntimeHelpersTests(unittest.TestCase):
         self.assertEqual(summaries[0].session_id, session_id)
         self.assertIn("LUCODE-SESSION", summaries[0].last_user)
 
+    def test_session_store_start_session_keeps_chinese_keyword_slug(self):
+        from runtime.sessions.store import SessionStore
+
+        workspace = TEMP_ROOT / f"session_chinese_slug_{uuid.uuid4().hex}"
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        store = SessionStore(workspace)
+
+        session_id = store.start_session("读取 README.md 并总结项目结构")
+        store.append_message(session_id, "user", "读取 README.md 并总结项目结构")
+
+        self.assertIn("读取-readme-md-并总结项目结构", session_id)
+        self.assertTrue((workspace / ".lucode" / "sessions" / f"{session_id}.jsonl").exists())
+
     def test_session_store_loads_compacted_resume_context(self):
         from runtime.sessions.store import SessionStore
 
@@ -1637,6 +1664,834 @@ class RuntimeHelpersTests(unittest.TestCase):
         self.assertEqual(compacted.summary_source, "semantic")
         self.assertIn("TIERED-42", compacted.summary)
         self.assertEqual([turn["content"] for turn in compacted.recent_turns], ["最近需求：继续", "最近回答：可以"])
+
+    def test_history_facade_lists_legacy_sessions_and_previews_context_summary(self):
+        from runtime.history import HistoryFacade, render_history_panel
+        from runtime.sessions.store import SessionStore
+
+        workspace = TEMP_ROOT / f"history_facade_{uuid.uuid4().hex}"
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        store = SessionStore(workspace)
+        session_id = store.start_session()
+        store.append_message(
+            session_id,
+            "user",
+            "读取 README.md 和 pyproject.toml，然后总结项目。"
+            + "请保持只读，不要修改文件。请把项目定位、入口、依赖和使用方式都整理出来。" * 4,
+        )
+        store.append_message(
+            session_id,
+            "assistant",
+            "Lucode 是中文优先的终端工程代理。",
+            metadata={
+                "run_context_summary": "本轮共享上下文：\n已读文件：\n- README.md\n- pyproject.toml",
+            },
+        )
+
+        facade = HistoryFacade(workspace, session_store=store)
+        items = facade.list_items(limit=5)
+        preview = facade.preview(session_id)
+        panel = render_history_panel(
+            workspace_root=workspace,
+            items=items,
+            selected_index=0,
+            preview=preview,
+        )
+
+        self.assertEqual(items[0].history_id, session_id)
+        self.assertEqual(items[0].storage_kind, "legacy_session")
+        self.assertIn("读取 README.md", items[0].title)
+        self.assertIn("Lucode 是中文优先", preview.last_assistant)
+        self.assertIn("README.md", preview.run_context_summary)
+        self.assertIn("Lucode History", panel)
+        self.assertIn("pyproject.toml", panel)
+        self.assertNotIn("[truncated", panel)
+        _assert_box_lines_aligned(self, panel, label="/history")
+
+    def test_record_session_turn_writes_run_context_summary_metadata(self):
+        from lucode.shell.chat_loop import _record_session_turn
+        from runtime.history import HistoryStore
+
+        workspace = TEMP_ROOT / f"history_metadata_{uuid.uuid4().hex}"
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        store = HistoryStore(workspace)
+        session_id = store.start_session()
+
+        _record_session_turn(
+            store,
+            session_id,
+            "读取 README.md",
+            "已总结。",
+            execution_mode="solo",
+            stopped=False,
+            started_mcp_ids=["project_filesystem_readonly"],
+            run_context_summary="本轮共享上下文：README.md",
+        )
+
+        events = store.load_events(session_id)
+        assistant = [event for event in events if event.get("role") == "assistant"][-1]
+        self.assertEqual(assistant["metadata"]["run_context_summary"], "本轮共享上下文：README.md")
+        self.assertTrue((workspace / ".lucode" / "history" / "sessions" / f"{session_id}.jsonl").exists())
+        self.assertFalse((workspace / ".lucode" / "sessions" / f"{session_id}.jsonl").exists())
+
+    def test_resume_session_result_can_restore_canonical_history_session(self):
+        from lucode.shell.slash_commands import _resume_session_result
+        from runtime.history import HistoryStore
+
+        workspace = TEMP_ROOT / f"history_resume_canonical_{uuid.uuid4().hex}"
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        store = HistoryStore(workspace)
+        session_id = store.start_session("canonical resume")
+        store.append_message(session_id, "user", "记住 CANONICAL-HISTORY-42")
+        store.append_message(session_id, "assistant", "已记住 CANONICAL-HISTORY-42")
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            result = asyncio.run(
+                _resume_session_result(
+                    session_id,
+                    session_store=store,
+                    current_session_id=None,
+                    model_registry=object(),
+                    runtime_settings=object(),
+                )
+            )
+
+        self.assertTrue(result.handled)
+        self.assertEqual(result.session_id, session_id)
+        self.assertTrue(any("CANONICAL-HISTORY-42" in turn["content"] for turn in result.resumed_recent_turns or []))
+
+    def test_history_command_is_registered_for_slash_palette(self):
+        from runtime.commands.registry import command_specs, search_command_specs
+
+        specs = command_specs()
+        history = next(spec for spec in specs if spec.command == "/history")
+
+        self.assertEqual(history.group, "会话")
+        self.assertIn("历史", history.description)
+        self.assertEqual(search_command_specs("/his")[0].command, "/history")
+        self.assertTrue(any(spec.command == "/history search" for spec in specs))
+        self.assertTrue(any(spec.command == "/history export" for spec in specs))
+        self.assertTrue(any(spec.command == "/history remove" for spec in specs))
+
+    def test_history_slash_command_renders_noninteractive_panel(self):
+        from lucode.shell.slash_commands import handle_slash_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.sessions.store import SessionStore
+
+        workspace = TEMP_ROOT / f"history_slash_{uuid.uuid4().hex}"
+        app_home = TEMP_ROOT / f"history_slash_app_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        app_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        store = SessionStore(workspace)
+        session_id = store.start_session()
+        store.append_message(session_id, "user", "分析 README.md")
+        store.append_message(session_id, "assistant", "README 已分析")
+
+        class FakeConsole:
+            interactive = False
+
+        class FakeCheckpoint:
+            def render_status(self):
+                return ""
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "history_slash_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            result = asyncio.run(
+                handle_slash_command(
+                    "/history",
+                    model_registry=object(),
+                    runtime_settings=RuntimeSettings(),
+                    console=FakeConsole(),
+                    app_home=app_home,
+                    project_root=workspace,
+                    workspace_context=context,
+                    use_color=False,
+                    show_logo=False,
+                    started_mcp_ids=[],
+                    checkpoint_manager=FakeCheckpoint(),
+                    session_store=store,
+                    current_session_id=session_id,
+                )
+            )
+
+        self.assertTrue(result.handled)
+        self.assertIn("Lucode History", buffer.getvalue())
+        self.assertIn("分析 README.md", buffer.getvalue())
+
+    def test_history_slash_command_interactive_selection_restores_session(self):
+        from lucode.shell.slash_commands import handle_slash_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.sessions.store import SessionStore
+
+        workspace = TEMP_ROOT / f"history_interactive_{uuid.uuid4().hex}"
+        app_home = TEMP_ROOT / f"history_interactive_app_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        app_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        store = SessionStore(workspace)
+        session_id = store.start_session()
+        store.append_message(session_id, "user", "记住历史编号 HISTORY-42")
+        store.append_message(session_id, "assistant", "已记住 HISTORY-42")
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.toolbars = []
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                del prompt
+                self.toolbars.append(str(kwargs.get("bottom_toolbar") or ""))
+                return choices[0].command
+
+        class FakeCheckpoint:
+            def render_status(self):
+                return ""
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "history_interactive_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        console = FakeConsole()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            result = asyncio.run(
+                handle_slash_command(
+                    "/history",
+                    model_registry=object(),
+                    runtime_settings=RuntimeSettings(),
+                    console=console,
+                    app_home=app_home,
+                    project_root=workspace,
+                    workspace_context=context,
+                    use_color=False,
+                    show_logo=False,
+                    started_mcp_ids=[],
+                    checkpoint_manager=FakeCheckpoint(),
+                    session_store=store,
+                    current_session_id="current-session",
+                )
+        )
+
+        self.assertTrue(result.handled)
+        self.assertEqual(result.session_id, session_id)
+        self.assertTrue(any("HISTORY-42" in turn["content"] for turn in result.resumed_recent_turns or []))
+        self.assertTrue(any("恢复" in toolbar for toolbar in console.toolbars))
+        self.assertFalse(any("删除" in toolbar for toolbar in console.toolbars))
+        self.assertIn("已恢复会话", buffer.getvalue())
+
+    def test_history_facade_delete_removes_legacy_session_file(self):
+        from runtime.history import HistoryFacade
+        from runtime.sessions.store import SessionStore
+
+        workspace = TEMP_ROOT / f"history_delete_facade_{uuid.uuid4().hex}"
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        store = SessionStore(workspace)
+        session_id = store.start_session("Delete README session")
+        store.append_message(session_id, "user", "Delete README session")
+        store.append_message(session_id, "assistant", "delete candidate")
+        session_file = workspace / ".lucode" / "sessions" / f"{session_id}.jsonl"
+
+        deleted = HistoryFacade(workspace, session_store=store).delete(session_id)
+
+        self.assertEqual(deleted.history_id, session_id)
+        self.assertFalse(session_file.exists())
+
+    def test_history_store_writes_canonical_history_session_and_index(self):
+        from runtime.history import HistoryStore
+
+        workspace = TEMP_ROOT / f"history_store_{uuid.uuid4().hex}"
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        store = HistoryStore(workspace)
+        session_id = store.start_session("读取 README 设计历史功能")
+
+        store.append_message(session_id, "user", "读取 README 设计历史功能")
+        store.append_message(
+            session_id,
+            "assistant",
+            "已完成历史功能设计。",
+            metadata={"run_context_summary": "Context: README.md"},
+        )
+
+        session_file = workspace / ".lucode" / "history" / "sessions" / f"{session_id}.jsonl"
+        index_file = workspace / ".lucode" / "history" / "index.jsonl"
+        items = store.list_sessions(limit=5)
+        preview_events = store.load_events(session_id)
+
+        self.assertTrue(session_file.exists())
+        self.assertTrue(index_file.exists())
+        self.assertEqual(items[0].session_id, session_id)
+        self.assertEqual(items[0].path, session_file)
+        self.assertIn("读取 README", items[0].last_user)
+        self.assertEqual(preview_events[-1]["metadata"]["run_context_summary"], "Context: README.md")
+
+    def test_history_facade_lists_canonical_before_legacy_sessions(self):
+        from runtime.history import HistoryFacade, HistoryStore
+        from runtime.sessions.store import SessionStore
+
+        workspace = TEMP_ROOT / f"history_mixed_{uuid.uuid4().hex}"
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        legacy_store = SessionStore(workspace)
+        legacy_id = legacy_store.start_session("legacy session")
+        legacy_store.append_message(legacy_id, "user", "legacy session")
+        legacy_store.append_message(legacy_id, "assistant", "legacy answer")
+        history_store = HistoryStore(workspace)
+        canonical_id = history_store.start_session("canonical session")
+        history_store.append_message(canonical_id, "user", "canonical session")
+        history_store.append_message(canonical_id, "assistant", "canonical answer")
+
+        facade = HistoryFacade(workspace)
+        items = facade.list_items(limit=10)
+        kinds_by_id = {item.session_id: item.storage_kind for item in items}
+
+        self.assertIn(canonical_id, kinds_by_id)
+        self.assertIn(legacy_id, kinds_by_id)
+        self.assertEqual(kinds_by_id[canonical_id], "history")
+        self.assertEqual(kinds_by_id[legacy_id], "legacy_session")
+        self.assertEqual(facade.resolve(canonical_id[:28]), canonical_id)
+        self.assertEqual(facade.resolve(legacy_id[:28]), legacy_id)
+
+    def test_entry_session_command_lists_canonical_history_sessions(self):
+        from lucode.entry import _handle_session
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.history import HistoryStore
+
+        workspace = TEMP_ROOT / f"history_entry_session_{uuid.uuid4().hex}"
+        app_home = TEMP_ROOT / f"history_entry_session_app_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        app_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        store = HistoryStore(workspace)
+        session_id = store.start_session("entry session history")
+        store.append_message(session_id, "user", "entry session history")
+        store.append_message(session_id, "assistant", "entry answer")
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "history_entry_session_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = _handle_session(context)
+
+        self.assertEqual(code, 0)
+        self.assertIn(session_id[:16], buffer.getvalue())
+        self.assertIn(".lucode", buffer.getvalue())
+
+    def test_history_remove_command_requires_confirmation_and_can_cancel(self):
+        from lucode.shell.slash_commands import handle_slash_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.sessions.store import SessionStore
+
+        workspace = TEMP_ROOT / f"history_remove_cancel_{uuid.uuid4().hex}"
+        app_home = TEMP_ROOT / f"history_remove_cancel_app_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        app_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        store = SessionStore(workspace)
+        session_id = store.start_session("Remove cancel session")
+        store.append_message(session_id, "user", "Remove cancel session")
+        store.append_message(session_id, "assistant", "keep me")
+        session_file = workspace / ".lucode" / "sessions" / f"{session_id}.jsonl"
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.lines = iter(["no"])
+                self.prompts = []
+                self.choice_displays = []
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                del kwargs
+                self.prompts.append(prompt)
+                self.choice_displays.append("\n".join(choice.display + choice.meta for choice in choices))
+                return next(self.lines)
+
+        class FakeCheckpoint:
+            def render_status(self):
+                return ""
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "history_remove_cancel_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        console = FakeConsole()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            result = asyncio.run(
+                handle_slash_command(
+                    f"/history remove {session_id[:12]}",
+                    model_registry=object(),
+                    runtime_settings=RuntimeSettings(),
+                    console=console,
+                    app_home=app_home,
+                    project_root=workspace,
+                    workspace_context=context,
+                    use_color=False,
+                    show_logo=False,
+                    started_mcp_ids=[],
+                    checkpoint_manager=FakeCheckpoint(),
+                    session_store=store,
+                    current_session_id="current-session",
+                )
+            )
+
+        self.assertTrue(result.handled)
+        self.assertTrue(session_file.exists())
+        self.assertIn("确认删除历史", "".join(console.prompts))
+        self.assertIn("Remove cancel session", "\n".join(console.choice_displays))
+        self.assertIn("已取消删除历史会话", buffer.getvalue())
+
+    def test_history_remove_without_selector_uses_delete_browser_footer(self):
+        from lucode.shell.slash_commands import handle_slash_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.sessions.store import SessionStore
+
+        workspace = TEMP_ROOT / f"history_remove_browser_{uuid.uuid4().hex}"
+        app_home = TEMP_ROOT / f"history_remove_browser_app_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        app_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        store = SessionStore(workspace)
+        session_id = store.start_session("Remove browser session")
+        store.append_message(session_id, "user", "Remove browser session")
+        store.append_message(session_id, "assistant", "keep until confirmed")
+        session_file = workspace / ".lucode" / "sessions" / f"{session_id}.jsonl"
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.toolbars = []
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                del prompt, choices
+                self.toolbars.append(str(kwargs.get("bottom_toolbar") or ""))
+                return "q"
+
+        class FakeCheckpoint:
+            def render_status(self):
+                return ""
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "history_remove_browser_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        console = FakeConsole()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            result = asyncio.run(
+                handle_slash_command(
+                    "/history remove",
+                    model_registry=object(),
+                    runtime_settings=RuntimeSettings(),
+                    console=console,
+                    app_home=app_home,
+                    project_root=workspace,
+                    workspace_context=context,
+                    use_color=False,
+                    show_logo=False,
+                    started_mcp_ids=[],
+                    checkpoint_manager=FakeCheckpoint(),
+                    session_store=store,
+                    current_session_id="current-session",
+                )
+            )
+
+        self.assertTrue(result.handled)
+        self.assertTrue(session_file.exists())
+        self.assertTrue(any("删除" in toolbar for toolbar in console.toolbars))
+        self.assertIn("已取消删除历史会话", buffer.getvalue())
+
+    def test_history_remove_command_deletes_after_confirmation(self):
+        from lucode.shell.slash_commands import handle_slash_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.sessions.store import SessionStore
+
+        workspace = TEMP_ROOT / f"history_remove_confirm_{uuid.uuid4().hex}"
+        app_home = TEMP_ROOT / f"history_remove_confirm_app_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        app_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        store = SessionStore(workspace)
+        session_id = store.start_session("Remove confirmed session")
+        store.append_message(session_id, "user", "Remove confirmed session")
+        store.append_message(session_id, "assistant", "delete me")
+        session_file = workspace / ".lucode" / "sessions" / f"{session_id}.jsonl"
+
+        class FakeConsole:
+            interactive = True
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                del prompt, choices, kwargs
+                return "yes"
+
+        class FakeCheckpoint:
+            def render_status(self):
+                return ""
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "history_remove_confirm_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            result = asyncio.run(
+                handle_slash_command(
+                    f"/history remove {session_id}",
+                    model_registry=object(),
+                    runtime_settings=RuntimeSettings(),
+                    console=FakeConsole(),
+                    app_home=app_home,
+                    project_root=workspace,
+                    workspace_context=context,
+                    use_color=False,
+                    show_logo=False,
+                    started_mcp_ids=[],
+                    checkpoint_manager=FakeCheckpoint(),
+                    session_store=store,
+                    current_session_id="current-session",
+                )
+            )
+
+        self.assertTrue(result.handled)
+        self.assertFalse(session_file.exists())
+        self.assertIn("已删除历史会话", buffer.getvalue())
+        self.assertIn("Remove confirmed session", buffer.getvalue())
+
+    def test_history_facade_search_export_and_context_sidecar(self):
+        from runtime.history import HistoryFacade, HistoryStore
+
+        workspace = TEMP_ROOT / f"history_manage_{uuid.uuid4().hex}"
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        store = HistoryStore(workspace)
+        session_id = store.start_session("Export Search Context")
+        store.append_message(session_id, "user", "请记录关键词 SEARCH-CTX-42")
+        store.append_message(
+            session_id,
+            "assistant",
+            "已记录关键词 SEARCH-CTX-42",
+            metadata={"run_context_summary": "Context: README.md\n关键词 SEARCH-CTX-42"},
+        )
+        facade = HistoryFacade(workspace, history_store=store)
+
+        matches = facade.search("SEARCH-CTX-42", limit=5)
+        export_path = facade.export(session_id)
+        context_path = workspace / ".lucode" / "history" / "contexts" / f"{session_id}.context.jsonl"
+
+        self.assertEqual(matches[0].session_id, session_id)
+        self.assertTrue(export_path.exists())
+        self.assertEqual(export_path.parent, workspace / ".lucode" / "history" / "exports")
+        self.assertIn("SEARCH-CTX-42", export_path.read_text(encoding="utf-8"))
+        self.assertTrue(context_path.exists())
+        self.assertIn("SEARCH-CTX-42", context_path.read_text(encoding="utf-8"))
+        self.assertIn("README.md", facade.load_context_summary(session_id))
+
+    def test_history_search_and_export_slash_commands_render_results(self):
+        from lucode.shell.slash_commands import handle_slash_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.history import HistoryStore
+
+        workspace = TEMP_ROOT / f"history_search_export_{uuid.uuid4().hex}"
+        app_home = TEMP_ROOT / f"history_search_export_app_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        app_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        store = HistoryStore(workspace)
+        session_id = store.start_session("Search Export slash")
+        store.append_message(session_id, "user", "查找命令菜单 SEARCH-SLASH-77")
+        store.append_message(session_id, "assistant", "命令菜单已记录")
+
+        class FakeConsole:
+            interactive = False
+
+        class FakeCheckpoint:
+            def render_status(self):
+                return ""
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "history_search_export_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            search_result = asyncio.run(
+                handle_slash_command(
+                    "/history search SEARCH-SLASH-77",
+                    model_registry=object(),
+                    runtime_settings=RuntimeSettings(),
+                    console=FakeConsole(),
+                    app_home=app_home,
+                    project_root=workspace,
+                    workspace_context=context,
+                    use_color=False,
+                    show_logo=False,
+                    started_mcp_ids=[],
+                    checkpoint_manager=FakeCheckpoint(),
+                    session_store=store,
+                    current_session_id=session_id,
+                )
+            )
+            export_result = asyncio.run(
+                handle_slash_command(
+                    f"/history export {session_id}",
+                    model_registry=object(),
+                    runtime_settings=RuntimeSettings(),
+                    console=FakeConsole(),
+                    app_home=app_home,
+                    project_root=workspace,
+                    workspace_context=context,
+                    use_color=False,
+                    show_logo=False,
+                    started_mcp_ids=[],
+                    checkpoint_manager=FakeCheckpoint(),
+                    session_store=store,
+                    current_session_id=session_id,
+                )
+            )
+
+        output = buffer.getvalue()
+        self.assertTrue(search_result.handled)
+        self.assertTrue(export_result.handled)
+        self.assertIn("SEARCH-SLASH-77", output)
+        self.assertIn("已导出历史会话", output)
+        self.assertTrue((workspace / ".lucode" / "history" / "exports").is_dir())
+
+    def test_history_search_panel_highlights_query_without_breaking_box_width(self):
+        from runtime.history import HistoryStore, render_history_panel
+
+        workspace = TEMP_ROOT / f"history_highlight_{uuid.uuid4().hex}"
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        store = HistoryStore(workspace)
+        session_id = store.start_session("Highlight search")
+        store.append_message(session_id, "user", "请记录关键词 HIGHLIGHT-42")
+        store.append_message(session_id, "assistant", "HIGHLIGHT-42 已记录")
+        item = store.list_sessions(limit=1)[0]
+        old_no_color = os.environ.pop("NO_COLOR", None)
+        self.addCleanup(lambda: _restore_env("NO_COLOR", old_no_color))
+
+        panel = render_history_panel(
+            workspace_root=workspace,
+            items=[
+                __import__("runtime.history", fromlist=["HistoryItem"]).HistoryItem(
+                    history_id=item.session_id,
+                    session_id=item.session_id,
+                    path=item.path,
+                    title=item.last_user,
+                    created_at=item.created_at,
+                    updated_at=item.updated_at,
+                    message_count=item.message_count,
+                    last_user=item.last_user,
+                    last_assistant=item.last_assistant,
+                    storage_kind="history",
+                )
+            ],
+            highlight_terms=["HIGHLIGHT-42"],
+        )
+
+        self.assertIn("\x1b[96;1mHIGHLIGHT-42\x1b[0m", panel)
+        _assert_box_lines_aligned(self, panel, label="/history search highlight")
+
+    def test_history_export_without_selector_uses_interactive_browser_selection(self):
+        from lucode.shell.slash_commands import handle_slash_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.history import HistoryStore
+
+        workspace = TEMP_ROOT / f"history_export_browser_{uuid.uuid4().hex}"
+        app_home = TEMP_ROOT / f"history_export_browser_app_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        app_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        store = HistoryStore(workspace)
+        session_id = store.start_session("Export browser session")
+        store.append_message(session_id, "user", "Export browser session")
+        store.append_message(session_id, "assistant", "export me")
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.toolbars = []
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                del prompt
+                self.toolbars.append(str(kwargs.get("bottom_toolbar") or ""))
+                return choices[0].command
+
+        class FakeCheckpoint:
+            def render_status(self):
+                return ""
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "history_export_browser_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        console = FakeConsole()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            result = asyncio.run(
+                handle_slash_command(
+                    "/history export",
+                    model_registry=object(),
+                    runtime_settings=RuntimeSettings(),
+                    console=console,
+                    app_home=app_home,
+                    project_root=workspace,
+                    workspace_context=context,
+                    use_color=False,
+                    show_logo=False,
+                    started_mcp_ids=[],
+                    checkpoint_manager=FakeCheckpoint(),
+                    session_store=store,
+                    current_session_id="current-session",
+                )
+            )
+
+        export_file = workspace / ".lucode" / "history" / "exports" / f"{session_id}.md"
+        self.assertTrue(result.handled)
+        self.assertTrue(export_file.exists())
+        self.assertIn("已导出历史会话", buffer.getvalue())
+        self.assertTrue(any("导出" in toolbar for toolbar in console.toolbars))
+
+    def test_history_export_browser_numeric_choice_exports_immediately(self):
+        from lucode.shell.slash_commands import handle_slash_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.history import HistoryStore
+
+        workspace = TEMP_ROOT / f"history_export_numeric_{uuid.uuid4().hex}"
+        app_home = TEMP_ROOT / f"history_export_numeric_app_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        app_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        store = HistoryStore(workspace)
+        session_id = store.start_session("Export numeric session")
+        store.append_message(session_id, "user", "Export numeric session")
+        store.append_message(session_id, "assistant", "export by number")
+
+        class FakeConsole:
+            interactive = True
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                del prompt, choices, kwargs
+                return "1"
+
+        class FakeCheckpoint:
+            def render_status(self):
+                return ""
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "history_export_numeric_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = asyncio.run(
+                handle_slash_command(
+                    "/history export",
+                    model_registry=object(),
+                    runtime_settings=RuntimeSettings(),
+                    console=FakeConsole(),
+                    app_home=app_home,
+                    project_root=workspace,
+                    workspace_context=context,
+                    use_color=False,
+                    show_logo=False,
+                    started_mcp_ids=[],
+                    checkpoint_manager=FakeCheckpoint(),
+                    session_store=store,
+                    current_session_id="current-session",
+                )
+            )
+
+        self.assertTrue(result.handled)
+        self.assertTrue((workspace / ".lucode" / "history" / "exports" / f"{session_id}.md").exists())
+
+    def test_resume_session_result_can_include_context_summary_when_requested(self):
+        from lucode.shell.slash_commands import _resume_session_result
+        from runtime.history import HistoryFacade, HistoryStore
+
+        workspace = TEMP_ROOT / f"history_resume_context_{uuid.uuid4().hex}"
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        store = HistoryStore(workspace)
+        session_id = store.start_session("with context")
+        store.append_message(session_id, "user", "旧问题：读取 README.md")
+        store.append_message(
+            session_id,
+            "assistant",
+            "旧回答：README 已读取",
+            metadata={"run_context_summary": "本轮共享上下文：README.md 已读取"},
+        )
+        facade = HistoryFacade(workspace, history_store=store)
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            result = asyncio.run(
+                _resume_session_result(
+                    session_id,
+                    session_store=facade.as_session_store(),
+                    current_session_id=None,
+                    model_registry=object(),
+                    runtime_settings=object(),
+                    include_context_summary=True,
+                )
+            )
+
+        self.assertTrue(result.handled)
+        self.assertIn("README.md 已读取", result.resumed_session_summary or "")
+        self.assertIn("已附加历史 Context 摘要", buffer.getvalue())
 
     def test_main_reconfigures_stdin_to_utf8_for_piped_chinese_input(self):
         source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
@@ -1725,16 +2580,77 @@ class RuntimeHelpersTests(unittest.TestCase):
         self.assertEqual(_stream_delta_text(Wrapper(FakeEvent("response.output_text.delta", "你好"))), "你好")
         self.assertEqual(_stream_delta_text(Wrapper(FakeEvent("response.reasoning_text.delta", "hidden"))), "")
 
+    def test_streaming_runner_records_visible_output_chars(self):
+        import runtime.agent.runner as runner_module
+
+        class FakeData:
+            def __init__(self, delta):
+                self.type = "response.output_text.delta"
+                self.delta = delta
+
+        class FakeEvent:
+            type = "raw_response_event"
+
+            def __init__(self, delta):
+                self.data = FakeData(delta)
+
+        class FakeStreamResult:
+            final_output = "你好，欢迎使用 Lucode。"
+
+            async def stream_events(self):
+                yield FakeEvent("你好")
+                yield FakeEvent("，欢迎使用 Lucode。")
+
+        class FakeRunner:
+            @staticmethod
+            def run_streamed(*args, **kwargs):
+                return FakeStreamResult()
+
+        class Hooks:
+            streamed_output_seen = False
+            streamed_output_chars = 0
+
+        hooks = Hooks()
+        original_runner_class = runner_module.runner_class
+        original_streaming_enabled = runner_module.streaming_enabled
+        runner_module.runner_class = lambda: FakeRunner
+        runner_module.streaming_enabled = lambda: True
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = asyncio.run(runner_module.run_agent_once(object(), "你好", hooks, max_turns=3))
+        finally:
+            runner_module.runner_class = original_runner_class
+            runner_module.streaming_enabled = original_streaming_enabled
+
+        self.assertEqual(result.final_output, "你好，欢迎使用 Lucode。")
+        self.assertTrue(hooks.streamed_output_seen)
+        self.assertEqual(hooks.streamed_output_chars, len("你好，欢迎使用 Lucode。"))
+
     def test_streamed_visible_output_is_not_printed_twice(self):
         from main import _should_print_final_output
 
         class Hooks:
             streamed_output_seen = True
+            streamed_output_chars = 120
 
         self.assertFalse(_should_print_final_output(Hooks(), "你好，我可以帮你分析和修改项目。"))
         self.assertTrue(_should_print_final_output(Hooks(), "本轮执行失败，但程序没有退出。"))
         self.assertTrue(_should_print_final_output(Hooks(), "已拒绝工具调用：run_command。"))
         self.assertTrue(_should_print_final_output(object(), "普通非流式最终答案"))
+
+    def test_short_or_empty_streamed_output_falls_back_to_final_output(self):
+        from main import _should_print_final_output
+
+        class EmptyStreamHooks:
+            streamed_output_seen = True
+            streamed_output_chars = 0
+
+        class TinyStreamHooks:
+            streamed_output_seen = True
+            streamed_output_chars = 2
+
+        self.assertTrue(_should_print_final_output(EmptyStreamHooks(), "你好，我可以帮你分析项目。"))
+        self.assertTrue(_should_print_final_output(TinyStreamHooks(), "你好，我可以帮你分析项目。"))
 
 
 class WorkspaceContextTests(unittest.TestCase):
@@ -4172,6 +5088,36 @@ class LucodeCliEntryTests(unittest.TestCase):
         self.assertTrue(streamed.output_already_printed)
         self.assertFalse(plain.output_already_printed)
 
+    def test_streamed_output_suppression_requires_visible_text(self):
+        from runtime.ui.output_visibility import streamed_output_is_sufficient
+
+        class TinyHooks:
+            streamed_output_seen = True
+            streamed_output_chars = 2
+
+        class EnoughHooks:
+            streamed_output_seen = True
+            streamed_output_chars = 32
+
+        self.assertFalse(streamed_output_is_sufficient(TinyHooks()))
+        self.assertTrue(streamed_output_is_sufficient(EnoughHooks()))
+
+    def test_kernel_response_carries_run_context_summary(self):
+        from runtime.kernel import KernelResponse
+
+        response = KernelResponse(final_output="ok", run_context_summary="本轮共享上下文：README.md")
+
+        self.assertEqual(response.run_context_summary, "本轮共享上下文：README.md")
+
+    def test_help_command_with_filter_renders_command_palette(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+
+        output = render_readonly_command("/help context", RuntimeSettings(), None)
+
+        self.assertIn("/context", output)
+        self.assertIn("查看最近一轮共享上下文摘要", output)
+
     def test_kernel_facade_uses_strategy_factory_boundary(self):
         source = (PROJECT_ROOT / "runtime" / "kernel" / "__init__.py").read_text(encoding="utf-8")
         strategies_source = (PROJECT_ROOT / "runtime" / "kernel" / "strategies" / "__init__.py").read_text(encoding="utf-8")
@@ -4280,8 +5226,16 @@ class LucodeCliEntryTests(unittest.TestCase):
 
         calls = []
 
-        async def fake_run_solo_request(run_input, model_registry, mcp_manager, hooks, run_agent, settings=None):
-            calls.append((run_input, model_registry, mcp_manager, hooks, run_agent, settings.execution_mode))
+        async def fake_run_solo_request(
+            run_input,
+            model_registry,
+            mcp_manager,
+            hooks,
+            run_agent,
+            settings=None,
+            project_root=None,
+        ):
+            calls.append((run_input, model_registry, mcp_manager, hooks, run_agent, settings.execution_mode, project_root))
             return "solo:ok"
 
         original = solo_runner.run_solo_request
@@ -4303,6 +5257,7 @@ class LucodeCliEntryTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], "solo task")
         self.assertEqual(calls[0][5], "solo")
+        self.assertEqual(calls[0][6], PROJECT_ROOT)
 
     def test_solo_mode_remains_compatibility_wrapper(self):
         from runtime.execution.solo_runner import (
@@ -4633,6 +5588,73 @@ class RuntimeInterruptTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.final_output, "finished")
         self.assertEqual(console.deferred, ["下一条真实问题"])
+
+    async def test_runtime_session_uses_raw_control_reader_during_turn(self):
+        from main import RuntimeCommandSession
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.runtime_reader_called = False
+                self.control_reader_called = False
+
+            async def read_runtime_line(self):
+                self.runtime_reader_called = True
+                return "会触发 prompt_toolkit 的路径"
+
+            async def read_runtime_control_line(self):
+                self.control_reader_called = True
+                return "/stop"
+
+            def defer(self, line):
+                raise AssertionError(f"unexpected deferred line: {line}")
+
+        async def long_turn():
+            await asyncio.sleep(30)
+            return "finished"
+
+        console = FakeConsole()
+        result = await RuntimeCommandSession(console).run(long_turn())
+
+        self.assertTrue(result.stopped)
+        self.assertTrue(console.control_reader_called)
+        self.assertFalse(console.runtime_reader_called)
+
+    async def test_runtime_session_can_disable_control_reader_for_prompt_toolkit(self):
+        from main import RuntimeCommandSession
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.runtime_reader_called = False
+                self.control_reader_called = False
+
+            def runtime_control_input_enabled(self):
+                return False
+
+            async def read_runtime_line(self):
+                self.runtime_reader_called = True
+                return "/stop"
+
+            async def read_runtime_control_line(self):
+                self.control_reader_called = True
+                return "/stop"
+
+            def defer(self, line):
+                raise AssertionError(f"unexpected deferred line: {line}")
+
+        async def short_turn():
+            await asyncio.sleep(0.01)
+            return "finished"
+
+        console = FakeConsole()
+        result = await RuntimeCommandSession(console).run(short_turn())
+
+        self.assertEqual(result.final_output, "finished")
+        self.assertFalse(console.control_reader_called)
+        self.assertFalse(console.runtime_reader_called)
 
     async def test_runtime_session_routes_approval_input(self):
         from main import RuntimeCommandSession
@@ -5696,7 +6718,137 @@ class WelcomeRefreshC5Tests(unittest.TestCase):
         self.assertIsNotNone(kwargs["hooks"])
         self.assertFalse(kwargs["verbose_runtime"])
         self.assertIn("fake kernel output", output)
-        self.assertIn("工具 workspace_edit", output)
+
+    def test_chat_loop_writes_new_turns_to_canonical_history_store(self):
+        import lucode.shell.chat_loop as chat_loop_module
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        app_home = TEMP_ROOT / f"history_chat_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"history_chat_workspace_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        class FakeResponse:
+            final_output = "history chat ok"
+            mcp_ids_used = []
+            output_already_printed = False
+            run_context_summary = "Context: README.md"
+
+        class FakeKernelFacade:
+            def __init__(self, context):
+                self.context = context
+
+            async def run_once(self, prompt, **kwargs):
+                return FakeResponse()
+
+        class FakeConsole:
+            interactive = False
+
+            def __init__(self):
+                self.lines = iter(["读取 README 并记入历史", "/exit"])
+
+            async def read_line(self):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "history_chat_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        with patch.object(chat_loop_module, "KernelFacade", FakeKernelFacade):
+            with contextlib.redirect_stdout(io.StringIO()):
+                asyncio.run(
+                    chat_loop_module.chat_loop(
+                        model_registry=object(),
+                        quarantine_dir=workspace / ".agent_quarantine",
+                        runtime_settings=RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed"),
+                        console=FakeConsole(),
+                        app_home=app_home,
+                        project_root=workspace,
+                        workspace_context=context,
+                        use_color=False,
+                    )
+                )
+
+        canonical_files = list((workspace / ".lucode" / "history" / "sessions").glob("*.jsonl"))
+        legacy_files = list((workspace / ".lucode" / "sessions").glob("*.jsonl"))
+        self.assertEqual(len(canonical_files), 1)
+        self.assertEqual(legacy_files, [])
+        self.assertTrue((workspace / ".lucode" / "history" / "index.jsonl").exists())
+
+    def test_chat_loop_context_command_shows_last_run_context_summary(self):
+        import lucode.shell.chat_loop as chat_loop_module
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        app_home = TEMP_ROOT / f"context_cmd_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"context_cmd_workspace_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        class FakeResponse:
+            final_output = "done"
+            mcp_ids_used = []
+            output_already_printed = False
+            run_context_summary = "本轮共享上下文：\n已读文件：\n- README.md（来源 inspect）"
+
+        class FakeKernelFacade:
+            def __init__(self, context):
+                self.context = context
+
+            async def run_once(self, prompt, **kwargs):
+                return FakeResponse()
+
+        class FakeConsole:
+            interactive = False
+
+            def __init__(self):
+                self.lines = iter(["普通任务", "/context", "/exit"])
+
+            async def read_line(self):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "context_cmd_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        buffer = io.StringIO()
+        with patch.object(chat_loop_module, "KernelFacade", FakeKernelFacade):
+            with contextlib.redirect_stdout(buffer):
+                asyncio.run(
+                    chat_loop_module.chat_loop(
+                        model_registry=object(),
+                        quarantine_dir=workspace / ".agent_quarantine",
+                        runtime_settings=RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed"),
+                        console=FakeConsole(),
+                        app_home=app_home,
+                        project_root=workspace,
+                        workspace_context=context,
+                        use_color=False,
+                    )
+                )
+
+        output = buffer.getvalue()
+        self.assertIn("最近一轮共享上下文", output)
+        self.assertIn("README.md", output)
 
     def test_chat_loop_resume_restores_jsonl_recent_context(self):
         import lucode.shell.chat_loop as chat_loop_module
@@ -5794,6 +6946,120 @@ class WelcomeRefreshC5Tests(unittest.TestCase):
         self.assertIn("以下是最近几轮对话", prompts[1])
         self.assertIn("LUCODE-SESSION", prompts[1])
         self.assertIn("本轮用户问题：刚刚的项目代号是什么", prompts[1])
+
+    def test_chat_loop_new_clears_context_without_printing_or_writing_empty_session(self):
+        import lucode.shell.chat_loop as chat_loop_module
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        app_home = TEMP_ROOT / f"new_lazy_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"new_lazy_workspace_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        class FakeConsole:
+            interactive = False
+
+            def __init__(self):
+                self.lines = iter(["/new", "/exit"])
+
+            async def read_line(self):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "new_lazy_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            asyncio.run(
+                chat_loop_module.chat_loop(
+                    model_registry=object(),
+                    quarantine_dir=workspace / ".agent_quarantine",
+                    runtime_settings=RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed"),
+                    console=FakeConsole(),
+                    app_home=app_home,
+                    project_root=workspace,
+                    workspace_context=context,
+                    use_color=False,
+                )
+            )
+
+        self.assertNotIn("当前会话：", buffer.getvalue())
+        self.assertFalse((workspace / ".lucode" / "sessions").exists())
+
+    def test_chat_loop_first_real_turn_after_new_uses_keyword_session_id(self):
+        import lucode.shell.chat_loop as chat_loop_module
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        app_home = TEMP_ROOT / f"new_slug_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"new_slug_workspace_{uuid.uuid4().hex}"
+        app_home.mkdir(parents=True)
+        (workspace / ".lucode").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(app_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        class FakeResponse:
+            final_output = "done"
+            mcp_ids_used = []
+            output_already_printed = False
+            run_context_summary = ""
+
+        class FakeKernelFacade:
+            def __init__(self, context):
+                self.context = context
+
+            async def run_once(self, prompt, **kwargs):
+                del prompt, kwargs
+                return FakeResponse()
+
+        class FakeConsole:
+            interactive = False
+
+            def __init__(self):
+                self.lines = iter(["/new", "Read README.md and pyproject.toml for history naming", "/exit"])
+
+            async def read_line(self):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise EOFError
+
+        context = WorkspaceContext(
+            app_home=app_home,
+            user_home=TEMP_ROOT / "new_slug_user",
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+        with patch.object(chat_loop_module, "KernelFacade", FakeKernelFacade):
+            with contextlib.redirect_stdout(io.StringIO()):
+                asyncio.run(
+                    chat_loop_module.chat_loop(
+                        model_registry=object(),
+                        quarantine_dir=workspace / ".agent_quarantine",
+                        runtime_settings=RuntimeSettings(execution_mode="solo", privacy_mode="cloud_allowed"),
+                        console=FakeConsole(),
+                        app_home=app_home,
+                        project_root=workspace,
+                        workspace_context=context,
+                        use_color=False,
+                    )
+                )
+
+        files = list((workspace / ".lucode" / "history" / "sessions").glob("*.jsonl"))
+        self.assertEqual(len(files), 1)
+        self.assertIn("read-readme-md-and-pyproject-toml", files[0].stem)
+        self.assertFalse((workspace / ".lucode" / "sessions").exists())
 
     def test_chat_loop_resume_injects_compacted_long_session_context(self):
         import lucode.shell.chat_loop as chat_loop_module
@@ -6025,6 +7291,19 @@ class WelcomeRefreshC5Tests(unittest.TestCase):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_execution_event_bus_records_ordered_events(self):
+        from runtime.events import ExecutionEventBus
+
+        bus = ExecutionEventBus()
+        bus.emit("PlanningStarted", "开始规划", mode="serial")
+        bus.emit("PlanningCompleted", "规划完成", mode="serial", status="ok")
+
+        events = bus.snapshot()
+        self.assertEqual([event.event_type for event in events], ["PlanningStarted", "PlanningCompleted"])
+        self.assertEqual(events[0].message, "开始规划")
+        self.assertEqual(events[0].mode, "serial")
+        self.assertEqual(events[1].status, "ok")
+
     def test_gate_adds_code_pipeline_tools(self):
         from planning.planner_schema import PlannedTask, PlannerResult
         from runtime.execution.pipeline import apply_pipeline_gate
@@ -6314,6 +7593,66 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("README 项目说明", rendered)
         self.assertIn("inspect", rendered)
 
+    def test_dynamic_execution_result_preserves_string_behavior(self):
+        from runtime.execution.dynamic import DynamicExecutionResult
+
+        result = DynamicExecutionResult("ok", run_context_summary="本轮共享上下文：README.md")
+
+        self.assertEqual(result, "ok")
+        self.assertTrue(result.startswith("o"))
+        self.assertEqual(str(result), "ok")
+        self.assertEqual(result.run_context_summary, "本轮共享上下文：README.md")
+
+    def test_direct_answer_input_inlines_explicit_project_files(self):
+        from planning.planner_schema import PlannerResult
+        from runtime.execution.dynamic import _direct_answer_input_with_inline_context
+        from runtime.execution.pipeline import PipelineRunState
+
+        workspace = TEMP_ROOT / f"direct_context_store_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        (workspace / "README.md").write_text("# Direct\n\nREADME direct context.\n", encoding="utf-8")
+        state = PipelineRunState.create(
+            "Read README.md",
+            PlannerResult(route_type="direct_answer", reason="test", refined_request="Read README.md", tasks=[]),
+            project_root=workspace,
+        )
+
+        prompt = _direct_answer_input_with_inline_context(
+            "Read README.md",
+            "Read README.md",
+            workspace,
+            "local_model",
+            state,
+        )
+
+        self.assertIn("README direct context", prompt)
+        rendered = state.run_context.render_for_task("next")
+        self.assertIn("README.md", rendered)
+        self.assertIn("direct_context", rendered)
+
+    def test_solo_input_inlines_explicit_project_files(self):
+        from runtime.execution.run_context import RunContextStore
+        from runtime.execution.solo_runner import _solo_input_with_inline_context
+
+        workspace = TEMP_ROOT / f"solo_context_store_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        (workspace / "README.md").write_text("# Solo\n\nREADME solo context.\n", encoding="utf-8")
+        store = RunContextStore(workspace)
+
+        prompt = _solo_input_with_inline_context(
+            "Read README.md and summarize it.",
+            "local_model",
+            workspace,
+            store,
+        )
+
+        self.assertIn("README solo context", prompt)
+        rendered = store.render_for_task("next")
+        self.assertIn("README.md", rendered)
+        self.assertIn("solo_context", rendered)
+
     def test_inline_readonly_file_context_records_run_context_store(self):
         from planning.planner_schema import PlannedTask
         from runtime.execution.inline_context import _inline_project_file_context
@@ -6452,6 +7791,39 @@ class PipelineTests(unittest.TestCase):
         rendered = state.run_context.render_for_task("next")
         self.assertIn("README.md", rendered)
         self.assertIn("inspect_readme", rendered)
+
+    def test_declared_read_set_context_infers_explicit_safe_files_from_request(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.execution.run_context import RunContextStore
+        from runtime.execution.task_runner import _record_declared_read_set_context
+
+        workspace = TEMP_ROOT / f"inferred_read_set_store_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        (workspace / "README.md").write_text("# Lucode\n\nREADME content.\n", encoding="utf-8")
+        (workspace / "pyproject.toml").write_text("[project]\nname = \"lucode\"\n", encoding="utf-8")
+        store = RunContextStore(workspace)
+        task = PlannedTask(
+            id="inspect_package",
+            title="分析包信息",
+            instruction="Read README.md and pyproject.toml.",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["project_filesystem_readonly", "workspace_edit", "safe_backup"],
+            read_set=[],
+        )
+
+        _record_declared_read_set_context(
+            store,
+            workspace,
+            task,
+            refined_request="Read README.md and pyproject.toml. Do not modify files.",
+        )
+
+        rendered = store.render_for_task("next")
+        self.assertIn("README.md", rendered)
+        self.assertIn("pyproject.toml", rendered)
+        self.assertIn("inspect_package", rendered)
 
     def test_declared_read_set_skips_sensitive_files(self):
         from planning.planner_schema import PlannedTask
@@ -10981,6 +12353,20 @@ class DynamicExecutionModelTests(unittest.TestCase):
 
         self.assertNotEqual(plan.tasks[0].model, "")
         self.assertTrue(mr.get_model_info(plan.tasks[0].model))
+
+    def test_planning_error_is_productized_without_traceback(self):
+        from runtime.execution.dynamic import format_planning_error
+
+        message = format_planning_error(
+            AttributeError("'tuple' object has no attribute 'choices'"),
+            planner_model_id="my_proxy_gpt_5_5_model",
+        )
+
+        self.assertIn("规划阶段失败", message)
+        self.assertIn("my_proxy_gpt_5_5_model", message)
+        self.assertIn("OpenAI-compatible", message)
+        self.assertIn("/models brain 主脑", message)
+        self.assertNotIn("Traceback", message)
 
     def test_invalid_task_model_is_replaced_with_executor(self):
         from planning.planner_schema import PlannerResult, PlannedTask

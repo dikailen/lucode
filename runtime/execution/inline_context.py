@@ -43,7 +43,7 @@ INLINE_IGNORED_PARTS = {
 }
 INLINE_PATH_PATTERN = re.compile(
     r"(?:[\w.-]+[\\/])+[\w .@()+\-\[\]]+\.[A-Za-z0-9]{1,8}"
-    r"|(?<![\w.-])[\w.-]+\.(?:cfg|css|html|ini|java|js|json|jsx|md|py|rs|toml|ts|tsx|txt|ya?ml)(?![\w.-])",
+    r"|(?<![\w.-])[\w.-]+\.(?:cfg|css|html|ini|java|js|json|jsx|md|py|rs|toml|ts|tsx|txt|ya?ml)(?![\w-])",
     re.IGNORECASE,
 )
 

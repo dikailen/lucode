@@ -22,6 +22,7 @@ async def run_agent_once(agent, run_input, hooks, max_turns=20):
             print("\n", end="", flush=True)
             printed_any = True
             setattr(hooks, "streamed_output_seen", True)
+        setattr(hooks, "streamed_output_chars", int(getattr(hooks, "streamed_output_chars", 0) or 0) + len(delta))
         print(delta, end="", flush=True)
     if printed_any:
         print()

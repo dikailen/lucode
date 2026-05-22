@@ -13,10 +13,10 @@ from lucode.shell.turn_display import (
 from runtime.common.conversation import append_recent_turn, compose_recent_context
 from runtime.common.text_utils import sanitize_text
 from runtime.config.workspace import discover_workspace_context
+from runtime.history import HistoryStore
 from runtime.kernel import KernelFacade
 from runtime.kernel.session import create_token_logger_hooks
 from runtime.safety.session_checkpoint import SessionCheckpointManager
-from runtime.sessions import SessionStore
 from runtime.ui.progress import render_runtime_statusline
 
 
@@ -44,10 +44,11 @@ async def chat_loop(
     # 长期记忆/知识图谱后续再接，这里只保留最近几轮文本。
     recent_turns = []
     checkpoint_manager = SessionCheckpointManager(project_root)
-    session_store = SessionStore(workspace_context.workspace_root)
-    current_session_id = session_store.start_session()
+    session_store = HistoryStore(workspace_context.workspace_root)
+    current_session_id: str | None = None
     resumed_session_summary = ""
     started_mcp_ids: list[str] = []
+    last_run_context_summary = ""
 
     while True:
         try:
@@ -72,9 +73,12 @@ async def chat_loop(
             checkpoint_manager=checkpoint_manager,
             session_store=session_store,
             current_session_id=current_session_id,
+            last_run_context_summary=last_run_context_summary,
         )
         if slash_result.session_id:
             current_session_id = slash_result.session_id
+        elif slash_result.session_id == "":
+            current_session_id = None
         if slash_result.resumed_recent_turns is not None:
             recent_turns = slash_result.resumed_recent_turns
             resumed_session_summary = slash_result.resumed_session_summary or ""
@@ -115,6 +119,9 @@ async def chat_loop(
 
             turn_result = await session.run(_kernel_work)
             started_mcp_ids = kernel_response.mcp_ids_used if kernel_response is not None else []
+            last_run_context_summary = (
+                str(getattr(kernel_response, "run_context_summary", "") or "") if kernel_response is not None else ""
+            )
             final_output = turn_result.final_output
             turn_stopped = turn_result.stopped
         except Exception as exc:
@@ -143,6 +150,8 @@ async def chat_loop(
         append_recent_turn(recent_turns, "user", user_input)
         append_recent_turn(recent_turns, "assistant", str(final_output), max_chars=800)
         recent_turns = recent_turns[-6:]
+        if not current_session_id:
+            current_session_id = session_store.start_session(user_input)
         _record_session_turn(
             session_store,
             current_session_id,
@@ -151,6 +160,7 @@ async def chat_loop(
             execution_mode=runtime_settings.execution_mode,
             stopped=turn_stopped,
             started_mcp_ids=started_mcp_ids,
+            run_context_summary=last_run_context_summary,
         )
 
         # 打印本轮每个 Agent 的 token 汇总。
@@ -162,7 +172,7 @@ def _is_max_turns_exceeded(exc: Exception) -> bool:
 
 
 def _record_session_turn(
-    session_store: SessionStore,
+    session_store: HistoryStore,
     session_id: str,
     user_input: str,
     final_output: str,
@@ -170,8 +180,17 @@ def _record_session_turn(
     execution_mode: str,
     stopped: bool,
     started_mcp_ids: list[str],
+    run_context_summary: str = "",
 ) -> None:
     try:
+        assistant_metadata = {
+            "execution_mode": execution_mode,
+            "stopped": bool(stopped),
+            "mcp_ids": list(started_mcp_ids or []),
+        }
+        context_summary = str(run_context_summary or "").strip()
+        if context_summary:
+            assistant_metadata["run_context_summary"] = context_summary
         session_store.append_message(
             session_id,
             "user",
@@ -182,11 +201,7 @@ def _record_session_turn(
             session_id,
             "assistant",
             final_output,
-            metadata={
-                "execution_mode": execution_mode,
-                "stopped": bool(stopped),
-                "mcp_ids": list(started_mcp_ids or []),
-            },
+            metadata=assistant_metadata,
         )
     except Exception as exc:
         print(f"会话记录写入失败：{exc}")

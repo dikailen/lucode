@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from planning.planner_schema import PlannerResult
+from planning.planner_schema import PlannedTask, PlannerResult
 from runtime.execution.fast_paths import (
     _can_fast_path_config_summary,
     _can_fast_path_git_diff,
@@ -16,7 +16,12 @@ from runtime.execution.fast_paths import (
     _run_project_manifest_summary_fast_path,
     _run_readme_mcp_count_fast_path,
 )
-from runtime.execution.inline_context import _latest_workspace_context
+from runtime.execution.inline_context import (
+    _inline_project_file_context,
+    _latest_workspace_context,
+    _read_project_file_excerpt,
+    _resolve_explicit_project_file_paths,
+)
 from runtime.execution.pipeline import PipelineRunState, build_verification_report
 from runtime.workspace.patch_ledger import PatchProposalLedger
 
@@ -25,6 +30,38 @@ async def _run_direct_answer(raw_user_input, plan: PlannerResult, model_id, fact
     agent = factory.create_direct_answer_agent(model_id, plan.direct_answer_instruction)
     result = await run_agent(agent, raw_user_input, hooks)
     return result.final_output
+
+
+def _direct_answer_input_with_inline_context(
+    raw_user_input: str,
+    refined_request: str,
+    project_root: Path,
+    model_id: str,
+    run_state: PipelineRunState | None,
+) -> str:
+    """Attach explicit safe project file excerpts when direct-answer routing references files."""
+
+    task = PlannedTask(
+        id="direct_context",
+        title="direct answer context",
+        instruction=refined_request or raw_user_input,
+        skill_id="project_explorer",
+        model=model_id,
+        mcp=["project_filesystem_readonly"],
+    )
+    inline_context = _inline_project_file_context(
+        project_root,
+        task,
+        "\n".join([raw_user_input, refined_request]),
+        run_context=getattr(run_state, "run_context", None),
+    )
+    if not inline_context.strip():
+        return raw_user_input
+    return (
+        f"{raw_user_input}\n\n"
+        "下面是系统已经只读读取到的项目文件片段，请基于这些真实上下文回答：\n"
+        f"{inline_context}"
+    )
 
 
 def _task_prompt(
@@ -100,7 +137,7 @@ async def _run_planned_task(
             ledger.record_task_status(task.id, "failed", message)
         return task.title, _task_failure_output(task, message)
     output = _with_verification_report(project_root, task, str(result.final_output), run_state)
-    _record_declared_read_set_context(run_context, project_root, task)
+    _record_declared_read_set_context(run_context, project_root, task, refined_request=refined_request)
     if run_state:
         run_state.record_task_result(task, output)
     if ledger:
@@ -156,9 +193,33 @@ def _shared_context_for_task(run_state: PipelineRunState | None, task) -> str:
         return ""
 
 
-def _record_declared_read_set_context(run_context, project_root: Path, task) -> None:
+def _record_declared_read_set_context(run_context, project_root: Path, task, refined_request: str = "") -> None:
     if run_context is None or not hasattr(run_context, "record_file_snapshot"):
         return
+    inferred: list[Path] = []
+    seen: set[str] = set()
+    for path in _resolve_explicit_project_file_paths(project_root, task, refined_request):
+        key = str(path.resolve()).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        inferred.append(path)
+        if len(inferred) >= 8:
+            break
+    for candidate in inferred:
+        try:
+            relative = candidate.relative_to(project_root.resolve()).as_posix()
+            run_context.record_file_snapshot(
+                path=candidate,
+                task_id=str(getattr(task, "id", "") or ""),
+                summary=f"{relative} 已由任务 {getattr(task, 'id', '') or 'unknown'} 读取或明确引用。",
+                excerpt=_read_project_file_excerpt(
+                    candidate,
+                    query=refined_request or str(getattr(task, "instruction", "") or ""),
+                ),
+            )
+        except Exception:
+            continue
     for item in list(getattr(task, "read_set", []) or [])[:8]:
         candidate = _resolve_read_set_file(project_root, str(item or ""))
         if candidate is None:

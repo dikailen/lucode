@@ -13,7 +13,7 @@ from runtime.common.text_utils import sanitize_text
 
 
 SESSION_SCHEMA_VERSION = 1
-SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+SESSION_ID_PATTERN = re.compile(r"^[\w.-]+$", re.UNICODE)
 
 
 @dataclass(frozen=True)
@@ -30,14 +30,18 @@ class SessionSummary:
 class SessionStore:
     """Append-only JSONL session store scoped to one Lucode workspace."""
 
-    def __init__(self, workspace_root: Path, max_message_chars: int = 20000):
+    def __init__(self, workspace_root: Path, max_message_chars: int = 20000, sessions_dir: Path | None = None):
         self.workspace_root = Path(workspace_root).resolve()
-        self.sessions_dir = self.workspace_root / ".lucode" / "sessions"
+        self.sessions_dir = Path(sessions_dir).resolve() if sessions_dir is not None else self.workspace_root / ".lucode" / "sessions"
         self.max_message_chars = max(1000, int(max_message_chars or 20000))
 
-    def start_session(self) -> str:
+    def start_session(self, title: str = "") -> str:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        return f"{timestamp}-{uuid.uuid4().hex[:8]}"
+        slug = _slugify_session_title(title)
+        suffix = uuid.uuid4().hex[:8]
+        if slug:
+            return f"{timestamp}-{slug}-{suffix}"
+        return f"{timestamp}-{suffix}"
 
     def append_message(
         self,
@@ -111,6 +115,10 @@ class SessionStore:
         if limit is not None:
             return messages[-max(1, int(limit)) :]
         return messages
+
+    def load_events(self, session_id: str) -> list[dict[str, Any]]:
+        safe_id = self._validate_session_id(session_id)
+        return list(self._iter_events(self._path_for(safe_id)))
 
     def load_recent_turns(self, session_id: str, max_messages: int = 6) -> list[dict[str, str]]:
         turns: list[dict[str, str]] = []
@@ -213,7 +221,7 @@ class SessionStore:
     def _validate_session_id(self, session_id: str) -> str:
         safe_id = str(session_id or "").strip()
         if not safe_id or not SESSION_ID_PATTERN.match(safe_id):
-            raise ValueError("会话 ID 只能包含字母、数字、点、下划线和短横线。")
+            raise ValueError("会话 ID 只能包含字母、数字、中文、点、下划线和短横线。")
         return safe_id
 
     def _truncate(self, text: str, max_chars: int | None = None) -> str:
@@ -277,3 +285,22 @@ def _file_time_iso(path: Path) -> str:
     except OSError:
         return ""
     return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _slugify_session_title(title: str, max_chars: int = 52) -> str:
+    text = sanitize_text(str(title or "")).lower()
+    safe_text = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "-", text)
+    safe_text = re.sub(r"-{2,}", "-", safe_text).strip("-")
+    if not safe_text:
+        return ""
+    parts: list[str] = []
+    total = 0
+    for part in safe_text.split("-"):
+        if not part:
+            continue
+        next_total = total + len(part) + (1 if parts else 0)
+        if next_total > max_chars:
+            break
+        parts.append(part)
+        total = next_total
+    return "-".join(parts) or safe_text[:max_chars].strip("-")

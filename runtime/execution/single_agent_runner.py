@@ -118,7 +118,12 @@ async def _run_single_agent(
             _record_flywheel_safely(flywheel, run_state)
             raise
         output = _with_verification_report(project_root, task, str(result.final_output), run_state)
-        _record_declared_read_set_context(getattr(run_state, "run_context", None), project_root, task)
+        _record_declared_read_set_context(
+            getattr(run_state, "run_context", None),
+            project_root,
+            task,
+            refined_request=refined_request,
+        )
         run_state.record_task_result(task, output)
         if show_plan:
             _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
@@ -151,7 +156,12 @@ async def _run_single_agent(
         _record_flywheel_safely(flywheel, run_state)
         raise
     output = _with_verification_report(project_root, task, str(result.final_output), run_state)
-    _record_declared_read_set_context(getattr(run_state, "run_context", None), project_root, task)
+    _record_declared_read_set_context(
+        getattr(run_state, "run_context", None),
+        project_root,
+        task,
+        refined_request=refined_request,
+    )
     run_state.record_task_result(task, output)
     if show_plan:
         _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")

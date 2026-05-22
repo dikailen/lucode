@@ -157,6 +157,17 @@ class StdinConsoleAdapter:
             raise EOFError
         return item
 
+    async def read_runtime_control_line(self) -> str:
+        """Read control input during a running turn without prompt_toolkit repaint."""
+
+        if self._deferred_lines:
+            return self._deferred_lines.pop(0)
+        self._ensure_reader()
+        item = await self._queue.get()
+        if item is self._EOF:
+            raise EOFError
+        return item
+
     async def read_choice_line(
         self,
         prompt: str,
@@ -229,6 +240,11 @@ class StdinConsoleAdapter:
         if line is None:
             return
         self._deferred_lines.append(line)
+
+    def runtime_control_input_enabled(self) -> bool:
+        """Whether a running turn may start a background stdin control reader."""
+
+        return not self._should_use_prompt_toolkit()
 
     def _ensure_reader(self) -> None:
         if self._reader_started:
@@ -597,7 +613,8 @@ class RuntimeCommandSession:
             work_coro = work_coro()
         work_task = asyncio.create_task(work_coro)
         interactive = bool(getattr(self.console, "interactive", False))
-        input_task = asyncio.create_task(self.console.read_runtime_line()) if interactive else None
+        control_input_enabled = interactive and self._control_input_enabled()
+        input_task = asyncio.create_task(self._read_control_line()) if control_input_enabled else None
         approval_task = None
         if interactive:
             self._approval_requested = asyncio.Event()
@@ -677,8 +694,8 @@ class RuntimeCommandSession:
                 elif line:
                     self.console.defer(line)
 
-                if input_task is not None:
-                    input_task = asyncio.create_task(self.console.read_runtime_line())
+                if control_input_enabled and input_task is not None:
+                    input_task = asyncio.create_task(self._read_control_line())
         finally:
             if approval_task and not approval_task.done():
                 approval_task.cancel()
@@ -709,6 +726,21 @@ class RuntimeCommandSession:
             return sanitize_text(answer).strip().lower()
         finally:
             self._approval_future = None
+
+    async def _read_control_line(self) -> str:
+        reader = getattr(self.console, "read_runtime_control_line", None)
+        if callable(reader):
+            return await reader()
+        return await self.console.read_runtime_line()
+
+    def _control_input_enabled(self) -> bool:
+        checker = getattr(self.console, "runtime_control_input_enabled", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except Exception:
+                return False
+        return True
 
     async def _read_approval_line(self) -> str:
         read_choice_line = getattr(self.console, "read_choice_line", None)

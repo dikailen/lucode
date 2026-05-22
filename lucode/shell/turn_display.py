@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from runtime.common.text_utils import sanitize_text
+from runtime.ui.output_visibility import streamed_output_is_sufficient
 
 
 def should_print_final_output(hooks, final_output) -> bool:
-    if not getattr(hooks, "streamed_output_seen", False):
+    if not streamed_output_is_sufficient(hooks):
         return True
     text = str(final_output or "")
     important_prefixes = (

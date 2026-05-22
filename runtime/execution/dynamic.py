@@ -63,6 +63,7 @@ from runtime.execution.progress import _print_progress_snapshot
 from runtime.execution.single_agent_runner import _run_single_agent
 from runtime.execution.task_runner import (
     _dependency_context_for_task,
+    _direct_answer_input_with_inline_context,
     _max_turns_for_task,
     _run_direct_answer,
     _run_planned_task,
@@ -73,6 +74,15 @@ from runtime.execution.task_runner import (
 from runtime.safety.privacy import PrivacyPolicy
 from runtime.safety.repair_loop import build_repair_request, should_retry
 from runtime.config.settings import RuntimeSettings
+
+
+class DynamicExecutionResult(str):
+    """String-compatible execution output with optional runtime context metadata."""
+
+    def __new__(cls, value: str, *, run_context_summary: str = ""):
+        obj = str.__new__(cls, str(value or ""))
+        obj.run_context_summary = str(run_context_summary or "")
+        return obj
 
 
 async def execute_dynamic_request(
@@ -128,9 +138,12 @@ async def execute_dynamic_request(
         _record_failure_case_safely(flywheel, raw_user_input, max_attempts, last_audit, rollback)
         last_audit.rollback_happened = rollback.rolled_back
         last_audit.rollback_message = rollback.message
-        return format_final_report(last_output, last_audit)
+        return DynamicExecutionResult(
+            format_final_report(last_output, last_audit),
+            run_context_summary=str(getattr(last_output, "run_context_summary", "") or ""),
+        )
 
-    return last_output or "主脑没有给出可执行路线。"
+    return last_output or DynamicExecutionResult("主脑没有给出可执行路线。")
 
 
 async def _execute_dynamic_attempt(
@@ -152,13 +165,16 @@ async def _execute_dynamic_attempt(
     planner_model_id = settings.select_model_id(model_registry, "orchestrator")
     synthesizer_model_id = settings.select_model_id(model_registry, "final_synthesizer")
 
-    refined, plan = await preview_plan(
-        raw_user_input,
-        refiner_model=model_registry.get_model(refiner_model_id) if refiner_model_id else None,
-        planner_model=model_registry.get_model(planner_model_id),
-        hooks=hooks,
-        refiner_enabled=settings.query_refiner_enabled,
-    )
+    try:
+        refined, plan = await preview_plan(
+            raw_user_input,
+            refiner_model=model_registry.get_model(refiner_model_id) if refiner_model_id else None,
+            planner_model=model_registry.get_model(planner_model_id),
+            hooks=hooks,
+            refiner_enabled=settings.query_refiner_enabled,
+        )
+    except Exception as exc:
+        return DynamicExecutionResult(format_planning_error(exc, planner_model_id=planner_model_id)), None
     _apply_executor_model_defaults(plan, settings, model_registry)
     gate_decision = apply_pipeline_gate(plan, refined.refined_request)
     run_state = PipelineRunState.create(refined.refined_request, plan, project_root=project_root)
@@ -175,10 +191,14 @@ async def _execute_dynamic_attempt(
 
     if not validation.valid:
         return (
+            _dynamic_result(
             "主脑规划未通过校验，已停止执行。\n\n"
             f"{format_validation(validation)}\n\n"
-            "你可以用 /plan 查看规划详情，或把问题说得更具体一点。"
-        ), None
+            "你可以用 /plan 查看规划详情，或把问题说得更具体一点。",
+            run_state,
+            ),
+            None,
+        )
 
     if not review.approved:
         message = (
@@ -186,18 +206,26 @@ async def _execute_dynamic_attempt(
             f"{format_plan_review(review)}\n\n"
             "系统将把这些问题回传给主脑进行重规划。"
         )
-        return message, audit_plan_review_failure(review)
+        return _dynamic_result(message, run_state), audit_plan_review_failure(review)
 
     factory = AgentFactory(model_registry, mcp_manager)
 
     if plan.route_type == "direct_answer":
-        return await _run_direct_answer(raw_user_input, plan, planner_model_id, factory, hooks, run_agent), None
+        direct_input = _direct_answer_input_with_inline_context(
+            raw_user_input,
+            refined.refined_request,
+            project_root,
+            planner_model_id,
+            run_state,
+        )
+        output = await _run_direct_answer(direct_input, plan, planner_model_id, factory, hooks, run_agent)
+        return _dynamic_result(output, run_state), None
 
     if plan.route_type == "clarify":
-        return plan.clarifying_question or "这个问题还需要你补充一点信息。", None
+        return _dynamic_result(plan.clarifying_question or "这个问题还需要你补充一点信息。", run_state), None
 
     if plan.route_type == "single_agent":
-        return await _run_single_agent(
+        output, audit = await _run_single_agent(
             refined.refined_request,
             plan,
             project_root,
@@ -210,6 +238,7 @@ async def _execute_dynamic_attempt(
             show_plan=show_plan,
             attempt=attempt,
         )
+        return _dynamic_result(output, run_state), audit
 
     if plan.route_type == "multi_agent":
         try:
@@ -229,9 +258,38 @@ async def _execute_dynamic_attempt(
         finally:
             _record_flywheel_safely(flywheel, run_state)
         audit = audit_execution(plan, run_state, output)
-        return format_final_report(output, audit), audit
+        return _dynamic_result(format_final_report(output, audit), run_state), audit
 
-    return "主脑没有给出可执行路线。", None
+    return _dynamic_result("主脑没有给出可执行路线。", run_state), None
+
+
+def _dynamic_result(output: str, run_state: PipelineRunState | None) -> DynamicExecutionResult:
+    run_context = getattr(run_state, "run_context", None)
+    summary = ""
+    if run_context is not None and hasattr(run_context, "render_for_task"):
+        try:
+            summary = run_context.render_for_task()
+        except Exception:
+            summary = ""
+    return DynamicExecutionResult(str(output or ""), run_context_summary=summary)
+
+
+def format_planning_error(exc: Exception, planner_model_id: str = "") -> str:
+    message = str(exc).strip() or exc.__class__.__name__
+    hint = "请检查主脑模型配置、Provider base_url 和模型兼容性。"
+    if "tuple" in message and "choices" in message:
+        hint = (
+            "模型服务返回格式与当前 OpenAI-compatible 适配器不兼容。"
+            "建议使用 /models brain 主脑 切换到已验证模型，"
+            "或运行 /models probe 重新探测该模型，并检查自定义中转 base_url 是否为 /v1 兼容地址。"
+        )
+    return (
+        "规划阶段失败，Lucode 已停止本轮执行，项目文件没有被修改。\n"
+        f"当前主脑模型：{planner_model_id or '未知'}\n"
+        f"错误类型：{exc.__class__.__name__}\n"
+        f"原因：{message}\n"
+        f"建议：{hint}"
+    )
 
 
 def _apply_executor_model_defaults(plan, settings, model_registry) -> None:
