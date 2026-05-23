@@ -2626,6 +2626,80 @@ class RuntimeHelpersTests(unittest.TestCase):
         self.assertTrue(hooks.streamed_output_seen)
         self.assertEqual(hooks.streamed_output_chars, len("你好，欢迎使用 Lucode。"))
 
+    def test_streaming_runner_recovers_tail_close_after_visible_output(self):
+        import runtime.agent.runner as runner_module
+
+        class FakeData:
+            type = "response.output_text.delta"
+            delta = "???????"
+
+        class FakeEvent:
+            type = "raw_response_event"
+            data = FakeData()
+
+        class FakeStreamResult:
+            final_output = "???????"
+            interruptions = []
+
+            async def stream_events(self):
+                yield FakeEvent()
+                raise RuntimeError("peer closed connection without sending complete message body (incomplete chunked read)")
+
+        class FakeRunner:
+            @staticmethod
+            def run_streamed(*args, **kwargs):
+                return FakeStreamResult()
+
+        class Hooks:
+            streamed_output_seen = False
+            streamed_output_chars = 0
+
+        hooks = Hooks()
+        original_runner_class = runner_module.runner_class
+        original_streaming_enabled = runner_module.streaming_enabled
+        runner_module.runner_class = lambda: FakeRunner
+        runner_module.streaming_enabled = lambda: True
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = asyncio.run(runner_module.run_agent_once(object(), "??", hooks, max_turns=3))
+        finally:
+            runner_module.runner_class = original_runner_class
+            runner_module.streaming_enabled = original_streaming_enabled
+
+        self.assertEqual(result.final_output, "???????")
+        self.assertTrue(hooks.streamed_output_seen)
+
+    def test_streaming_runner_reraises_tail_close_without_visible_output(self):
+        import runtime.agent.runner as runner_module
+
+        class FakeStreamResult:
+            final_output = ""
+
+            async def stream_events(self):
+                if False:
+                    yield None
+                raise RuntimeError("peer closed connection without sending complete message body (incomplete chunked read)")
+
+        class FakeRunner:
+            @staticmethod
+            def run_streamed(*args, **kwargs):
+                return FakeStreamResult()
+
+        class Hooks:
+            streamed_output_seen = False
+            streamed_output_chars = 0
+
+        original_runner_class = runner_module.runner_class
+        original_streaming_enabled = runner_module.streaming_enabled
+        runner_module.runner_class = lambda: FakeRunner
+        runner_module.streaming_enabled = lambda: True
+        try:
+            with self.assertRaisesRegex(RuntimeError, "incomplete chunked read"):
+                asyncio.run(runner_module.run_agent_once(object(), "??", Hooks(), max_turns=3))
+        finally:
+            runner_module.runner_class = original_runner_class
+            runner_module.streaming_enabled = original_streaming_enabled
+
     def test_streamed_visible_output_is_not_printed_twice(self):
         from main import _should_print_final_output
 
@@ -9996,6 +10070,111 @@ class RuntimeSettingsTests(unittest.TestCase):
 
         with patch("runtime.config.settings.load_model_catalog", return_value=fake_catalog):
             settings = RuntimeSettings.from_env()
+class AgentSpecContractTests(unittest.TestCase):
+    def test_agent_spec_brain_from_runtime_settings_round_trips_role_contract(self):
+        from runtime.agent.spec import BrainSpec
+        from runtime.config.settings import RuntimeSettings
+
+        settings = RuntimeSettings(
+            query_refiner_model_priority=["cheap_refiner"],
+            orchestrator_model_priority=["strong_planner", "backup_planner"],
+            executor_model_priority=["tool_worker"],
+            final_synthesizer_model_priority=["long_context_summary"],
+        )
+
+        spec = BrainSpec.from_runtime_settings(settings, "??")
+        restored = BrainSpec.from_dict(spec.to_dict())
+        all_specs = BrainSpec.all_from_runtime_settings(settings)
+
+        self.assertEqual(spec.role, "orchestrator")
+        self.assertEqual(spec.display_name, "?????")
+        self.assertEqual(spec.model_priority, ["strong_planner", "backup_planner"])
+        self.assertIn("json", spec.required_capabilities)
+        self.assertEqual(restored, spec)
+        self.assertEqual([item.role for item in all_specs], ["query_refiner", "orchestrator", "executor", "final_synthesizer"])
+        self.assertIn("tools", next(item for item in all_specs if item.role == "executor").required_capabilities)
+
+    def test_agent_spec_task_from_planned_task_preserves_read_write_and_acceptance_contract(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.agent.spec import TaskSpec
+
+        readonly_task = PlannedTask(
+            id="inspect_runtime",
+            title="Inspect runtime",
+            instruction="Read runtime execution code and summarize the parallel path.",
+            skill_id="project_explorer",
+            model="tool_worker",
+            mcp=["project_filesystem_readonly", "code_locator"],
+            depends_on=["scout"],
+            acceptance_criteria=["Explain entry point and scheduler"],
+            expected_outputs=["structured analysis"],
+            read_set=["runtime/execution"],
+            write_intent=[],
+            risk_notes="readonly",
+        )
+
+        spec = TaskSpec.from_planned_task(readonly_task, mode_hint="full")
+        restored = TaskSpec.from_dict(spec.to_dict())
+
+        self.assertEqual(spec.task_id, "inspect_runtime")
+        self.assertEqual(spec.mode_hint, "full")
+        self.assertEqual(spec.read_intent, ["runtime/execution"])
+        self.assertEqual(spec.write_intent, [])
+        self.assertEqual(spec.toolset_id, "readonly_project_analysis")
+        self.assertEqual(spec.dependencies, ["scout"])
+        self.assertEqual(spec.acceptance_criteria, ["Explain entry point and scheduler"])
+        self.assertEqual(restored, spec)
+
+        write_task = PlannedTask(
+            id="edit_config",
+            title="Edit config",
+            instruction="Update config safely.",
+            skill_id="jpc_now_skill",
+            model="tool_worker",
+            mcp=["workspace_edit"],
+            write_intent=[".lucode/config.toml"],
+        )
+        self.assertEqual(TaskSpec.from_planned_task(write_task).toolset_id, "workspace_edit")
+        self.assertEqual(TaskSpec.from_planned_task(write_task).risk_level, "medium")
+
+    def test_agent_spec_toolset_context_and_provider_specs_are_serializable(self):
+        from runtime.agent.spec import ContextContract, ProviderRuntimeSpec, ToolsetPolicy
+
+        policy = ToolsetPolicy.readonly_project_analysis()
+        context = ContextContract(
+            hot_context=["current_turn"],
+            evidence_context=["artifact:readme_summary"],
+            rule_context=["no_secrets"],
+            cold_context=["history:previous_session"],
+            artifact_refs=["ctx_001"],
+        )
+        provider = ProviderRuntimeSpec.from_model_info(
+            {
+                "id": "custom_proxy_deepseek_chat_model",
+                "provider": "custom_proxy",
+                "homepage": "https://example.com",
+                "base_url_value": "https://proxy.example.com/v1",
+                "model_name_value": "deepseek-chat",
+                "backend_type": "openai_compatible",
+                "provider_ref": "custom_proxy/deepseek-chat",
+                "probe": {"status": "ok", "supports_tools": True},
+                "source": "lucode_config",
+            },
+            fallback_models=["backup_model"],
+            auxiliary_models={"cheap_summary": "cheap_model"},
+        )
+
+        self.assertEqual(policy.read_route, "native_preferred")
+        self.assertEqual(policy.read_approval, "none")
+        self.assertEqual(ToolsetPolicy.from_dict(policy.to_dict()), policy)
+        self.assertEqual(ContextContract.from_dict(context.to_dict()), context)
+        self.assertEqual(provider.provider_id, "custom_proxy")
+        self.assertEqual(provider.base_url, "https://proxy.example.com/v1")
+        self.assertEqual(provider.model_name, "deepseek-chat")
+        self.assertEqual(provider.capability_fingerprint["status"], "ok")
+        self.assertEqual(ProviderRuntimeSpec.from_dict(provider.to_dict()), provider)
+
+
 
         self.assertEqual(settings.query_refiner_model_priority, ["local_model"])
         self.assertEqual(settings.orchestrator_model_priority, ["local_model"])
