@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections import defaultdict
 
-from mcp_servers import create_readonly_filesystem_server
+from mcp_servers import apply_full_supervisor_readonly_budget_profile, create_readonly_filesystem_server
 from planning.planner_schema import PlannerResult
 from runtime.config.execution_mode import normalize_execution_mode
+from runtime.execution.execution_contract import summary_helper_enabled, supervisor_route
 from runtime.execution.parallel_scheduler import _execution_batches_for_mode, _format_parallel_batch_audit
 from runtime.execution.pipeline import PipelineRunState
 from runtime.execution.progress import _print_progress_snapshot
+from runtime.execution.supervisor_observer import emit_supervisor_observation, render_supervisor_context_for_workers
 from runtime.execution.task_runner import _run_planned_task
 from runtime.workspace.patch_ledger import PatchProposalLedger
 from runtime.workspace.run_workspace import RunWorkspace
@@ -26,11 +29,20 @@ async def _run_multi_agent(
     execution_mode: str = "serial",
     show_progress: bool = True,
     attempt: int = 1,
+    approval_policy_factory=None,
 ):
     workspace = RunWorkspace(project_root)
     run_dir = workspace.create()
     ledger = PatchProposalLedger(project_root)
     mode = normalize_execution_mode(execution_mode)
+    _apply_full_supervisor_budget_profile(factory, plan.tasks, mode)
+    route = supervisor_route(plan)
+    use_summary_helper = summary_helper_enabled(plan)
+    worker_outputs: list[tuple[str, str, str]] = []
+    supervisor_view = None
+    if run_state:
+        supervisor_view = emit_supervisor_observation(plan, mode=mode, event_bus=run_state.event_bus)
+        _seed_supervisor_context_pack(run_state, supervisor_view, mode=mode, route=route)
 
     try:
         for group_id, tasks in _tasks_by_parallel_group(plan).items():
@@ -45,10 +57,21 @@ async def _run_multi_agent(
                     if show_progress and run_state:
                         run_state.record_task_started(task)
                         _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=task.title)
+                    kwargs = _task_runner_kwargs(approval_policy_factory, task)
+                    kwargs.update(_execution_mode_kwarg(mode))
                     title, output = await _run_planned_task(
-                        refined_request, task, project_root, factory, hooks, run_agent, run_state, ledger
+                        refined_request,
+                        task,
+                        project_root,
+                        factory,
+                        hooks,
+                        run_agent,
+                        run_state,
+                        ledger,
+                        **kwargs,
                     )
                     workspace.write_task_output(task.id, title, output)
+                    worker_outputs.append((str(getattr(task, "id", "") or ""), title, output))
                     if show_progress and run_state:
                         _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"已完成：{task.title}")
                     continue
@@ -62,7 +85,15 @@ async def _run_multi_agent(
                 results = await asyncio.gather(
                     *(
                         _run_planned_task(
-                            refined_request, task, project_root, factory, hooks, run_agent, run_state, ledger
+                            refined_request,
+                            task,
+                            project_root,
+                            factory,
+                            hooks,
+                            run_agent,
+                            run_state,
+                            ledger,
+                            **_task_runner_kwargs_with_mode(approval_policy_factory, task, mode),
                         )
                         for task in batch
                     ),
@@ -95,8 +126,33 @@ async def _run_multi_agent(
                     )
                 for task, (title, output) in zip(batch, normalized_results):
                     workspace.write_task_output(task.id, title, output)
+                    worker_outputs.append((str(getattr(task, "id", "") or ""), title, output))
                 if show_progress and run_state:
                     _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"已完成：{active}")
+
+        if mode == "full" and route == "team" and not use_summary_helper:
+            if run_state:
+                run_state.emit_event(
+                    "LeadFinalizing",
+                    "主管正在收口并生成最终汇报",
+                    mode=mode,
+                    agent="supervisor",
+                    status="running",
+                    payload={"route": route, "summary_helper": False},
+                )
+            if show_progress and run_state:
+                _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active="主管收口")
+            output = _render_lead_supervisor_output(plan, run_dir, run_state, mode, worker_outputs)
+            if run_state:
+                run_state.emit_event(
+                    "LeadCompleted",
+                    "主管最终汇报完成",
+                    mode=mode,
+                    agent="supervisor",
+                    status="completed",
+                    payload={"route": route, "summary_helper": False},
+                )
+            return output
 
         async with create_readonly_filesystem_server(
             run_dir,
@@ -125,6 +181,42 @@ def _tasks_by_parallel_group(plan: PlannerResult) -> dict[int, list]:
     return dict(sorted(groups.items(), key=lambda item: item[0]))
 
 
+def _seed_supervisor_context_pack(run_state: PipelineRunState, supervisor_view, *, mode: str, route: str) -> bool:
+    if mode != "full" or route != "team":
+        return False
+    run_context = getattr(run_state, "run_context", None)
+    if run_context is None or not hasattr(run_context, "record_tool_output"):
+        return False
+    summary = render_supervisor_context_for_workers(supervisor_view)
+    if not summary:
+        return False
+    try:
+        run_context.record_tool_output(
+            tool="supervisor",
+            action="context_pack",
+            summary=summary,
+            task_id="supervisor",
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _apply_full_supervisor_budget_profile(factory, tasks: list, mode: str) -> bool:
+    if normalize_execution_mode(mode) != "full":
+        return False
+    mcp_ids = sorted(
+        {
+            str(mcp_id)
+            for task in list(tasks or [])
+            for mcp_id in list(getattr(task, "mcp", []) or [])
+            if str(mcp_id or "").strip()
+        }
+    )
+    manager = getattr(factory, "mcp_manager", None)
+    return apply_full_supervisor_readonly_budget_profile(manager, mcp_ids)
+
+
 def _ordered_tasks_for_execution(plan: PlannerResult) -> list:
     task_by_id = {task.id: task for task in plan.tasks}
     pending = {task.id: set(task.depends_on) for task in plan.tasks}
@@ -148,3 +240,79 @@ def _ordered_tasks_for_execution(plan: PlannerResult) -> list:
         break
 
     return emitted
+
+
+def _approval_policy_for_task(approval_policy_factory, task):
+    if approval_policy_factory is None:
+        return None
+    try:
+        return approval_policy_factory(task)
+    except Exception:
+        return None
+
+
+def _task_runner_kwargs(approval_policy_factory, task) -> dict:
+    policy = _approval_policy_for_task(approval_policy_factory, task)
+    return {"approval_policy": policy} if policy is not None else {}
+
+
+def _task_runner_kwargs_with_mode(approval_policy_factory, task, mode: str) -> dict:
+    kwargs = _task_runner_kwargs(approval_policy_factory, task)
+    kwargs.update(_execution_mode_kwarg(mode))
+    return kwargs
+
+
+def _execution_mode_kwarg(mode: str) -> dict:
+    if not _run_planned_task_accepts_execution_mode():
+        return {}
+    return {"execution_mode": mode}
+
+
+def _render_lead_supervisor_output(
+    plan: PlannerResult,
+    run_dir,
+    run_state: PipelineRunState | None,
+    mode: str,
+    worker_outputs: list[tuple[str, str, str]] | None = None,
+) -> str:
+    lines = [
+        "主管最终汇报",
+        f"- 模式：{mode}",
+        f"- 路线：{supervisor_route(plan) or 'team'}",
+        f"- SummaryHelper：{summary_helper_enabled(plan)}",
+    ]
+    if worker_outputs:
+        lines.append("- worker 报告：")
+        for task_id, title, output in worker_outputs:
+            label = task_id or title or "task"
+            lines.append(f"  - {label}: {_compact_worker_output(output)}")
+    elif run_state:
+        lines.append("- worker 报告：")
+        for record in list(getattr(run_state, "tasks", []) or []):
+            preview = str(getattr(record, "output_preview", "") or "").strip()
+            lines.append(f"  - {record.id}: {preview or '无输出预览'}")
+    try:
+        names = sorted(path.name for path in run_dir.glob("*.md"))
+    except Exception:
+        names = []
+    if names:
+        lines.append("- 产物文件：")
+        lines.extend(f"  - {name}" for name in names)
+    return "\n".join(lines)
+
+
+def _compact_worker_output(output: str, limit: int = 1200) -> str:
+    value = str(output or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[:limit] + f"...[truncated {len(value) - limit} chars]"
+
+
+def _run_planned_task_accepts_execution_mode() -> bool:
+    try:
+        parameters = inspect.signature(_run_planned_task).parameters
+    except (TypeError, ValueError):
+        return True
+    if "execution_mode" in parameters:
+        return True
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())

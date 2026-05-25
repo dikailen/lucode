@@ -28,6 +28,8 @@ PROTECTED_FILE_NAMES = {".env"}
 
 READ_CALLS = 0
 TOTAL_CHARS = 0
+SUPERVISOR_EXTRA_READ_CALLS_USED = 0
+SUPERVISOR_EXTRA_CHARS_USED = 0
 
 
 def _root() -> Path:
@@ -50,6 +52,18 @@ def _env_int(name: str, default: int) -> int:
 
 def _max_read_calls() -> int:
     return _env_int("BUDGETED_FS_MAX_READ_CALLS", 10)
+
+
+def _supervisor_expansion_enabled() -> bool:
+    return os.environ.get("BUDGETED_FS_SUPERVISOR_EXPANSION", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _supervisor_extra_read_calls() -> int:
+    return _env_int("BUDGETED_FS_SUPERVISOR_EXTRA_READ_CALLS", 0)
+
+
+def _supervisor_extra_total_chars() -> int:
+    return _env_int("BUDGETED_FS_SUPERVISOR_EXTRA_TOTAL_CHARS", 0)
 
 
 def _max_files_per_call() -> int:
@@ -108,17 +122,31 @@ def _is_visible_child(path: Path) -> bool:
 
 
 def _start_read_call() -> None:
-    global READ_CALLS
+    global READ_CALLS, SUPERVISOR_EXTRA_READ_CALLS_USED
     if READ_CALLS >= _max_read_calls():
-        raise RuntimeError(
-            "Read budget exhausted for this MCP session. "
-            "Use the files already read, or ask the user to narrow the target files."
-        )
+        if not _supervisor_can_expand_read_call():
+            raise RuntimeError(
+                "Read budget exhausted for this MCP session. "
+                "Use the files already read, or ask the user to narrow the target files."
+            )
+        SUPERVISOR_EXTRA_READ_CALLS_USED += 1
     READ_CALLS += 1
 
 
+def _supervisor_can_expand_read_call() -> bool:
+    if not _supervisor_expansion_enabled():
+        return False
+    return SUPERVISOR_EXTRA_READ_CALLS_USED < max(0, _supervisor_extra_read_calls())
+
+
 def _remaining_chars() -> int:
-    return max(0, _max_total_chars() - TOTAL_CHARS)
+    return max(0, _effective_total_chars_limit() - TOTAL_CHARS)
+
+
+def _effective_total_chars_limit() -> int:
+    if not _supervisor_expansion_enabled():
+        return _max_total_chars()
+    return _max_total_chars() + max(0, _supervisor_extra_total_chars())
 
 
 def _consume_chars(text: str) -> str:
@@ -206,9 +234,10 @@ def list_allowed_directories() -> str:
                 "max_read_calls": _max_read_calls(),
                 "max_files_per_call": _max_files_per_call(),
                 "max_chars_per_file": _max_chars_per_file(),
-                "max_total_chars": _max_total_chars(),
+                "max_total_chars": _effective_total_chars_limit(),
                 "read_calls_used": READ_CALLS,
                 "total_chars_used": TOTAL_CHARS,
+                "supervisor_expansion": _supervisor_expansion_payload(),
             },
         },
         ensure_ascii=False,
@@ -300,7 +329,8 @@ def read_file(path: str, max_chars: int | None = None) -> str:
             "budget": {
                 "read_calls_used": READ_CALLS,
                 "total_chars_used": TOTAL_CHARS,
-                "total_chars_limit": _max_total_chars(),
+                "total_chars_limit": _effective_total_chars_limit(),
+                "supervisor_expansion": _supervisor_expansion_payload(),
             },
         },
         ensure_ascii=False,
@@ -336,12 +366,23 @@ def read_multiple_files(paths: list[str], max_chars_per_file: int | None = None)
             "budget": {
                 "read_calls_used": READ_CALLS,
                 "total_chars_used": TOTAL_CHARS,
-                "total_chars_limit": _max_total_chars(),
+                "total_chars_limit": _effective_total_chars_limit(),
+                "supervisor_expansion": _supervisor_expansion_payload(),
             },
         },
         ensure_ascii=False,
         indent=2,
     )
+
+
+def _supervisor_expansion_payload() -> dict:
+    return {
+        "enabled": _supervisor_expansion_enabled(),
+        "used": SUPERVISOR_EXTRA_READ_CALLS_USED > 0 or TOTAL_CHARS > _max_total_chars(),
+        "extra_read_calls_used": SUPERVISOR_EXTRA_READ_CALLS_USED,
+        "extra_read_calls_limit": _supervisor_extra_read_calls() if _supervisor_expansion_enabled() else 0,
+        "extra_total_chars_limit": _supervisor_extra_total_chars() if _supervisor_expansion_enabled() else 0,
+    }
 
 
 @mcp.tool(

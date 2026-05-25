@@ -12,7 +12,7 @@ class AgentFactory:
         self.model_registry = model_registry
         self.mcp_manager = mcp_manager
 
-    async def create_task_agent(self, task: PlannedTask):
+    async def create_task_agent(self, task: PlannedTask, execution_mode: str = ""):
         model_info = self.model_registry.get_model_info(task.model)
         if task.mcp and not model_info.get("supports_tools", True):
             raise ValueError(
@@ -22,7 +22,7 @@ class AgentFactory:
             )
         model = self.model_registry.get_model(task.model)
         servers = await self.mcp_manager.get_many(task.mcp)
-        instructions = self._task_instructions(task)
+        instructions = self._task_instructions(task, execution_mode=execution_mode)
 
         Agent = agent_class()
         return Agent(
@@ -32,13 +32,13 @@ class AgentFactory:
             mcp_servers=servers,
         )
 
-    def _task_instructions(self, task: PlannedTask) -> str:
+    def _task_instructions(self, task: PlannedTask, execution_mode: str = "") -> str:
         return sanitize_text(
             load_skill(task.skill_id)
             + "\n\n## 本次临时任务\n"
             + task.instruction
             + self._execution_contract(task)
-            + self._tool_budget(task)
+            + self._tool_budget(task, execution_mode=execution_mode)
             + self._tool_rules(task)
             + "\n## 输出风格\n"
             + "- 默认使用中文。\n"
@@ -76,10 +76,29 @@ class AgentFactory:
             return ""
         return "\n\n## 本次任务契约\n" + "\n".join(lines)
 
-    def _tool_budget(self, task: PlannedTask) -> str:
+    def _tool_budget(self, task: PlannedTask, execution_mode: str = "") -> str:
         remote_lookup = {"context7_docs", "grep_code_search"}.intersection(task.mcp)
         if "web_search" not in task.mcp and not remote_lookup:
             if "code_locator" in task.mcp and "project_filesystem_readonly" in task.mcp:
+                if str(execution_mode or "").strip().lower() == "full":
+                    command_budget = ""
+                    if "command_runner" in task.mcp:
+                        command_budget = (
+                            "\n"
+                            "- `run_command` 最多调用 1 次；命令返回后必须立即根据结果给出结论。\n"
+                            "- 如果审批不可用或被拒绝，不要重复请求同一命令。\n"
+                        )
+                    return (
+                        "\n\n## 本次工具预算\n"
+                        "- full 主管模式：先写清读取计划、为什么读、预期读到什么，再让 worker 执行。\n"
+                        "- `locate_code` 最多调用 1 次。\n"
+                        "- `get_file_outline` 最多调用 1 次。\n"
+                        "- `read_file` / `read_multiple_files` 合计最多 4 次；读取到足够上下文后停止。\n"
+                        "- 真正超出基础预算时由主管评估是否启用主管扩容，扩容后必须把关键片段和结论共享给后续 Agent。\n"
+                        "- 拿到目标文件或关键片段后必须直接总结，不要继续搜索相邻文件或请求更多预算。\n"
+                        "- 如果预算仍不足以覆盖全文，明确说明只完成了部分分析，不要把部分结论伪装成全文结论。"
+                        + command_budget
+                    )
                 command_budget = ""
                 if "command_runner" in task.mcp:
                     command_budget = (

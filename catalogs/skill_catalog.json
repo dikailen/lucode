@@ -1,7 +1,61 @@
 {
   "version": 1,
-  "description": "Auto-refreshed local skill library used by the orchestrator planner. Full SKILL.md files are loaded only when an execution Agent is created.",
+  "description": "Auto-refreshed local skill library used by the orchestrator planner. Core skills describe Lucode native abilities; sample skills are kept for compatibility and hidden from default planner prompts.",
   "skills": [
+    {
+      "id": "lucode_native_capability",
+      "folder": "lucode-native-capability",
+      "display_name_zh": "lucode-native-capability",
+      "summary_zh": "Lucode 原生终端代理能力契约。定义读写文件、CLI 优先、MCP 兜底、上下文复用、审批安全和 full 模式主管协作边界。",
+      "tags": [
+        "code"
+      ],
+      "default_model": "",
+      "allowed_mcp": [
+        "project_filesystem_readonly",
+        "code_locator",
+        "workspace_edit",
+        "command_runner",
+        "git_tools",
+        "safe_backup",
+        "web_search",
+        "context7_docs",
+        "grep_code_search"
+      ],
+      "good_for": [
+        "Lucode 原生终端代理能力契约。定义读写文件、CLI 优先、MCP 兜底、上下文复用、审批安全和 full 模式主管协作边界。"
+      ],
+      "not_for": [],
+      "cost_level": "medium",
+      "risk_level": "medium",
+      "selectable": true,
+      "internal": true,
+      "planner_visible": true,
+      "source": "core",
+      "path": "core_skills/lucode-native-capability"
+    },
+    {
+      "id": "cli_command_safety",
+      "folder": "cli-command-safety",
+      "display_name_zh": "cli-command-safety",
+      "summary_zh": "Use when planning or executing local CLI commands in Lucode. Requires command intent, risk, approval, and fallback to safer read-only/native paths.",
+      "tags": [
+        "code"
+      ],
+      "default_model": "mimo_model",
+      "allowed_mcp": [],
+      "good_for": [
+        "Use when planning or executing local CLI commands in Lucode. Requires command intent, risk, approval, and fallback to sa"
+      ],
+      "not_for": [],
+      "cost_level": "medium",
+      "risk_level": "medium",
+      "selectable": true,
+      "internal": false,
+      "planner_visible": false,
+      "source": "sample",
+      "path": "skills/cli-command-safety"
+    },
     {
       "id": "final_synthesizer",
       "folder": "final-synthesizer",
@@ -19,7 +73,10 @@
       "cost_level": "medium",
       "risk_level": "medium",
       "selectable": false,
-      "internal": true
+      "internal": true,
+      "planner_visible": false,
+      "source": "sample",
+      "path": "skills/final-synthesizer"
     },
     {
       "id": "humanizer_zh",
@@ -49,7 +106,10 @@
       "cost_level": "low",
       "risk_level": "low",
       "selectable": true,
-      "internal": false
+      "internal": false,
+      "planner_visible": false,
+      "source": "sample",
+      "path": "skills/Humanizer-zh-main"
     },
     {
       "id": "jpc_now_skill",
@@ -92,7 +152,10 @@
       "cost_level": "medium",
       "risk_level": "medium",
       "selectable": true,
-      "internal": false
+      "internal": false,
+      "planner_visible": false,
+      "source": "sample",
+      "path": "skills/jpc_now_skill"
     },
     {
       "id": "orchestrator_planner",
@@ -112,7 +175,10 @@
       "cost_level": "medium",
       "risk_level": "medium",
       "selectable": false,
-      "internal": true
+      "internal": true,
+      "planner_visible": false,
+      "source": "sample",
+      "path": "skills/orchestrator-planner"
     },
     {
       "id": "project_explorer",
@@ -151,7 +217,10 @@
       "cost_level": "medium",
       "risk_level": "low",
       "selectable": true,
-      "internal": false
+      "internal": false,
+      "planner_visible": false,
+      "source": "sample",
+      "path": "skills/project-explorer"
     },
     {
       "id": "query_refiner",
@@ -170,7 +239,10 @@
       "cost_level": "medium",
       "risk_level": "medium",
       "selectable": false,
-      "internal": true
+      "internal": true,
+      "planner_visible": false,
+      "source": "sample",
+      "path": "skills/query-refiner"
     },
     {
       "id": "skill_creator",
@@ -209,7 +281,10 @@
       "cost_level": "high",
       "risk_level": "medium",
       "selectable": true,
-      "internal": false
+      "internal": false,
+      "planner_visible": false,
+      "source": "sample",
+      "path": "skills/skill-creator"
     },
     {
       "id": "task_router",
@@ -230,7 +305,10 @@
       "cost_level": "medium",
       "risk_level": "medium",
       "selectable": false,
-      "internal": true
+      "internal": true,
+      "planner_visible": false,
+      "source": "sample",
+      "path": "skills/task-router"
     }
   ],
   "future_memory_interface": {

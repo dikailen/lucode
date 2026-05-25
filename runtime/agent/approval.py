@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from runtime.agent.approval_policy import FullModeApprovalPolicy
 from runtime.agent.runner import run_agent_once
 from runtime.common.text_utils import sanitize_text
 from runtime.hooks import record_post_tool_use, record_pre_tool_use
@@ -15,7 +16,7 @@ class ApprovalTerminalResult:
     interruptions: list = field(default_factory=list)
 
 
-async def run_with_approval(agent, run_input, hooks, session=None, max_turns=20):
+async def run_with_approval(agent, run_input, hooks, session=None, max_turns=20, approval_policy=None):
     """Run an agent and ask the user before executing approval-required tools."""
 
     once_approved_signatures = set()
@@ -31,6 +32,31 @@ async def run_with_approval(agent, run_input, hooks, session=None, max_turns=20)
             signature = (tool_name, item.arguments or "")
             tool_rule = approval_tool_rule(tool_name)
             pre_event = record_pre_tool_use(hooks, tool_name, item.arguments, tool_rule=tool_rule)
+            policy_decision = approval_policy.decide(tool_name, item.arguments) if approval_policy is not None else None
+            if policy_decision is not None and policy_decision.approve:
+                state.approve(item)
+                record_post_tool_use(
+                    hooks,
+                    pre_event,
+                    decision="approved",
+                    status="supervisor_auto_approved",
+                    reason=policy_decision.reason or "full_supervisor_planned_scope",
+                )
+                continue
+            if policy_decision is not None and policy_decision.reject:
+                state.reject(
+                    item,
+                    rejection_message=policy_decision.rejection_message
+                    or "主管拒绝了该工具调用，请调整为已声明的工具和命令后继续。",
+                )
+                record_post_tool_use(
+                    hooks,
+                    pre_event,
+                    decision="rejected",
+                    status="supervisor_rejected",
+                    reason=policy_decision.reason or "full_supervisor_policy_rejected",
+                )
+                continue
             if (
                 tool_name in approved_tools_for_session
                 or tool_rule in approved_tool_rules

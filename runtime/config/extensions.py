@@ -11,6 +11,7 @@ from skills.registry import SKILLS
 
 
 PROTECTED_SYSTEM_SKILLS = {
+    "lucode_native_capability",
     "task_router",
     "query_refiner",
     "orchestrator_planner",
@@ -41,7 +42,8 @@ def extension_roots(workspace_context=None) -> ExtensionRoots:
 def discover_skill_layers(workspace_context=None) -> dict[str, list[dict[str, Any]]]:
     roots = extension_roots(workspace_context)
     layers = {
-        "core": _discover_skills_in_dir(roots.app_home / "skills", "core"),
+        "core": _discover_skills_in_dir(roots.app_home / "core_skills", "core"),
+        "sample": _discover_skills_in_dir(roots.app_home / "skills", "sample"),
         "user": _discover_skills_in_dir(roots.user_home / "skills", "user"),
         "workspace": _discover_skills_in_dir(roots.workspace_root / ".lucode" / "skills", "workspace"),
     }
@@ -76,7 +78,7 @@ def render_workspace_skills(workspace_context=None) -> str:
 def render_all_skills(workspace_context=None) -> str:
     layers = discover_skill_layers(workspace_context)
     lines = ["全部 Skills"]
-    for title, key in [("内置核心", "core"), ("用户全局", "user"), ("当前项目", "workspace")]:
+    for title, key in [("内置核心", "core"), ("样例/测试", "sample"), ("用户全局", "user"), ("当前项目", "workspace")]:
         lines.append("")
         lines.append(title)
         items = layers.get(key) or []
@@ -259,6 +261,7 @@ def _compact_text(value, *, limit: int) -> str:
 def _source_label(source: str | None) -> str:
     return {
         "core": "内置核心",
+        "sample": "样例/测试",
         "user": "用户全局",
         "workspace": "当前项目",
     }.get(str(source or ""), str(source or "未知"))

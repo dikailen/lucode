@@ -45,9 +45,9 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
     if plan.route_type == "multi_agent":
         if len(plan.tasks) < 2:
             errors.append("multi_agent 路线至少需要 2 个任务。")
-        if not plan.needs_synthesis:
+        if not plan.needs_synthesis and not _uses_supervised_lead_finalization(plan):
             errors.append("multi_agent 路线必须启用汇总副脑。")
-        if not plan.synthesis_instruction:
+        if not plan.synthesis_instruction and not _uses_supervised_lead_finalization(plan):
             errors.append("multi_agent 路线必须提供 synthesis_instruction。")
 
     task_ids = [task.id for task in plan.tasks]
@@ -103,6 +103,16 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
                     errors.append(privacy_policy.mcp_warning(mcp_id))
 
     return PlanValidation(valid=not errors, errors=errors, warnings=warnings)
+
+
+def _uses_supervised_lead_finalization(plan: PlannerResult) -> bool:
+    contract = dict((getattr(plan, "memory_interface", {}) or {}).get("execution_contract") or {})
+    helper = dict(contract.get("summary_helper") or {})
+    return (
+        str(contract.get("supervisor_route") or "") == "team"
+        and helper.get("enabled") is False
+        and str(helper.get("reason") or "") == "lead_supervisor_final_answer"
+    )
 
 
 def format_validation(validation: PlanValidation) -> str:

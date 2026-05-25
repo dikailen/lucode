@@ -11,6 +11,7 @@ from skills.registry import SKILLS
 
 CATALOG_DIR_NAME = "catalogs"
 INTERNAL_SKILLS = {
+    "lucode_native_capability",
     "task_router",
     "query_refiner",
     "orchestrator_planner",
@@ -125,46 +126,41 @@ def _run_model_probe_refresh(project_root: Path, model_catalog: dict) -> dict:
 
 
 def build_skill_catalog(project_root: Path) -> dict:
+    project_root = Path(project_root).resolve()
     existing = _load_json(project_root / CATALOG_DIR_NAME / "skill_catalog.json")
     existing_by_id = {item["id"]: item for item in existing.get("skills", []) if "id" in item}
 
     folder_to_id = {meta["folder"]: skill_id for skill_id, meta in SKILLS.items()}
-    skills_dir = project_root / "skills"
     skill_items = []
 
-    for skill_file in sorted(skills_dir.glob("*/SKILL.md")):
-        folder = skill_file.parent.name
-        skill_id = folder_to_id.get(folder) or _normalize_id(folder)
-        meta = _read_skill_frontmatter(skill_file)
-        previous = existing_by_id.get(skill_id, {})
-        policy = KNOWN_SKILL_POLICIES.get(skill_id, {})
+    skill_roots = [
+        (project_root / "core_skills", "core"),
+        (project_root / "skills", "sample"),
+        (_user_skill_root(), "user"),
+        (project_root / ".lucode" / "skills", "workspace"),
+        (_workspace_skill_root(), "workspace"),
+    ]
 
-        description = meta.get("description") or previous.get("summary_zh") or ""
-        display_name = previous.get("display_name_zh") or meta.get("name") or folder
-        selectable = skill_id not in INTERNAL_SKILLS
-
-        item = {
-            "id": skill_id,
-            "folder": folder,
-            "display_name_zh": display_name,
-            "summary_zh": description,
-            "tags": previous.get("tags") or _guess_tags(skill_id, description),
-            "default_model": previous.get("default_model")
-            or policy.get("default_model")
-            or _guess_default_model(skill_id, description),
-            "allowed_mcp": policy.get("allowed_mcp", previous.get("allowed_mcp") or []),
-            "good_for": previous.get("good_for") or _guess_good_for(description),
-            "not_for": previous.get("not_for") or [],
-            "cost_level": policy.get("cost_level") or previous.get("cost_level") or "medium",
-            "risk_level": policy.get("risk_level") or previous.get("risk_level") or "medium",
-            "selectable": selectable,
-            "internal": skill_id in INTERNAL_SKILLS,
-        }
-        skill_items.append(item)
+    seen_skill_paths: set[Path] = set()
+    for skills_dir, source in skill_roots:
+        for skill_file in sorted(skills_dir.glob("*/SKILL.md")):
+            resolved = skill_file.resolve()
+            if resolved in seen_skill_paths:
+                continue
+            seen_skill_paths.add(resolved)
+            skill_items.append(
+                _catalog_item_for_skill_file(
+                    skill_file,
+                    project_root=project_root,
+                    source=source,
+                    folder_to_id=folder_to_id,
+                    existing_by_id=existing_by_id,
+                )
+            )
 
     return {
         "version": 1,
-        "description": "Auto-refreshed local skill library used by the orchestrator planner. Full SKILL.md files are loaded only when an execution Agent is created.",
+        "description": "Auto-refreshed local skill library used by the orchestrator planner. Core skills describe Lucode native abilities; sample skills are kept for compatibility and hidden from default planner prompts.",
         "skills": skill_items,
         "future_memory_interface": {
             "enabled": False,
@@ -173,6 +169,93 @@ def build_skill_catalog(project_root: Path) -> dict:
             "expected_outputs": ["relevant_memory_items"],
         },
     }
+
+
+def _user_skill_root() -> Path:
+    return Path(os.environ.get("LUCODE_USER_HOME") or Path.home() / ".lucode") / "skills"
+
+
+def _workspace_skill_root() -> Path:
+    return Path(os.environ.get("LUCODE_WORKSPACE_ROOT") or "") / ".lucode" / "skills"
+
+
+def _catalog_item_for_skill_file(
+    skill_file: Path,
+    *,
+    project_root: Path,
+    source: str,
+    folder_to_id: dict[str, str],
+    existing_by_id: dict[str, dict],
+) -> dict:
+    folder = skill_file.parent.name
+    skill_id = folder_to_id.get(folder) or _normalize_id(folder)
+    meta = _read_skill_frontmatter(skill_file)
+    previous = existing_by_id.get(skill_id, {})
+    policy = KNOWN_SKILL_POLICIES.get(skill_id, {})
+
+    description = meta.get("description") or previous.get("summary_zh") or ""
+    display_name = previous.get("display_name_zh") or meta.get("name") or folder
+    internal = skill_id in INTERNAL_SKILLS or source == "core"
+    selectable = skill_id == "lucode_native_capability" or (
+        not internal and source in {"sample", "user", "workspace"}
+    )
+    planner_visible = source != "sample" and selectable
+    default_model = (
+        previous.get("default_model")
+        or policy.get("default_model")
+        or _guess_default_model(skill_id, description)
+    )
+    allowed_mcp = policy.get("allowed_mcp", previous.get("allowed_mcp") or [])
+    if skill_id == "lucode_native_capability":
+        default_model = ""
+        allowed_mcp = [
+            "project_filesystem_readonly",
+            "code_locator",
+            "workspace_edit",
+            "command_runner",
+            "git_tools",
+            "safe_backup",
+            "web_search",
+            "context7_docs",
+            "grep_code_search",
+        ]
+
+    return {
+        "id": skill_id,
+        "folder": folder,
+        "display_name_zh": display_name,
+        "summary_zh": description,
+        "tags": previous.get("tags") or _guess_tags(skill_id, description),
+        "default_model": default_model,
+        "allowed_mcp": allowed_mcp,
+        "good_for": previous.get("good_for") or _guess_good_for(description),
+        "not_for": previous.get("not_for") or [],
+        "cost_level": policy.get("cost_level") or previous.get("cost_level") or "medium",
+        "risk_level": policy.get("risk_level") or previous.get("risk_level") or "medium",
+        "selectable": selectable,
+        "internal": internal,
+        "planner_visible": planner_visible,
+        "source": source,
+        "path": _catalog_path_for_skill_file(skill_file, source=source, project_root=project_root),
+    }
+
+
+def _catalog_path_for_skill_file(skill_file: Path, *, source: str, project_root: Path) -> str:
+    """Return a non-sensitive path that the runtime can resolve by source layer."""
+
+    folder = skill_file.parent.name
+    if source == "core":
+        return f"core_skills/{folder}"
+    if source == "sample":
+        return f"skills/{folder}"
+    if source == "user":
+        return f"skills/{folder}"
+    if source == "workspace":
+        return f".lucode/skills/{folder}"
+    try:
+        return skill_file.parent.resolve().relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        return folder
 
 
 def build_mcp_catalog(project_root: Path | None = None) -> dict:
@@ -378,7 +461,7 @@ def _normalize_mcp_id(stem: str) -> str:
 
 
 def _read_skill_frontmatter(skill_file: Path) -> dict:
-    text = skill_file.read_text(encoding="utf-8")
+    text = skill_file.read_text(encoding="utf-8-sig")
     if not text.startswith("---"):
         return {}
     end = text.find("---", 3)

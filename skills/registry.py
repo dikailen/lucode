@@ -1,4 +1,8 @@
 SKILLS = {
+    "lucode_native_capability": {
+        "folder": "../core_skills/lucode-native-capability",
+        "description": "Lucode 原生终端代理能力契约，负责读写文件、CLI 优先、MCP 兜底、上下文复用、审批安全和 full 模式主管协作边界。",
+    },
     "jpc_now_skill": {
         "folder": "jpc_now_skill",
         "description": "负责 Java/Python/C++ 代码开发、代码评审、重构、修复 bug 和代码规范建议。",

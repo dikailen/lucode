@@ -28,12 +28,14 @@ def load_permission_policy() -> dict:
     return load_catalog("permission_policy.json")
 
 
-def compact_skill_catalog_for_prompt() -> str:
+def compact_skill_catalog_for_prompt(catalog: dict | None = None) -> str:
     """Return a compact skill library for the planner prompt."""
 
-    catalog = load_skill_catalog()
+    catalog = catalog or load_skill_catalog()
     lines = ["Skill 图书馆（只列主脑决策需要的信息）："]
     for item in catalog.get("skills", []):
+        if item.get("planner_visible") is False or item.get("source") == "sample":
+            continue
         if not item.get("selectable", True):
             lines.append(
                 f"- {item['id']} | internal | 用途:{_short(item.get('summary_zh', ''))}"

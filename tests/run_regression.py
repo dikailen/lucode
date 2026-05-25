@@ -92,6 +92,23 @@ class BudgetedFilesystemTests(unittest.TestCase):
         self.assertRegex(payload["sha256"], r"^[a-f0-9]{64}$")
         self.assertEqual(payload["sha256"], hashlib.sha256((PROJECT_ROOT / "main.py").read_bytes()).hexdigest())
 
+    def test_supervisor_read_budget_expands_once_after_base_limit(self):
+        os.environ["BUDGETED_FS_MAX_READ_CALLS"] = "1"
+        os.environ["BUDGETED_FS_SUPERVISOR_EXPANSION"] = "1"
+        os.environ["BUDGETED_FS_SUPERVISOR_EXTRA_READ_CALLS"] = "1"
+        os.environ["BUDGETED_FS_SUPERVISOR_EXTRA_TOTAL_CHARS"] = "200"
+        self.addCleanup(lambda: os.environ.pop("BUDGETED_FS_SUPERVISOR_EXPANSION", None))
+        self.addCleanup(lambda: os.environ.pop("BUDGETED_FS_SUPERVISOR_EXTRA_READ_CALLS", None))
+        self.addCleanup(lambda: os.environ.pop("BUDGETED_FS_SUPERVISOR_EXTRA_TOTAL_CHARS", None))
+
+        first = json.loads(self.fs.read_file("main.py", max_chars=40))
+        second = json.loads(self.fs.read_file("main.py", max_chars=40))
+
+        self.assertFalse(first["budget"]["supervisor_expansion"]["used"])
+        self.assertTrue(second["budget"]["supervisor_expansion"]["used"])
+        with self.assertRaises(RuntimeError):
+            self.fs.read_file("main.py", max_chars=20)
+
 
 class CodeLocatorTests(unittest.TestCase):
     def setUp(self):
@@ -476,6 +493,10 @@ class CommandAnalyzerTests(unittest.TestCase):
         self.assertEqual(test_command.decision, "allow_limited")
         self.assertFalse(test_command.should_deny)
 
+        node_check = analyze_command("node --check src/game.js")
+        self.assertEqual(node_check.decision, "allow_limited")
+        self.assertFalse(node_check.should_deny)
+
         package_command = analyze_command("npm install")
         self.assertEqual(package_command.decision, "ask")
         self.assertFalse(package_command.should_deny)
@@ -534,6 +555,14 @@ class CommandAnalyzerTests(unittest.TestCase):
         self.assertIn("CommandAnalyzer v2", text)
         self.assertIn("deny", text)
         self.assertIn("rm -rf", text)
+
+    def test_lucode_native_capability_skill_exists_as_core_product_contract(self):
+        skill_path = PROJECT_ROOT / "core_skills" / "lucode-native-capability" / "SKILL.md"
+        self.assertTrue(skill_path.exists())
+        text = skill_path.read_text(encoding="utf-8")
+        self.assertIn("CLI 优先", text)
+        self.assertIn("MCP 兜底", text)
+        self.assertIn("full 模式", text)
 
 
 class ToolHookEventTests(unittest.TestCase):
@@ -639,6 +668,276 @@ class ToolHookEventTests(unittest.TestCase):
         self.assertEqual(len(state.rejections), 1)
         self.assertEqual(len(calls), 1)
         self.assertIn("已拒绝工具调用", result.final_output)
+
+    def test_full_supervisor_auto_approves_planned_workspace_edit_scope(self):
+        import runtime.agent.approval as approval_module
+        from planning.planner_schema import PlannedTask
+        from runtime.agent.approval import FullModeApprovalPolicy, run_with_approval
+
+        class FakeItem:
+            qualified_name = "workspace_edit.write_file"
+            name = "write_file"
+            arguments = json.dumps({"target_path": "src/game.js", "content": "ok", "reason": "planned edit"})
+
+        class FakeState:
+            def __init__(self):
+                self.approved = []
+                self.rejected = []
+
+            def approve(self, item):
+                self.approved.append(item)
+
+            def reject(self, item, rejection_message=""):
+                self.rejected.append((item, rejection_message))
+
+        class FakeResult:
+            def __init__(self, interruptions=(), state=None):
+                self.interruptions = list(interruptions)
+                self._state = state
+                self.final_output = "done"
+
+            def to_state(self):
+                return self._state
+
+        class FakeSession:
+            async def request_approval(self, prompt):
+                raise AssertionError(f"full supervisor should not ask user for planned edit: {prompt}")
+
+        class FakeHooks:
+            def __init__(self):
+                self.tool_events = []
+
+            def record_tool_event(self, event):
+                self.tool_events.append(event)
+
+        task = PlannedTask(
+            id="edit_game",
+            title="Edit game",
+            instruction="Update game code.",
+            skill_id="jpc_now_skill",
+            model="executor",
+            mcp=["workspace_edit"],
+            write_intent=["src/game.js"],
+        )
+        state = FakeState()
+        hooks = FakeHooks()
+        calls = []
+
+        async def fake_run_agent_once(agent, run_input, run_hooks, max_turns=20):
+            calls.append(run_input)
+            if len(calls) == 1:
+                return FakeResult([FakeItem()], state)
+            return FakeResult()
+
+        original = approval_module.run_agent_once
+        approval_module.run_agent_once = fake_run_agent_once
+        try:
+            result = asyncio.run(
+                run_with_approval(
+                    object(),
+                    "input",
+                    hooks,
+                    session=FakeSession(),
+                    approval_policy=FullModeApprovalPolicy.from_task(task),
+                )
+            )
+        finally:
+            approval_module.run_agent_once = original
+
+        self.assertEqual(result.final_output, "done")
+        self.assertEqual(len(state.approved), 1)
+        self.assertEqual(state.rejected, [])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(hooks.tool_events[-1].status, "supervisor_auto_approved")
+        self.assertEqual(hooks.tool_events[-1].reason, "full_supervisor_planned_scope")
+
+    def test_supervisor_auto_approved_events_render_in_status_timeline(self):
+        from runtime.events import ExecutionEventBus
+        from runtime.ui.event_render import render_execution_events
+
+        bus = ExecutionEventBus()
+        bus.emit(
+            "ToolApproved",
+            "full supervisor approved planned scope",
+            mode="full",
+            agent="supervisor",
+            status="supervisor_auto_approved",
+            payload={"reason": "full_supervisor_planned_scope", "tool": "workspace_edit"},
+        )
+
+        rendered = render_execution_events(bus.snapshot(), limit=3)
+
+        self.assertIn("supervisor_auto_approved", rendered)
+        self.assertIn("full", rendered)
+        self.assertIn("workspace_edit", rendered)
+
+    def test_full_supervisor_does_not_auto_approve_dangerous_command(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.agent.approval import FullModeApprovalPolicy
+
+        task = PlannedTask(
+            id="inspect",
+            title="Inspect",
+            instruction="Inspect project.",
+            skill_id="project_explorer",
+            model="executor",
+            mcp=["command_runner"],
+            write_intent=[],
+        )
+
+        decision = FullModeApprovalPolicy.from_task(task).decide(
+            "command_runner.run_command",
+            json.dumps({"command": "rm -rf *", "reason": "dangerous"}),
+        )
+
+        self.assertFalse(decision.approve)
+        self.assertIn("dangerous", decision.reason)
+
+    def test_full_supervisor_auto_approves_planned_low_risk_verification_command(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.agent.approval import FullModeApprovalPolicy
+
+        task = PlannedTask(
+            id="fix_game",
+            title="Fix game",
+            instruction="Fix src/game.js and verify syntax.",
+            skill_id="jpc_now_skill",
+            model="executor",
+            mcp=["workspace_edit", "command_runner"],
+            write_intent=["src/game.js"],
+        )
+
+        decision = FullModeApprovalPolicy.from_task(task).decide(
+            "command_runner.run_command",
+            json.dumps({"command": "node --check src/game.js", "reason": "verify fixed syntax"}),
+        )
+
+        self.assertTrue(decision.approve)
+        self.assertEqual(decision.reason, "full_supervisor_command_analyzer")
+
+    def test_full_supervisor_with_explicit_verification_command_does_not_approve_node_e(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.agent.approval import FullModeApprovalPolicy
+
+        task = PlannedTask(
+            id="fix_game",
+            title="Fix game",
+            instruction=(
+                "Fix src/game.js and verify with exactly node --check src/game.js. "
+                "Read files through readonly tools, not command_runner."
+            ),
+            skill_id="jpc_now_skill",
+            model="executor",
+            mcp=["project_filesystem_readonly", "workspace_edit", "command_runner"],
+            write_intent=["src/game.js"],
+        )
+
+        node_e = FullModeApprovalPolicy.from_task(task).decide(
+            "command_runner.run_command",
+            json.dumps(
+                {
+                    "command": (
+                        "node -e \"const fs=require('fs'); "
+                        "console.log(fs.readFileSync('src/game.js','utf8'))\""
+                    ),
+                    "reason": "read file snippet",
+                }
+            ),
+        )
+        node_check = FullModeApprovalPolicy.from_task(task).decide(
+            "command_runner.run_command",
+            json.dumps({"command": "node --check src/game.js", "reason": "verify fixed syntax"}),
+        )
+
+        self.assertFalse(node_e.approve)
+        self.assertEqual(node_e.reason, "command_not_explicitly_requested")
+        self.assertTrue(node_check.approve)
+
+    def test_full_supervisor_rejects_out_of_policy_command_without_user_prompt(self):
+        import runtime.agent.approval as approval_module
+        from planning.planner_schema import PlannedTask
+        from runtime.agent.approval import FullModeApprovalPolicy, run_with_approval
+
+        class FakeItem:
+            qualified_name = "command_runner.run_command"
+            name = "run_command"
+            arguments = json.dumps(
+                {
+                    "command": "node -e \"const fs=require('fs'); console.log(fs.readFileSync('src/game.js','utf8'))\"",
+                    "reason": "read file snippet",
+                }
+            )
+
+        class FakeState:
+            def __init__(self):
+                self.approved = []
+                self.rejected = []
+
+            def approve(self, item):
+                self.approved.append(item)
+
+            def reject(self, item, rejection_message=""):
+                self.rejected.append((item, rejection_message))
+
+        class FakeResult:
+            def __init__(self, interruptions=(), state=None):
+                self.interruptions = list(interruptions)
+                self._state = state
+                self.final_output = "done"
+
+            def to_state(self):
+                return self._state
+
+        class FakeSession:
+            async def request_approval(self, prompt):
+                raise AssertionError(f"supervisor rejection should not ask user: {prompt}")
+
+        class FakeHooks:
+            def __init__(self):
+                self.tool_events = []
+
+            def record_tool_event(self, event):
+                self.tool_events.append(event)
+
+        task = PlannedTask(
+            id="fix_game",
+            title="Fix game",
+            instruction="Fix src/game.js and verify with exactly node --check src/game.js.",
+            skill_id="jpc_now_skill",
+            model="executor",
+            mcp=["project_filesystem_readonly", "workspace_edit", "command_runner"],
+            write_intent=["src/game.js"],
+        )
+        state = FakeState()
+        hooks = FakeHooks()
+        calls = []
+
+        async def fake_run_agent_once(agent, run_input, run_hooks, max_turns=20):
+            calls.append(run_input)
+            if len(calls) == 1:
+                return FakeResult([FakeItem()], state)
+            return FakeResult()
+
+        original = approval_module.run_agent_once
+        approval_module.run_agent_once = fake_run_agent_once
+        try:
+            result = asyncio.run(
+                run_with_approval(
+                    object(),
+                    "input",
+                    hooks,
+                    session=FakeSession(),
+                    approval_policy=FullModeApprovalPolicy.from_task(task),
+                )
+            )
+        finally:
+            approval_module.run_agent_once = original
+
+        self.assertEqual(result.final_output, "done")
+        self.assertEqual(state.approved, [])
+        self.assertEqual(len(state.rejected), 1)
+        self.assertIn("node --check src/game.js", state.rejected[0][1])
+        self.assertEqual(hooks.tool_events[-1].status, "supervisor_rejected")
 
     def test_token_logger_hooks_exposes_internal_tool_event_buffer(self):
         from runtime.hooks import build_tool_event
@@ -908,6 +1207,23 @@ class OperationLogTests(unittest.TestCase):
         self.assertEqual(record["tool"], "runtime_fast_path.project_manifest")
         self.assertFalse(record["approval"]["required"])
         self.assertEqual(record["params_summary"]["task_id"], "manifest")
+
+    def test_runtime_fast_path_project_manifest_skips_repair_and_verification_task(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.execution.fast_paths import _can_fast_path_project_manifest_summary
+
+        task = PlannedTask(
+            id="fix_snake",
+            title="检查并修复贪吃蛇项目运行问题",
+            instruction="重点检查 src/game.js，可以修改必要代码，并运行 node --check src/game.js 验证。",
+            skill_id="jpc_now_skill",
+            model="local_model",
+            mcp=["code_locator", "project_filesystem_readonly", "workspace_edit", "command_runner"],
+            read_set=["src/game.js", "package.json", "pyproject.toml"],
+            write_intent=["src/game.js"],
+        )
+
+        self.assertFalse(_can_fast_path_project_manifest_summary(task))
 
     def test_runtime_fast_path_summarizes_readonly_config_files(self):
         from planning.planner_schema import PlannedTask
@@ -2631,14 +2947,14 @@ class RuntimeHelpersTests(unittest.TestCase):
 
         class FakeData:
             type = "response.output_text.delta"
-            delta = "???????"
+            delta = "已经输出的答案"
 
         class FakeEvent:
             type = "raw_response_event"
             data = FakeData()
 
         class FakeStreamResult:
-            final_output = "???????"
+            final_output = "已经输出的答案"
             interruptions = []
 
             async def stream_events(self):
@@ -2661,12 +2977,12 @@ class RuntimeHelpersTests(unittest.TestCase):
         runner_module.streaming_enabled = lambda: True
         try:
             with contextlib.redirect_stdout(io.StringIO()):
-                result = asyncio.run(runner_module.run_agent_once(object(), "??", hooks, max_turns=3))
+                result = asyncio.run(runner_module.run_agent_once(object(), "你好", hooks, max_turns=3))
         finally:
             runner_module.runner_class = original_runner_class
             runner_module.streaming_enabled = original_streaming_enabled
 
-        self.assertEqual(result.final_output, "???????")
+        self.assertEqual(result.final_output, "已经输出的答案")
         self.assertTrue(hooks.streamed_output_seen)
 
     def test_streaming_runner_reraises_tail_close_without_visible_output(self):
@@ -2695,7 +3011,7 @@ class RuntimeHelpersTests(unittest.TestCase):
         runner_module.streaming_enabled = lambda: True
         try:
             with self.assertRaisesRegex(RuntimeError, "incomplete chunked read"):
-                asyncio.run(runner_module.run_agent_once(object(), "??", Hooks(), max_turns=3))
+                asyncio.run(runner_module.run_agent_once(object(), "你好", Hooks(), max_turns=3))
         finally:
             runner_module.runner_class = original_runner_class
             runner_module.streaming_enabled = original_streaming_enabled
@@ -4675,6 +4991,22 @@ class LucodeCliEntryTests(unittest.TestCase):
         self.assertRegex(result.stdout.strip(), r"^lucode \d+\.\d+\.\d+")
         self.assertNotIn("Lucode startup profile", result.stdout)
 
+    def test_python_entry_module_version_executes_main(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "lucode.entry", "--version"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            timeout=20,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout.strip(), r"^lucode \d+\.\d+\.\d+")
+        self.assertNotIn("Lucode startup profile", result.stdout)
+
     def test_lucode_init_and_doctor_are_available(self):
         workspace = TEMP_ROOT / f"cli_workspace_{uuid.uuid4().hex}"
         user_home = TEMP_ROOT / f"cli_user_{uuid.uuid4().hex}"
@@ -5176,12 +5508,77 @@ class LucodeCliEntryTests(unittest.TestCase):
         self.assertFalse(streamed_output_is_sufficient(TinyHooks()))
         self.assertTrue(streamed_output_is_sufficient(EnoughHooks()))
 
+    def test_lead_supervisor_final_output_is_printed_even_after_worker_streaming(self):
+        from runtime.ui.output_visibility import should_suppress_final_output
+
+        class WorkerStreamHooks:
+            streamed_output_seen = True
+            streamed_output_chars = 200
+
+        self.assertFalse(
+            should_suppress_final_output(
+                WorkerStreamHooks(),
+                "主管最终汇报\n- worker 报告：\n  - expert_a: done",
+            )
+        )
+
     def test_kernel_response_carries_run_context_summary(self):
         from runtime.kernel import KernelResponse
 
         response = KernelResponse(final_output="ok", run_context_summary="本轮共享上下文：README.md")
 
         self.assertEqual(response.run_context_summary, "本轮共享上下文：README.md")
+
+    def test_kernel_facade_turn_guard_returns_recovery_message_on_timeout(self):
+        from types import SimpleNamespace
+        import runtime.kernel as kernel_module
+
+        class FakeMCPServerManager:
+            def __init__(self, *args, **kwargs):
+                self.started_ids = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        class FakeStrategy:
+            mode_name = "solo"
+
+            async def execute(self, context):
+                await asyncio.sleep(1)
+                return "late result"
+
+        class FakeHooks:
+            def print_summary(self):
+                return None
+
+        old_timeout = os.environ.get("AGENTS_TURN_TIMEOUT_SECONDS")
+        os.environ["AGENTS_TURN_TIMEOUT_SECONDS"] = "0.01"
+        original_manager = kernel_module.MCPServerManager
+        original_strategy = kernel_module.create_execution_strategy
+        kernel_module.MCPServerManager = FakeMCPServerManager
+        kernel_module.create_execution_strategy = lambda **kwargs: FakeStrategy()
+        try:
+            response = asyncio.run(
+                kernel_module.KernelFacade(
+                    SimpleNamespace(workspace_root=TEMP_ROOT / "turn_guard_workspace")
+                ).run_once(
+                    "slow task",
+                    model_registry=object(),
+                    hooks=FakeHooks(),
+                    settings=SimpleNamespace(execution_mode="solo"),
+                )
+            )
+        finally:
+            kernel_module.MCPServerManager = original_manager
+            kernel_module.create_execution_strategy = original_strategy
+            _restore_env("AGENTS_TURN_TIMEOUT_SECONDS", old_timeout)
+
+        self.assertTrue(response.stopped)
+        self.assertIn("超时", response.final_output)
+        self.assertIn("AGENTS_TURN_TIMEOUT_SECONDS", response.final_output)
 
     def test_help_command_with_filter_renders_command_palette(self):
         from runtime.config.cli import render_readonly_command
@@ -5799,6 +6196,36 @@ class RuntimeInterruptTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("edit", console.choice_commands)
         self.assertIn("Enter", console.choice_toolbar)
         self.assertIn("y/n", console.choice_toolbar)
+
+    async def test_runtime_session_drops_orphan_approval_tokens_after_turn(self):
+        from main import RuntimeCommandSession
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.lines = asyncio.Queue()
+                self.deferred = []
+                self.lines.put_nowait("session")
+
+            def runtime_control_input_enabled(self):
+                return True
+
+            async def read_runtime_control_line(self):
+                return await self.lines.get()
+
+            def defer(self, line):
+                self.deferred.append(line)
+
+        async def short_turn():
+            await asyncio.sleep(0.01)
+            return "finished"
+
+        console = FakeConsole()
+        result = await RuntimeCommandSession(console).run(short_turn())
+
+        self.assertEqual(result.final_output, "finished")
+        self.assertEqual(console.deferred, [])
 
     async def test_runtime_session_times_out_and_cancels_turn(self):
         from main import RuntimeCommandSession
@@ -7378,6 +7805,84 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(events[0].mode, "serial")
         self.assertEqual(events[1].status, "ok")
 
+    def test_execution_event_renderer_outputs_compact_timeline(self):
+        from runtime.events import ExecutionEventBus
+        from runtime.ui.event_render import render_execution_events
+
+        bus = ExecutionEventBus()
+        empty = render_execution_events(bus.snapshot())
+
+        self.assertIn("执行事件", empty)
+        self.assertIn("暂无事件", empty)
+
+        bus.emit("PlanningStarted", "开始规划", mode="serial")
+        bus.emit("FastPathUsed", "命中只读快速路径", task_id="inspect", payload={"tool": "git", "action": "diff"})
+        bus.emit("TaskFailed", "任务失败", task_id="edit", status="failed", payload={"reason": "blocked"})
+        rendered = render_execution_events(bus.snapshot(), limit=2)
+
+        self.assertIn("执行事件", rendered)
+        self.assertIn("FastPathUsed", rendered)
+        self.assertIn("git diff", rendered)
+        self.assertIn("TaskFailed", rendered)
+        self.assertIn("blocked", rendered)
+        self.assertNotIn("PlanningStarted", rendered)
+
+    def test_progress_snapshot_can_include_execution_events(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.ui.progress import render_task_status_board
+
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="test",
+            refined_request="检查 git diff",
+            tasks=[
+                PlannedTask(
+                    id="inspect",
+                    title="检查差异",
+                    instruction="git diff",
+                    skill_id="project_explorer",
+                    model="local_model",
+                    mcp=[],
+                )
+            ],
+        )
+        state = PipelineRunState.create("检查 git diff", plan, project_root=TEMP_ROOT)
+        state.emit_event("PlanningStarted", "开始规划", mode="serial")
+        state.record_task_started(plan.tasks[0])
+
+        rendered = render_task_status_board(state, mode="serial", attempt=1, include_events=True)
+
+        self.assertIn("执行事件", rendered)
+        self.assertIn("PlanningStarted", rendered)
+        self.assertIn("TaskStarted", rendered)
+        _assert_box_lines_aligned(self, rendered, label="progress with events")
+
+    def test_pipeline_state_records_fast_path_event(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+
+        task = PlannedTask(
+            id="status",
+            title="查看状态",
+            instruction="git status",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=[],
+        )
+        state = PipelineRunState.create(
+            "查看 git status",
+            PlannerResult(route_type="single_agent", reason="test", refined_request="查看 git status", tasks=[task]),
+            project_root=TEMP_ROOT,
+        )
+
+        state.record_fast_path_used(task, tool="git", action="status")
+
+        events = state.event_bus.snapshot()
+        self.assertEqual(events[-1].event_type, "FastPathUsed")
+        self.assertEqual(events[-1].task_id, "status")
+        self.assertEqual(events[-1].payload["tool"], "git")
+
     def test_gate_adds_code_pipeline_tools(self):
         from planning.planner_schema import PlannedTask, PlannerResult
         from runtime.execution.pipeline import apply_pipeline_gate
@@ -7865,6 +8370,45 @@ class PipelineTests(unittest.TestCase):
         rendered = state.run_context.render_for_task("next")
         self.assertIn("README.md", rendered)
         self.assertIn("inspect_readme", rendered)
+
+    def test_planned_task_fast_path_records_execution_event(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.task_runner import _run_planned_task
+
+        workspace = TEMP_ROOT / f"planned_fast_path_event_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        (workspace / "pyproject.toml").write_text("[project]\nname = \"lucode\"\n", encoding="utf-8")
+        task = PlannedTask(
+            id="manifest",
+            title="读取项目清单",
+            instruction="只读总结 pyproject.toml 的项目清单。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=[],
+        )
+        state = PipelineRunState.create(
+            "总结 pyproject.toml",
+            PlannerResult(route_type="multi_agent", reason="test", refined_request="总结 pyproject.toml", tasks=[task]),
+            project_root=workspace,
+        )
+
+        asyncio.run(
+            _run_planned_task(
+                "总结 pyproject.toml",
+                task,
+                workspace,
+                factory=object(),
+                hooks=None,
+                run_agent=lambda *args, **kwargs: None,
+                run_state=state,
+            )
+        )
+
+        event_types = [event.event_type for event in state.event_bus.snapshot()]
+        self.assertIn("FastPathUsed", event_types)
+        self.assertIn("TaskCompleted", event_types)
 
     def test_declared_read_set_context_infers_explicit_safe_files_from_request(self):
         from planning.planner_schema import PlannedTask
@@ -8391,6 +8935,77 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("command_runner", plan.tasks[0].mcp)
         self.assertIn("先定位后少量读取", plan.tasks[0].risk_notes)
 
+    def test_gate_treats_repair_and_node_check_as_edit_and_verify_even_with_readonly_tool_name(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import apply_pipeline_gate
+
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="检查并修复贪吃蛇项目运行问题。",
+            refined_request="重点检查 src/game.js，可以修改必要代码，并运行 node --check src/game.js 验证。",
+            tasks=[
+                PlannedTask(
+                    id="fix_snake_game",
+                    title="检查并修复贪吃蛇项目运行问题",
+                    instruction="重点检查 src/game.js，可以修改必要代码，并运行 node --check src/game.js 验证。",
+                    skill_id="jpc_now_skill",
+                    model="local_model",
+                    mcp=["code_locator", "project_filesystem_readonly"],
+                )
+            ],
+        )
+
+        decision = apply_pipeline_gate(plan, plan.refined_request)
+
+        self.assertTrue(decision.needs_code_pipeline)
+        self.assertTrue(decision.edit_intent)
+        self.assertTrue(decision.test_intent)
+        self.assertIn("workspace_edit", plan.tasks[0].mcp)
+        self.assertIn("command_runner", plan.tasks[0].mcp)
+
+    def test_gate_keeps_explorer_readonly_when_separate_fix_task_will_edit_and_verify(self):
+        from planning.plan_validator import validate_plan
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.execution_contract import normalize_execution_contract
+        from runtime.execution.pipeline import apply_pipeline_gate
+
+        plan = PlannerResult(
+            route_type="multi_agent",
+            reason="先定位，再修复并验证。",
+            refined_request="检查并修复 src/game.js，可以修改必要代码，并运行 node --check src/game.js 验证。",
+            tasks=[
+                PlannedTask(
+                    id="explore",
+                    title="项目结构分析与问题定位",
+                    instruction="读取 src/game.js，识别无法运行的问题，输出修复建议。",
+                    skill_id="project_explorer",
+                    model="deepseek_v4_flash_model",
+                    mcp=["project_filesystem_readonly", "code_locator"],
+                    read_set=["src/game.js"],
+                ),
+                PlannedTask(
+                    id="fix",
+                    title="修复代码并验证",
+                    instruction="根据定位结果修复 src/game.js，并运行 node --check src/game.js 验证。",
+                    skill_id="jpc_now_skill",
+                    model="mimo_v25_pro_model",
+                    mcp=["project_filesystem_readonly", "code_locator"],
+                    depends_on=["explore"],
+                    write_intent=["src/game.js"],
+                ),
+            ],
+        )
+
+        normalize_execution_contract(plan, plan.refined_request, mode="full")
+        decision = apply_pipeline_gate(plan, plan.refined_request)
+
+        self.assertEqual(decision.applied_tasks, ["explore", "fix"])
+        self.assertNotIn("workspace_edit", plan.tasks[0].mcp)
+        self.assertNotIn("command_runner", plan.tasks[0].mcp)
+        self.assertIn("workspace_edit", plan.tasks[1].mcp)
+        self.assertIn("command_runner", plan.tasks[1].mcp)
+        self.assertTrue(validate_plan(plan).valid)
+
     def test_dependency_context_is_added_to_later_task_prompt(self):
         from planning.planner_schema import PlannedTask
         from runtime.execution.dynamic import _dependency_context_for_task, _task_prompt
@@ -8586,6 +9201,27 @@ class AgentFactorySoloTests(unittest.TestCase):
         self.assertIn("`get_file_outline` 最多调用 1 次", instructions)
         self.assertIn("`read_file` / `read_multiple_files` 合计最多 2 次", instructions)
         self.assertIn("不要继续搜索相邻文件", instructions)
+
+    def test_full_task_agent_mentions_supervisor_read_plan_and_expansion(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.agents.factory import AgentFactory
+
+        task = PlannedTask(
+            id="full_read",
+            title="并行分析运行时",
+            instruction="分析 runtime/execution 和 runtime/agent，不修改文件。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["code_locator", "project_filesystem_readonly"],
+            read_set=["runtime/execution", "runtime/agent"],
+        )
+
+        instructions = AgentFactory(None, None)._task_instructions(task, execution_mode="full")
+
+        self.assertIn("full 主管模式", instructions)
+        self.assertIn("读取计划", instructions)
+        self.assertIn("主管扩容", instructions)
+        self.assertIn("共享给后续 Agent", instructions)
 
 
 class ModelRoleConfigTests(unittest.TestCase):
@@ -9415,7 +10051,7 @@ class AuditorLoopTests(unittest.TestCase):
 
     def test_repair_strategy_for_verification_failure(self):
         from runtime.safety.auditor import AuditResult
-        from runtime.safety.repair_loop import repair_strategy_for_audit
+        from runtime.safety.repair_loop import build_repair_request, repair_strategy_for_audit
 
         audit = AuditResult(
             passed=False,
@@ -9428,6 +10064,40 @@ class AuditorLoopTests(unittest.TestCase):
 
         self.assertEqual(strategy["type"], "verification_failed")
         self.assertIn("run verification", strategy["instruction"].lower())
+
+        prompt = build_repair_request(
+            "请修复 src/game.js，并运行 node --check src/game.js 验证。",
+            audit,
+            attempt=2,
+        )
+        self.assertIn("node --check src/game.js", prompt)
+        self.assertIn("不要扩大为其它运行命令", prompt)
+
+    def test_gate_instruction_locks_explicit_node_check_verification_command(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import apply_pipeline_gate
+
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="fix js",
+            refined_request="修复 src/game.js，并运行 node --check src/game.js 验证。",
+            tasks=[
+                PlannedTask(
+                    id="fix_js",
+                    title="修复 JS",
+                    instruction="修复 src/game.js，并运行 node --check src/game.js 验证。",
+                    skill_id="jpc_now_skill",
+                    model="local_model",
+                    mcp=["code_locator", "project_filesystem_readonly"],
+                    write_intent=["src/game.js"],
+                )
+            ],
+        )
+
+        apply_pipeline_gate(plan, plan.refined_request)
+
+        self.assertIn("只能运行明确指定的验证命令：node --check src/game.js", plan.tasks[0].instruction)
+        self.assertIn("不要改成 node src/game.js", plan.tasks[0].instruction)
 
     def test_auditor_checks_expected_outputs_and_strict_acceptance_markers(self):
         from planning.planner_schema import PlannedTask, PlannerResult
@@ -9589,6 +10259,46 @@ class AuditorLoopTests(unittest.TestCase):
         self.assertFalse(audit.passed)
         self.assertTrue(any("语义验收未完全确认" in issue for issue in audit.remaining_issues))
 
+    def test_auditor_softens_report_style_semantic_gaps_after_verified_code_repair(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.safety.auditor import audit_execution
+        from runtime.execution.pipeline import PipelineRunState
+
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="fix snake",
+            refined_request="修复 src/game.js 并运行 node --check src/game.js 验证。",
+            tasks=[
+                PlannedTask(
+                    id="fix_snake",
+                    title="修复贪吃蛇语法错误",
+                    instruction="修复 src/game.js 并验证。",
+                    skill_id="jpc_now_skill",
+                    model="local_model",
+                    mcp=["workspace_edit", "command_runner"],
+                    acceptance_criteria=[
+                        "成功定位并读取src/game.js及相关文件",
+                        "运行 node --check src/game.js 验证通过",
+                        "输出了清晰、完整的修复说明",
+                    ],
+                    expected_outputs=["修改后的src/game.js文件"],
+                    write_intent=["src/game.js"],
+                )
+            ],
+        )
+        state = PipelineRunState.create(plan.refined_request, plan)
+        state.record_task_result(
+            plan.tasks[0],
+            "已修复 src/game.js 中 snake.forEach 缺少闭合大括号的问题；node --check src/game.js 返回码为 0。",
+        )
+        state.record_verification("fix_snake", "Verifier 校验摘要：returncode=0，node --check src/game.js 通过")
+
+        audit = audit_execution(plan, state, "修复完成，src/game.js 语法检查通过。")
+
+        self.assertTrue(audit.passed, audit.remaining_issues)
+        self.assertFalse(audit.needs_replan)
+        self.assertTrue(any("语义验收未完全确认" in warning for warning in audit.warnings))
+
 
 class CheckpointRecoveryTests(unittest.TestCase):
     def setUp(self):
@@ -9741,7 +10451,7 @@ class CatalogRefreshTests(unittest.TestCase):
         from catalog_system.refresher import build_skill_catalog
 
         project_root = TEMP_ROOT / f"skill_catalog_{uuid.uuid4().hex}"
-        skill_dir = project_root / "skills" / "demo-extra-skill"
+        skill_dir = project_root / ".lucode" / "skills" / "demo-extra-skill"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
             "---\nname: demo-extra-skill\ndescription: 临时动态 skill。\n---\n\n# Demo\n",
@@ -9752,6 +10462,143 @@ class CatalogRefreshTests(unittest.TestCase):
         ids = {item["id"] for item in catalog["skills"]}
 
         self.assertIn("demo_extra_skill", ids)
+
+    def test_skill_catalog_reads_utf8_sig_frontmatter_from_user_authored_skills(self):
+        from catalog_system.refresher import build_skill_catalog
+
+        project_root = TEMP_ROOT / f"skill_catalog_sig_{uuid.uuid4().hex}"
+        skill_dir = project_root / ".lucode" / "skills" / "bom-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: bom-skill\ndescription: PowerShell UTF8 BOM skill。\n---\n\n# Demo\n",
+            encoding="utf-8-sig",
+        )
+        self.addCleanup(lambda: _safe_rmtree(project_root))
+
+        catalog = build_skill_catalog(project_root)
+        item = next(item for item in catalog["skills"] if item["id"] == "bom_skill")
+
+        self.assertEqual(item["summary_zh"], "PowerShell UTF8 BOM skill。")
+
+    def test_skill_catalog_discovers_user_and_workspace_skill_layers_from_env(self):
+        from catalog_system.loader import compact_skill_catalog_for_prompt
+        from catalog_system.refresher import build_skill_catalog
+
+        app_root = TEMP_ROOT / f"skill_layers_app_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"skill_layers_user_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"skill_layers_workspace_{uuid.uuid4().hex}"
+        (app_root / "core_skills" / "lucode-native-capability").mkdir(parents=True)
+        (app_root / "core_skills" / "lucode-native-capability" / "SKILL.md").write_text(
+            "---\nname: lucode-native-capability\ndescription: Lucode 原生能力。\n---\n",
+            encoding="utf-8",
+        )
+        (user_home / "skills" / "global-review").mkdir(parents=True)
+        (user_home / "skills" / "global-review" / "SKILL.md").write_text(
+            "---\nname: global-review\ndescription: 用户全局审查。\n---\n",
+            encoding="utf-8",
+        )
+        (workspace / ".lucode" / "skills" / "project-review").mkdir(parents=True)
+        (workspace / ".lucode" / "skills" / "project-review" / "SKILL.md").write_text(
+            "---\nname: project-review\ndescription: 当前项目审查。\n---\n",
+            encoding="utf-8",
+        )
+        old_user_home = os.environ.get("LUCODE_USER_HOME")
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ["LUCODE_USER_HOME"] = str(user_home)
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        self.addCleanup(lambda: _restore_env("LUCODE_USER_HOME", old_user_home))
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(app_root))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        catalog = build_skill_catalog(app_root)
+        by_id = {item["id"]: item for item in catalog["skills"]}
+        prompt_catalog = compact_skill_catalog_for_prompt(catalog=catalog)
+
+        self.assertEqual(by_id["global_review"]["source"], "user")
+        self.assertEqual(by_id["project_review"]["source"], "workspace")
+        self.assertIn("global_review", prompt_catalog)
+        self.assertIn("project_review", prompt_catalog)
+
+    def test_dynamic_user_and_workspace_skills_can_be_loaded_after_discovery(self):
+        from catalog_system.refresher import build_skill_catalog
+        from skills.loader import load_skill, skill_description
+
+        user_home = TEMP_ROOT / f"load_skill_user_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"load_skill_workspace_{uuid.uuid4().hex}"
+        (user_home / "skills" / "global-review").mkdir(parents=True)
+        (user_home / "skills" / "global-review" / "SKILL.md").write_text(
+            "---\nname: global-review\ndescription: 用户全局审查。\n---\n\n# Global Review\n只读审查全局偏好。\n",
+            encoding="utf-8",
+        )
+        (workspace / ".lucode" / "skills" / "project-review").mkdir(parents=True)
+        (workspace / ".lucode" / "skills" / "project-review" / "SKILL.md").write_text(
+            "---\nname: project-review\ndescription: 当前项目审查。\n---\n\n# Project Review\n只读审查当前项目。\n",
+            encoding="utf-8",
+        )
+        old_user_home = os.environ.get("LUCODE_USER_HOME")
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ["LUCODE_USER_HOME"] = str(user_home)
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        self.addCleanup(lambda: _restore_env("LUCODE_USER_HOME", old_user_home))
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        catalog = build_skill_catalog(PROJECT_ROOT)
+        by_id = {item["id"]: item for item in catalog["skills"]}
+
+        self.assertIn("path", by_id["global_review"])
+        self.assertIn("path", by_id["project_review"])
+        self.assertIn("只读审查全局偏好", load_skill("global_review"))
+        self.assertIn("只读审查当前项目", load_skill("project_review"))
+        self.assertEqual(skill_description("global_review"), "用户全局审查。")
+        self.assertEqual(skill_description("project_review"), "当前项目审查。")
+
+    def test_dynamic_skill_loader_rejects_catalog_paths_outside_known_roots(self):
+        from skills import loader as skill_loader
+
+        outside = TEMP_ROOT / f"outside_skill_{uuid.uuid4().hex}"
+        outside.mkdir(parents=True)
+        (outside / "SKILL.md").write_text("---\ndescription: 越界。\n---\n\n# outside\n", encoding="utf-8")
+        self.addCleanup(lambda: _safe_rmtree(outside))
+
+        with patch.object(
+            skill_loader,
+            "_catalog_item_for",
+            return_value={
+                "id": "outside_skill",
+                "folder": "outside",
+                "source": "workspace",
+                "path": str(outside),
+                "summary_zh": "越界。",
+            },
+        ):
+            with self.assertRaises(KeyError):
+                skill_loader.load_skill("outside_skill")
+
+    def test_planner_prompt_keeps_sample_skills_out_of_default_library(self):
+        from catalog_system.loader import compact_skill_catalog_for_prompt
+        from catalog_system.refresher import build_skill_catalog
+
+        catalog = build_skill_catalog(PROJECT_ROOT)
+        by_id = {item["id"]: item for item in catalog["skills"]}
+
+        self.assertIn("lucode_native_capability", by_id)
+        self.assertTrue(by_id["lucode_native_capability"]["internal"])
+        self.assertTrue(by_id["lucode_native_capability"]["selectable"])
+        self.assertTrue(by_id["lucode_native_capability"]["planner_visible"])
+        self.assertEqual(by_id["lucode_native_capability"]["source"], "core")
+        self.assertEqual(by_id["jpc_now_skill"]["source"], "sample")
+        self.assertTrue(by_id["jpc_now_skill"]["selectable"])
+        self.assertFalse(by_id["jpc_now_skill"]["planner_visible"])
+        self.assertEqual(by_id["project_explorer"]["source"], "sample")
+
+        prompt_catalog = compact_skill_catalog_for_prompt(catalog=catalog)
+        self.assertIn("lucode_native_capability", prompt_catalog)
+        self.assertNotIn("jpc_now_skill", prompt_catalog)
+        self.assertNotIn("project_explorer", prompt_catalog)
 
     def test_mcp_catalog_discovers_unknown_mcp_file_as_pending(self):
         from catalog_system.refresher import build_mcp_catalog
@@ -9953,6 +10800,111 @@ class FlywheelTests(unittest.TestCase):
         self.assertIn("jpc_now_skill", entry["tags"])
 
 
+class AgentSpecContractTests(unittest.TestCase):
+    def test_agent_spec_brain_from_runtime_settings_round_trips_role_contract(self):
+        from runtime.agent.spec import BrainSpec
+        from runtime.config.settings import RuntimeSettings
+
+        settings = RuntimeSettings(
+            query_refiner_model_priority=["cheap_refiner"],
+            orchestrator_model_priority=["strong_planner", "backup_planner"],
+            executor_model_priority=["tool_worker"],
+            final_synthesizer_model_priority=["long_context_summary"],
+        )
+
+        spec = BrainSpec.from_runtime_settings(settings, "主脑")
+        restored = BrainSpec.from_dict(spec.to_dict())
+        all_specs = BrainSpec.all_from_runtime_settings(settings)
+
+        self.assertEqual(spec.role, "orchestrator")
+        self.assertEqual(spec.display_name, "主脑规划脑")
+        self.assertEqual(spec.model_priority, ["strong_planner", "backup_planner"])
+        self.assertIn("json", spec.required_capabilities)
+        self.assertEqual(restored, spec)
+        self.assertEqual([item.role for item in all_specs], ["query_refiner", "orchestrator", "executor", "final_synthesizer"])
+        self.assertIn("tools", next(item for item in all_specs if item.role == "executor").required_capabilities)
+
+    def test_agent_spec_task_from_planned_task_preserves_read_write_and_acceptance_contract(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.agent.spec import TaskSpec
+
+        readonly_task = PlannedTask(
+            id="inspect_runtime",
+            title="Inspect runtime",
+            instruction="Read runtime execution code and summarize the parallel path.",
+            skill_id="project_explorer",
+            model="tool_worker",
+            mcp=["project_filesystem_readonly", "code_locator"],
+            depends_on=["scout"],
+            acceptance_criteria=["Explain entry point and scheduler"],
+            expected_outputs=["structured analysis"],
+            read_set=["runtime/execution"],
+            write_intent=[],
+            risk_notes="readonly",
+        )
+
+        spec = TaskSpec.from_planned_task(readonly_task, mode_hint="full")
+        restored = TaskSpec.from_dict(spec.to_dict())
+
+        self.assertEqual(spec.task_id, "inspect_runtime")
+        self.assertEqual(spec.mode_hint, "full")
+        self.assertEqual(spec.read_intent, ["runtime/execution"])
+        self.assertEqual(spec.write_intent, [])
+        self.assertEqual(spec.toolset_id, "readonly_project_analysis")
+        self.assertEqual(spec.dependencies, ["scout"])
+        self.assertEqual(spec.acceptance_criteria, ["Explain entry point and scheduler"])
+        self.assertEqual(restored, spec)
+
+        write_task = PlannedTask(
+            id="edit_config",
+            title="Edit config",
+            instruction="Update config safely.",
+            skill_id="jpc_now_skill",
+            model="tool_worker",
+            mcp=["workspace_edit"],
+            write_intent=[".lucode/config.toml"],
+        )
+        self.assertEqual(TaskSpec.from_planned_task(write_task).toolset_id, "workspace_edit")
+        self.assertEqual(TaskSpec.from_planned_task(write_task).risk_level, "medium")
+
+    def test_agent_spec_toolset_context_and_provider_specs_are_serializable(self):
+        from runtime.agent.spec import ContextContract, ProviderRuntimeSpec, ToolsetPolicy
+
+        policy = ToolsetPolicy.readonly_project_analysis()
+        context = ContextContract(
+            hot_context=["current_turn"],
+            evidence_context=["artifact:readme_summary"],
+            rule_context=["no_secrets"],
+            cold_context=["history:previous_session"],
+            artifact_refs=["ctx_001"],
+        )
+        provider = ProviderRuntimeSpec.from_model_info(
+            {
+                "id": "custom_proxy_deepseek_chat_model",
+                "provider": "custom_proxy",
+                "homepage": "https://example.com",
+                "base_url_value": "https://proxy.example.com/v1",
+                "model_name_value": "deepseek-chat",
+                "backend_type": "openai_compatible",
+                "provider_ref": "custom_proxy/deepseek-chat",
+                "probe": {"status": "ok", "supports_tools": True},
+                "source": "lucode_config",
+            },
+            fallback_models=["backup_model"],
+            auxiliary_models={"cheap_summary": "cheap_model"},
+        )
+
+        self.assertEqual(policy.read_route, "native_preferred")
+        self.assertEqual(policy.read_approval, "none")
+        self.assertEqual(ToolsetPolicy.from_dict(policy.to_dict()), policy)
+        self.assertEqual(ContextContract.from_dict(context.to_dict()), context)
+        self.assertEqual(provider.provider_id, "custom_proxy")
+        self.assertEqual(provider.base_url, "https://proxy.example.com/v1")
+        self.assertEqual(provider.model_name, "deepseek-chat")
+        self.assertEqual(provider.capability_fingerprint["status"], "ok")
+        self.assertEqual(ProviderRuntimeSpec.from_dict(provider.to_dict()), provider)
+
+
 class RuntimeSettingsTests(unittest.TestCase):
     def tearDown(self):
         for key in [
@@ -10070,111 +11022,6 @@ class RuntimeSettingsTests(unittest.TestCase):
 
         with patch("runtime.config.settings.load_model_catalog", return_value=fake_catalog):
             settings = RuntimeSettings.from_env()
-class AgentSpecContractTests(unittest.TestCase):
-    def test_agent_spec_brain_from_runtime_settings_round_trips_role_contract(self):
-        from runtime.agent.spec import BrainSpec
-        from runtime.config.settings import RuntimeSettings
-
-        settings = RuntimeSettings(
-            query_refiner_model_priority=["cheap_refiner"],
-            orchestrator_model_priority=["strong_planner", "backup_planner"],
-            executor_model_priority=["tool_worker"],
-            final_synthesizer_model_priority=["long_context_summary"],
-        )
-
-        spec = BrainSpec.from_runtime_settings(settings, "??")
-        restored = BrainSpec.from_dict(spec.to_dict())
-        all_specs = BrainSpec.all_from_runtime_settings(settings)
-
-        self.assertEqual(spec.role, "orchestrator")
-        self.assertEqual(spec.display_name, "?????")
-        self.assertEqual(spec.model_priority, ["strong_planner", "backup_planner"])
-        self.assertIn("json", spec.required_capabilities)
-        self.assertEqual(restored, spec)
-        self.assertEqual([item.role for item in all_specs], ["query_refiner", "orchestrator", "executor", "final_synthesizer"])
-        self.assertIn("tools", next(item for item in all_specs if item.role == "executor").required_capabilities)
-
-    def test_agent_spec_task_from_planned_task_preserves_read_write_and_acceptance_contract(self):
-        from planning.planner_schema import PlannedTask
-        from runtime.agent.spec import TaskSpec
-
-        readonly_task = PlannedTask(
-            id="inspect_runtime",
-            title="Inspect runtime",
-            instruction="Read runtime execution code and summarize the parallel path.",
-            skill_id="project_explorer",
-            model="tool_worker",
-            mcp=["project_filesystem_readonly", "code_locator"],
-            depends_on=["scout"],
-            acceptance_criteria=["Explain entry point and scheduler"],
-            expected_outputs=["structured analysis"],
-            read_set=["runtime/execution"],
-            write_intent=[],
-            risk_notes="readonly",
-        )
-
-        spec = TaskSpec.from_planned_task(readonly_task, mode_hint="full")
-        restored = TaskSpec.from_dict(spec.to_dict())
-
-        self.assertEqual(spec.task_id, "inspect_runtime")
-        self.assertEqual(spec.mode_hint, "full")
-        self.assertEqual(spec.read_intent, ["runtime/execution"])
-        self.assertEqual(spec.write_intent, [])
-        self.assertEqual(spec.toolset_id, "readonly_project_analysis")
-        self.assertEqual(spec.dependencies, ["scout"])
-        self.assertEqual(spec.acceptance_criteria, ["Explain entry point and scheduler"])
-        self.assertEqual(restored, spec)
-
-        write_task = PlannedTask(
-            id="edit_config",
-            title="Edit config",
-            instruction="Update config safely.",
-            skill_id="jpc_now_skill",
-            model="tool_worker",
-            mcp=["workspace_edit"],
-            write_intent=[".lucode/config.toml"],
-        )
-        self.assertEqual(TaskSpec.from_planned_task(write_task).toolset_id, "workspace_edit")
-        self.assertEqual(TaskSpec.from_planned_task(write_task).risk_level, "medium")
-
-    def test_agent_spec_toolset_context_and_provider_specs_are_serializable(self):
-        from runtime.agent.spec import ContextContract, ProviderRuntimeSpec, ToolsetPolicy
-
-        policy = ToolsetPolicy.readonly_project_analysis()
-        context = ContextContract(
-            hot_context=["current_turn"],
-            evidence_context=["artifact:readme_summary"],
-            rule_context=["no_secrets"],
-            cold_context=["history:previous_session"],
-            artifact_refs=["ctx_001"],
-        )
-        provider = ProviderRuntimeSpec.from_model_info(
-            {
-                "id": "custom_proxy_deepseek_chat_model",
-                "provider": "custom_proxy",
-                "homepage": "https://example.com",
-                "base_url_value": "https://proxy.example.com/v1",
-                "model_name_value": "deepseek-chat",
-                "backend_type": "openai_compatible",
-                "provider_ref": "custom_proxy/deepseek-chat",
-                "probe": {"status": "ok", "supports_tools": True},
-                "source": "lucode_config",
-            },
-            fallback_models=["backup_model"],
-            auxiliary_models={"cheap_summary": "cheap_model"},
-        )
-
-        self.assertEqual(policy.read_route, "native_preferred")
-        self.assertEqual(policy.read_approval, "none")
-        self.assertEqual(ToolsetPolicy.from_dict(policy.to_dict()), policy)
-        self.assertEqual(ContextContract.from_dict(context.to_dict()), context)
-        self.assertEqual(provider.provider_id, "custom_proxy")
-        self.assertEqual(provider.base_url, "https://proxy.example.com/v1")
-        self.assertEqual(provider.model_name, "deepseek-chat")
-        self.assertEqual(provider.capability_fingerprint["status"], "ok")
-        self.assertEqual(ProviderRuntimeSpec.from_dict(provider.to_dict()), provider)
-
-
 
         self.assertEqual(settings.query_refiner_model_priority, ["local_model"])
         self.assertEqual(settings.orchestrator_model_priority, ["local_model"])
@@ -12547,6 +13394,46 @@ class DynamicExecutionModelTests(unittest.TestCase):
         self.assertIn("/models brain 主脑", message)
         self.assertNotIn("Traceback", message)
 
+    def test_dynamic_planning_failure_preserves_event_summary(self):
+        from runtime.config.settings import RuntimeSettings
+        from runtime.execution import dynamic as dynamic_module
+        from runtime.execution.dynamic import _execute_dynamic_attempt
+
+        class FakeRegistry:
+            def first_configured(self, priority):
+                return list(priority or ["planner_model"])[0]
+
+            def get_model(self, model_id):
+                return f"model:{model_id}"
+
+        async def failing_preview_plan(*args, **kwargs):
+            raise AttributeError("'tuple' object has no attribute 'choices'")
+
+        with patch.object(dynamic_module, "preview_plan", failing_preview_plan):
+            output, audit = asyncio.run(
+                _execute_dynamic_attempt(
+                    "只回复 ok",
+                    PROJECT_ROOT,
+                    FakeRegistry(),
+                    mcp_manager=object(),
+                    hooks=object(),
+                    run_agent=object(),
+                    show_plan=False,
+                    settings=RuntimeSettings(
+                        execution_mode="serial",
+                        orchestrator_model_priority=["planner_model"],
+                    ),
+                    privacy_policy=object(),
+                    flywheel=object(),
+                    attempt=1,
+                )
+            )
+
+        self.assertIsNone(audit)
+        self.assertIn("规划阶段失败", output)
+        self.assertIn("PlanningFailed", output.run_context_summary)
+        self.assertIn("planner_model", output.run_context_summary)
+
     def test_invalid_task_model_is_replaced_with_executor(self):
         from planning.planner_schema import PlannerResult, PlannedTask
         from runtime.config.settings import RuntimeSettings
@@ -12698,6 +13585,66 @@ class DynamicExecutionModelTests(unittest.TestCase):
         self.assertIn("任务失败", output)
         self.assertIn("超过最大工具/模型轮数", output)
         self.assertEqual(state.tasks[0].status, "failed")
+
+    def test_single_agent_max_turns_returns_structured_failure(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.single_agent_runner import _run_single_agent
+
+        class MaxTurnsExceeded(Exception):
+            pass
+
+        class FakeFactory:
+            async def create_task_agent(self, task):
+                return f"agent:{task.id}"
+
+            def create_direct_answer_agent(self, model, instruction):
+                return f"direct:{model}"
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20):
+            raise MaxTurnsExceeded("Max turns (12) exceeded")
+
+        class FakeFlywheel:
+            def record_pipeline_state(self, state):
+                pass
+
+        task = PlannedTask(
+            id="inspect",
+            title="检查文件",
+            instruction="检查文件。",
+            skill_id="project_explorer",
+            model="model",
+            mcp=["project_filesystem_readonly"],
+        )
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="test",
+            refined_request="检查文件",
+            tasks=[task],
+        )
+        state = PipelineRunState.create("检查文件", plan, project_root=PROJECT_ROOT)
+
+        output, audit = asyncio.run(
+            _run_single_agent(
+                "检查文件",
+                plan,
+                PROJECT_ROOT,
+                FakeFactory(),
+                hooks=None,
+                run_agent=fake_run_agent,
+                run_state=state,
+                flywheel=FakeFlywheel(),
+                execution_mode="full",
+                show_plan=False,
+                attempt=1,
+            )
+        )
+
+        self.assertIn("任务失败", output)
+        self.assertIn("超过最大工具/模型轮数", output)
+        self.assertFalse(audit.passed)
+        self.assertEqual(state.tasks[0].status, "failed")
+        self.assertEqual(state.event_bus.snapshot()[-1].event_type, "TaskFailed")
 
 
 if __name__ == "__main__":

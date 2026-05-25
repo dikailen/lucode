@@ -30,6 +30,7 @@ from runtime.execution.failure_memory import (
     _record_failure_case_safely,
     _record_flywheel_safely,
 )
+from runtime.execution.execution_contract import normalize_execution_contract
 from runtime.execution.inline_context import (
     _excerpt_query_tokens,
     _inline_project_file_context,
@@ -74,6 +75,7 @@ from runtime.execution.task_runner import (
 from runtime.safety.privacy import PrivacyPolicy
 from runtime.safety.repair_loop import build_repair_request, should_retry
 from runtime.config.settings import RuntimeSettings
+from runtime.events import ExecutionEventBus
 
 
 class DynamicExecutionResult(str):
@@ -164,6 +166,14 @@ async def _execute_dynamic_attempt(
     )
     planner_model_id = settings.select_model_id(model_registry, "orchestrator")
     synthesizer_model_id = settings.select_model_id(model_registry, "final_synthesizer")
+    event_bus = ExecutionEventBus()
+    event_bus.emit(
+        "PlanningStarted",
+        "开始规划本轮任务",
+        mode=settings.execution_mode,
+        agent="orchestrator",
+        payload={"planner_model_id": planner_model_id},
+    )
 
     try:
         refined, plan = await preview_plan(
@@ -174,10 +184,43 @@ async def _execute_dynamic_attempt(
             refiner_enabled=settings.query_refiner_enabled,
         )
     except Exception as exc:
-        return DynamicExecutionResult(format_planning_error(exc, planner_model_id=planner_model_id)), None
+        event_bus.emit(
+            "PlanningFailed",
+            str(exc),
+            mode=settings.execution_mode,
+            agent="orchestrator",
+            status="failed",
+            payload={"planner_model_id": planner_model_id, "reason": str(exc)[:200]},
+        )
+        return DynamicExecutionResult(
+            format_planning_error(exc, planner_model_id=planner_model_id),
+            run_context_summary=_render_event_summary(event_bus),
+        ), None
     _apply_executor_model_defaults(plan, settings, model_registry)
+    execution_contract = normalize_execution_contract(
+        plan,
+        "\n".join([raw_user_input, refined.refined_request]),
+        mode=settings.execution_mode,
+    )
     gate_decision = apply_pipeline_gate(plan, refined.refined_request)
     run_state = PipelineRunState.create(refined.refined_request, plan, project_root=project_root)
+    run_state.event_bus = event_bus
+    run_state.emit_event(
+        "ExecutionContractApplied",
+        "执行契约已收口",
+        mode=settings.execution_mode,
+        agent="supervisor",
+        status="completed",
+        payload=execution_contract.to_dict(),
+    )
+    run_state.emit_event(
+        "PlanningCompleted",
+        "规划完成",
+        mode=settings.execution_mode,
+        agent="orchestrator",
+        status="completed",
+        payload={"route_type": plan.route_type, "task_count": len(plan.tasks)},
+    )
     run_state.record_gate(gate_decision)
     validation = validate_plan(plan, privacy_policy=privacy_policy)
     review = review_plan(plan)
@@ -254,6 +297,7 @@ async def _execute_dynamic_attempt(
                 execution_mode=settings.execution_mode,
                 show_progress=show_plan,
                 attempt=attempt,
+                approval_policy_factory=_full_mode_approval_policy_factory(settings.execution_mode),
             )
         finally:
             _record_flywheel_safely(flywheel, run_state)
@@ -271,7 +315,33 @@ def _dynamic_result(output: str, run_state: PipelineRunState | None) -> DynamicE
             summary = run_context.render_for_task()
         except Exception:
             summary = ""
+    event_summary = _render_event_summary(getattr(run_state, "event_bus", None))
+    if event_summary:
+        summary = "\n\n".join(part for part in [summary, event_summary] if part)
     return DynamicExecutionResult(str(output or ""), run_context_summary=summary)
+
+
+def _full_mode_approval_policy_factory(execution_mode: str):
+    if str(execution_mode or "").strip().lower() != "full":
+        return None
+
+    from runtime.agent.approval_policy import FullModeApprovalPolicy
+
+    return FullModeApprovalPolicy.from_task
+
+
+def _render_event_summary(event_bus) -> str:
+    if event_bus is None or not hasattr(event_bus, "snapshot"):
+        return ""
+    try:
+        from runtime.ui.event_render import render_execution_events
+
+        events = event_bus.snapshot()
+        if not events:
+            return ""
+        return render_execution_events(events, limit=8)
+    except Exception:
+        return ""
 
 
 def format_planning_error(exc: Exception, planner_model_id: str = "") -> str:

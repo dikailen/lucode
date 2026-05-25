@@ -7,7 +7,7 @@ from runtime.ui.progress import render_runtime_statusline, render_task_status_bo
 
 
 def _print_progress_snapshot(run_state: PipelineRunState, mode: str, attempt: int, active: str = "") -> None:
-    _safe_print(render_task_status_board(run_state, mode=mode, attempt=attempt))
+    _safe_print(render_task_status_board(run_state, mode=mode, attempt=attempt, include_events=True))
     _safe_print(render_runtime_statusline(mode, active=active))
 
 

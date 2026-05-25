@@ -105,7 +105,7 @@ def audit_execution(
                     final_output,
                 ):
                     message = f"任务 {task.id} 的语义验收未完全确认：{criterion}"
-                    if _should_enforce_semantic_acceptance(task):
+                    if _should_enforce_semantic_acceptance(task, record, criterion):
                         remaining_issues.append(message)
                     else:
                         _record_soft_semantic_warning(
@@ -127,7 +127,7 @@ def audit_execution(
                         )
                 elif not _criterion_looks_satisfied(expected_text, record.output_preview, final_output):
                     message = f"任务 {task.id} 的预期输出语义未完全确认：{expected_text}"
-                    if _should_enforce_semantic_acceptance(task):
+                    if _should_enforce_semantic_acceptance(task, record, expected_text):
                         remaining_issues.append(message)
                     else:
                         _record_soft_semantic_warning(
@@ -195,11 +195,55 @@ def format_final_report(final_output: str, audit: AuditResult) -> str:
     return "\n".join(lines).strip()
 
 
-def _should_enforce_semantic_acceptance(task) -> bool:
+def _should_enforce_semantic_acceptance(task, record=None, criterion: str = "") -> bool:
+    if _has_successful_verification(record) and not _looks_like_hard_semantic_requirement(criterion):
+        return False
     mcp_ids = set(getattr(task, "mcp", []) or [])
     if mcp_ids.intersection({"workspace_edit", "safe_backup", "command_runner"}):
         return True
     if getattr(task, "write_intent", None):
+        return True
+    return False
+
+
+def _has_successful_verification(record) -> bool:
+    verification = str(getattr(record, "verification", "") or "").lower()
+    if not verification:
+        return False
+    failure_markers = [
+        "returncode=1",
+        "returncode=2",
+        "returncode=124",
+        "returncode=127",
+        "failed",
+        "失败",
+        "错误",
+        "timed out",
+        "timeout",
+    ]
+    if any(marker in verification for marker in failure_markers):
+        return False
+    return any(marker in verification for marker in ["returncode=0", "通过", "success", "passed", "ok"])
+
+
+def _looks_like_hard_semantic_requirement(value: str) -> bool:
+    text = _normalize_text(value)
+    if not text:
+        return False
+    hard_markers = [
+        "must_contain",
+        "必须包含",
+        "必须输出",
+        "必须返回",
+        "不得",
+        "不能",
+        "禁止",
+        "exact",
+        "required",
+    ]
+    if any(marker in text for marker in hard_markers):
+        return True
+    if re.search(r"[A-Z0-9_]{4,}", str(value or "")):
         return True
     return False
 

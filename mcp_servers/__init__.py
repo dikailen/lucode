@@ -35,7 +35,22 @@ DEFAULT_READONLY_BUDGET_PROFILE = {
     "max_total_chars": "30000",
     "max_tree_depth": "3",
     "max_tree_entries": "350",
+    "supervisor_expansion": "0",
+    "supervisor_extra_read_calls": "0",
+    "supervisor_extra_total_chars": "0",
 }
+FULL_SUPERVISOR_READONLY_BUDGET_PROFILE = {
+    "max_read_calls": "14",
+    "max_files_per_call": "8",
+    "max_chars_per_file": "9000",
+    "max_total_chars": "60000",
+    "max_tree_depth": "4",
+    "max_tree_entries": "600",
+    "supervisor_expansion": "1",
+    "supervisor_extra_read_calls": "6",
+    "supervisor_extra_total_chars": "30000",
+}
+FULL_SUPERVISOR_READONLY_MCP_IDS = {"project_filesystem_readonly", "skills_filesystem_readonly"}
 
 
 def _env_value(name: str, default: str) -> str:
@@ -107,6 +122,18 @@ def create_readonly_filesystem_server(
                 "BUDGETED_FS_MAX_TREE_ENTRIES": _env_value(
                     "MCP_FS_MAX_TREE_ENTRIES",
                     profile["max_tree_entries"],
+                ),
+                "BUDGETED_FS_SUPERVISOR_EXPANSION": _env_value(
+                    "MCP_FS_SUPERVISOR_EXPANSION",
+                    profile["supervisor_expansion"],
+                ),
+                "BUDGETED_FS_SUPERVISOR_EXTRA_READ_CALLS": _env_value(
+                    "MCP_FS_SUPERVISOR_EXTRA_READ_CALLS",
+                    profile["supervisor_extra_read_calls"],
+                ),
+                "BUDGETED_FS_SUPERVISOR_EXTRA_TOTAL_CHARS": _env_value(
+                    "MCP_FS_SUPERVISOR_EXTRA_TOTAL_CHARS",
+                    profile["supervisor_extra_total_chars"],
                 ),
                 "PYTHONIOENCODING": "utf-8",
             }),
@@ -426,3 +453,18 @@ class MCPServerManager:
         if mcp_id == "git_tools":
             return create_git_tools_server(self.project_root, self.quarantine_dir)
         raise KeyError(f"Unknown MCP server id: {mcp_id}")
+
+
+def apply_full_supervisor_readonly_budget_profile(mcp_manager, mcp_ids: list[str]) -> bool:
+    """Apply the wider full-mode readonly budget before MCP servers start."""
+
+    setter = getattr(mcp_manager, "set_readonly_budget_profile", None)
+    if not callable(setter):
+        return False
+    applied = False
+    for mcp_id in list(mcp_ids or []):
+        if mcp_id not in FULL_SUPERVISOR_READONLY_MCP_IDS:
+            continue
+        setter(mcp_id, FULL_SUPERVISOR_READONLY_BUDGET_PROFILE)
+        applied = True
+    return applied

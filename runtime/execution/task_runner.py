@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+from dataclasses import dataclass
 from pathlib import Path
 
 from planning.planner_schema import PlannedTask, PlannerResult
@@ -24,6 +26,13 @@ from runtime.execution.inline_context import (
 )
 from runtime.execution.pipeline import PipelineRunState, build_verification_report
 from runtime.workspace.patch_ledger import PatchProposalLedger
+
+
+@dataclass(frozen=True)
+class ReadonlyFastPathResult:
+    output: str
+    tool: str
+    action: str
 
 
 async def _run_direct_answer(raw_user_input, plan: PlannerResult, model_id, factory, hooks, run_agent) -> str:
@@ -91,6 +100,8 @@ async def _run_planned_task(
     run_agent,
     run_state: PipelineRunState | None = None,
     ledger: PatchProposalLedger | None = None,
+    approval_policy=None,
+    execution_mode: str = "",
 ) -> tuple[str, str]:
     if ledger:
         ledger.record_proposal(task, task.instruction)
@@ -104,19 +115,26 @@ async def _run_planned_task(
         return task.title, _task_failure_output(task, message)
 
     run_context = getattr(run_state, "run_context", None)
-    fast_path_output = _readonly_fast_path_output(project_root, task, run_context=run_context)
-    if fast_path_output is not None:
-        output = _with_verification_report(project_root, task, fast_path_output, run_state)
+    fast_path = _readonly_fast_path_result(project_root, task, run_context=run_context)
+    if fast_path is not None:
+        if run_state:
+            run_state.record_fast_path_used(task, tool=fast_path.tool, action=fast_path.action)
+        output = _with_verification_report(project_root, task, fast_path.output, run_state)
         if run_state:
             run_state.record_task_result(task, output)
         if ledger:
             ledger.record_task_status(task.id, "completed", output)
         return task.title, output
-    agent = await factory.create_task_agent(task)
+    agent = await _create_task_agent(factory, task, execution_mode=execution_mode)
     dependency_context = _dependency_context_for_task(task, _task_output_map(run_state))
     workspace_context = _latest_workspace_context(project_root, task)
     shared_context = _shared_context_for_task(run_state, task)
     try:
+        run_agent_kwargs = _run_agent_kwargs(
+            run_agent,
+            max_turns=_max_turns_for_task(task),
+            approval_policy=approval_policy,
+        )
         result = await run_agent(
             agent,
             _task_prompt(
@@ -127,7 +145,7 @@ async def _run_planned_task(
                 shared_context,
             ),
             hooks,
-            max_turns=_max_turns_for_task(task),
+            **run_agent_kwargs,
         )
     except Exception as exc:
         message = _friendly_task_error(exc)
@@ -146,26 +164,31 @@ async def _run_planned_task(
 
 
 def _readonly_fast_path_output(project_root: Path, task, run_context=None) -> str | None:
+    result = _readonly_fast_path_result(project_root, task, run_context=run_context)
+    return result.output if result else None
+
+
+def _readonly_fast_path_result(project_root: Path, task, run_context=None) -> ReadonlyFastPathResult | None:
     if _can_fast_path_git_diff(task):
         output = _run_git_diff_fast_path(project_root, task)
         _record_fast_path_context(run_context, "git", "diff", output, task)
-        return output
+        return ReadonlyFastPathResult(output=output, tool="git", action="diff")
     if _can_fast_path_project_manifest_summary(task):
         output = _run_project_manifest_summary_fast_path(project_root, task)
         _record_fast_path_context(run_context, "project_manifest", "summary", output, task)
-        return output
+        return ReadonlyFastPathResult(output=output, tool="project_manifest", action="summary")
     if _can_fast_path_config_summary(task):
         output = _run_config_summary_fast_path(project_root, task)
         _record_fast_path_context(run_context, "config", "summary", output, task)
-        return output
+        return ReadonlyFastPathResult(output=output, tool="config", action="summary")
     if _can_fast_path_mcp_catalog_count(task):
         output = _run_mcp_catalog_count_fast_path(project_root, task)
         _record_fast_path_context(run_context, "mcp_catalog", "count", output, task)
-        return output
+        return ReadonlyFastPathResult(output=output, tool="mcp_catalog", action="count")
     if _can_fast_path_readme_mcp_count(task):
         output = _run_readme_mcp_count_fast_path(project_root, task)
         _record_fast_path_context(run_context, "readme", "mcp_count", output, task)
-        return output
+        return ReadonlyFastPathResult(output=output, tool="readme", action="mcp_count")
     return None
 
 
@@ -337,3 +360,37 @@ def _dependency_context_for_task(task, outputs: dict[str, str]) -> str:
             continue
         parts.append(f"[{dep}]\n{value}")
     return "\n\n".join(parts)
+
+
+def _run_agent_kwargs(run_agent, *, max_turns: int, approval_policy=None) -> dict:
+    kwargs = {"max_turns": max_turns}
+    if approval_policy is not None and _run_agent_accepts_approval_policy(run_agent):
+        kwargs["approval_policy"] = approval_policy
+    return kwargs
+
+
+def _run_agent_accepts_approval_policy(run_agent) -> bool:
+    try:
+        parameters = inspect.signature(run_agent).parameters
+    except (TypeError, ValueError):
+        return True
+    if "approval_policy" in parameters:
+        return True
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
+async def _create_task_agent(factory, task, *, execution_mode: str = ""):
+    create_task_agent = factory.create_task_agent
+    if _create_task_agent_accepts_execution_mode(create_task_agent):
+        return await create_task_agent(task, execution_mode=execution_mode)
+    return await create_task_agent(task)
+
+
+def _create_task_agent_accepts_execution_mode(create_task_agent) -> bool:
+    try:
+        parameters = inspect.signature(create_task_agent).parameters
+    except (TypeError, ValueError):
+        return True
+    if "execution_mode" in parameters:
+        return True
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())

@@ -537,3 +537,7 @@ def _handle_auth(args, context) -> int:
         return 0
     print("未知 auth 命令。")
     return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -691,6 +691,8 @@ class RuntimeCommandSession:
                         final_output="已收到 /stop，本轮执行已中断。你可以直接重新输入新的问题。",
                         stopped=True,
                     )
+                elif _is_orphan_approval_token(line):
+                    pass
                 elif line:
                     self.console.defer(line)
 
@@ -787,6 +789,31 @@ def _approval_choices() -> list[ConsoleChoice]:
 
 def _is_stop_command(user_input: str) -> bool:
     return sanitize_text(user_input).strip().lower() == "/stop"
+
+
+def _is_orphan_approval_token(user_input: str) -> bool:
+    return sanitize_text(user_input).strip().lower() in {
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "all",
+        "deny",
+        "e",
+        "edit",
+        "n",
+        "no",
+        "o",
+        "once",
+        "r",
+        "reject",
+        "rule",
+        "s",
+        "session",
+        "y",
+        "yes",
+    }
 
 
 def _is_tty(stream) -> bool:
