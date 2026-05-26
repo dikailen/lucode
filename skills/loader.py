@@ -41,34 +41,65 @@ Never present unsafe deletion commands.
 def skill_description(skill_name: str) -> str:
     """Return a concise handoff description for a skill-backed Agent."""
 
+    item = _catalog_item_for(skill_name)
+    if item is not None:
+        return item.get("summary_zh") or item.get("description") or item.get("display_name_zh") or skill_name
+
     if skill_name in SKILLS:
         return SKILLS[skill_name]["description"]
 
-    item = _catalog_item_for(skill_name)
-    if item is None:
-        raise KeyError(f"Unknown skill: {skill_name}")
+    raise KeyError(f"Unknown skill: {skill_name}")
 
-    return item.get("summary_zh") or item.get("description") or item.get("display_name_zh") or skill_name
+
+def skill_runtime_metadata(skill_name: str) -> dict:
+    """Return the resolved skill metadata used for execution prompts."""
+
+    item = _catalog_item_for(skill_name)
+    if item is not None:
+        return {
+            "id": item.get("id") or skill_name,
+            "source": item.get("source") or "registry",
+            "summary": item.get("summary_zh") or item.get("description") or item.get("display_name_zh") or "",
+            "path": item.get("path") or "",
+        }
+    if skill_name in SKILLS:
+        return {
+            "id": skill_name,
+            "source": "registry",
+            "summary": SKILLS[skill_name].get("description") or "",
+            "path": SKILLS[skill_name].get("folder") or "",
+        }
+    raise KeyError(f"Unknown skill: {skill_name}")
 
 
 def _skill_file_for(skill_name: str) -> Path | None:
+    item = _catalog_item_for(skill_name)
+    if item is not None:
+        skill_file = _resolve_catalog_skill_file(item)
+        if skill_file is not None:
+            return skill_file
+
     if skill_name in SKILLS:
         folder = SKILLS[skill_name]["folder"]
         return (SKILLS_DIR / folder / "SKILL.md").resolve()
 
-    item = _catalog_item_for(skill_name)
-    if item is None:
-        return None
-
-    return _resolve_catalog_skill_file(item)
+    return None
 
 
 def _catalog_item_for(skill_name: str) -> dict | None:
     catalog = build_skill_catalog(PROJECT_ROOT)
+    matches = []
     for item in catalog.get("skills", []):
         if item.get("id") == skill_name:
-            return item
-    return None
+            matches.append(item)
+    if not matches:
+        return None
+    return _preferred_catalog_item(matches)
+
+
+def _preferred_catalog_item(items: list[dict]) -> dict:
+    priority = {"workspace": 0, "user": 1, "core": 2, "sample": 3}
+    return sorted(items, key=lambda item: priority.get(str(item.get("source") or ""), 9))[0]
 
 
 def _resolve_catalog_skill_file(item: dict) -> Path | None:
@@ -98,16 +129,18 @@ def _resolve_catalog_skill_file(item: dict) -> Path | None:
     else:
         return None
 
+    if candidate is None:
+        return None
     if not _is_within_root(candidate.parent, allowed_root):
         return None
     return candidate
 
 
-def _resolve_relative_catalog_path(base: Path, catalog_path: str, *, default: str) -> Path:
+def _resolve_relative_catalog_path(base: Path, catalog_path: str, *, default: str) -> Path | None:
     relative = catalog_path or default
     relative_path = Path(relative)
     if relative_path.is_absolute():
-        return relative_path.joinpath("SKILL.md").resolve()
+        return None
     return (base / relative_path / "SKILL.md").resolve()
 
 

@@ -8,6 +8,7 @@ from runtime.agents.factory import AgentFactory
 from runtime.config.settings import RuntimeSettings
 from runtime.execution.inline_context import _inline_project_file_context
 from runtime.execution.run_context import RunContextStore
+from runtime.execution.skill_matcher import render_matching_user_skill_context
 from runtime.safety.privacy import PrivacyPolicy
 
 
@@ -197,12 +198,22 @@ def _solo_input_with_inline_context(
         mcp=["project_filesystem_readonly"],
     )
     inline_context = _inline_project_file_context(project_root, task, run_input, run_context=run_context)
-    if not inline_context.strip():
+    skill_context = render_matching_user_skill_context(run_input, workspace_context=_solo_workspace_context(project_root))
+    context_blocks = []
+    if skill_context.strip():
+        context_blocks.append(skill_context)
+    if inline_context.strip():
+        context_blocks.append(
+            "下面是系统已经只读读取到的项目文件片段，请基于这些真实上下文回答：\n"
+            f"{inline_context}"
+        )
+    if not context_blocks:
         return run_input
+    joined_context = "\n\n".join(context_blocks)
     return (
         f"{run_input}\n\n"
-        "下面是系统已经只读读取到的项目文件片段，请基于这些真实上下文回答：\n"
-        f"{inline_context}"
+        "下面是 Lucode 为本轮 solo 请求准备的可复用上下文：\n"
+        f"{joined_context}"
     )
 
 
@@ -234,6 +245,19 @@ def _solo_mcp_ids_for_input(user_input: str, settings: RuntimeSettings) -> list[
         mcp_ids.extend(GREP_MCP_IDS)
 
     return _dedupe(mcp_ids)
+
+
+class _SoloWorkspaceContext:
+    def __init__(self, project_root: Path):
+        self.workspace_root = project_root
+        self.app_home = Path(__file__).resolve().parents[2]
+        self.user_home = None
+
+
+def _solo_workspace_context(project_root: Path | None):
+    if project_root is None:
+        return None
+    return _SoloWorkspaceContext(project_root)
 
 
 def _contains_any(text: str, markers: list[str]) -> bool:

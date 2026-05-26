@@ -46,6 +46,10 @@ INLINE_PATH_PATTERN = re.compile(
     r"|(?<![\w.-])[\w.-]+\.(?:cfg|css|html|ini|java|js|json|jsx|md|py|rs|toml|ts|tsx|txt|ya?ml)(?![\w-])",
     re.IGNORECASE,
 )
+INLINE_DIRECTORY_PATTERN = re.compile(
+    r"(?<![\w./-])([A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_.-]+)*)\s*(?:目录|文件夹|directory|folder)\b",
+    re.IGNORECASE,
+)
 
 
 def _latest_workspace_context(project_root: Path, task) -> str:
@@ -105,7 +109,7 @@ def _inline_project_file_context(project_root: Path, task, refined_request: str,
 
     snippets = []
     query = "\n".join([refined_request, str(getattr(task, "title", "") or ""), str(getattr(task, "instruction", "") or "")])
-    for path in paths[:3]:
+    for path in paths[:5]:
         excerpt = _read_project_file_excerpt(path, query=query)
         if not excerpt:
             continue
@@ -155,21 +159,33 @@ def _resolve_explicit_project_file_paths(project_root: Path, task, refined_reque
         raw_candidates.append(str(item))
     for match in INLINE_PATH_PATTERN.findall("\n".join(texts)):
         raw_candidates.append(str(match))
+    for match in INLINE_DIRECTORY_PATTERN.findall("\n".join(texts)):
+        raw_candidates.append(str(match))
 
     resolved: list[Path] = []
     seen: set[str] = set()
     for candidate in raw_candidates:
-        path = _resolve_project_file_candidate(project_root, candidate)
-        if path is None:
+        paths = _resolve_project_path_candidates(project_root, candidate)
+        if not paths:
             continue
-        key = str(path).lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        resolved.append(path)
+        for path in paths:
+            key = str(path).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append(path)
+            if len(resolved) >= 5:
+                break
         if len(resolved) >= 5:
             break
     return resolved
+
+
+def _resolve_project_path_candidates(project_root: Path, candidate: str) -> list[Path]:
+    file_path = _resolve_project_file_candidate(project_root, candidate)
+    if file_path is not None:
+        return [file_path]
+    return _resolve_project_directory_candidates(project_root, candidate)
 
 
 def _resolve_project_file_candidate(project_root: Path, candidate: str) -> Path | None:
@@ -202,6 +218,47 @@ def _resolve_project_file_candidate(project_root: Path, candidate: str) -> Path 
         if len(matches) == 1:
             return matches[0]
     return None
+
+
+def _resolve_project_directory_candidates(project_root: Path, candidate: str, *, max_files: int = 4) -> list[Path]:
+    value = _clean_project_path_candidate(candidate)
+    if not value:
+        return []
+    root = project_root.resolve()
+    candidate_path = Path(value)
+    direct = (root / candidate_path).resolve() if not candidate_path.is_absolute() else candidate_path.resolve()
+    try:
+        relative = direct.relative_to(root)
+    except ValueError:
+        return []
+    if any(part == ".." for part in relative.parts):
+        return []
+    if not direct.is_dir():
+        return []
+    parts = {part.lower() for part in relative.parts}
+    if parts & INLINE_IGNORED_PARTS:
+        return []
+
+    paths: list[Path] = []
+    try:
+        for path in sorted(direct.rglob("*")):
+            if _safe_inline_project_file(root, path.resolve()):
+                paths.append(path.resolve())
+                if len(paths) >= max_files:
+                    break
+    except OSError:
+        return []
+    return paths
+
+
+def _clean_project_path_candidate(candidate: str) -> str:
+    value = str(candidate or "").strip().strip("`'\"鈥溾€濃€樷€欙紙锛?)[]<>锛?銆傦紱;锛?")
+    value = value.replace("\\", "/")
+    while value.startswith("./"):
+        value = value[2:]
+    if not value or "://" in value or any(part == ".." for part in value.split("/")):
+        return ""
+    return value
 
 
 def _safe_inline_project_file(project_root: Path, path: Path) -> bool:

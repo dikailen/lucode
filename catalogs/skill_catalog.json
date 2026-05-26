@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Auto-refreshed local skill library used by the orchestrator planner. Core skills describe Lucode native abilities; sample skills are kept for compatibility and hidden from default planner prompts.",
+  "description": "Auto-refreshed local skill library used by the orchestrator planner. Internal skills are hidden from planner prompts; borrowable library skills can be shown, and only assignable skills can become task.skill_id.",
   "skills": [
     {
       "id": "lucode_native_capability",
@@ -22,15 +22,22 @@
         "context7_docs",
         "grep_code_search"
       ],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
       "good_for": [
         "Lucode 原生终端代理能力契约。定义读写文件、CLI 优先、MCP 兜底、上下文复用、审批安全和 full 模式主管协作边界。"
       ],
       "not_for": [],
       "cost_level": "medium",
       "risk_level": "medium",
-      "selectable": true,
+      "borrowable": false,
+      "assignable": false,
+      "selectable": false,
       "internal": true,
-      "planner_visible": true,
+      "planner_visible": false,
       "source": "core",
       "path": "core_skills/lucode-native-capability"
     },
@@ -44,15 +51,22 @@
       ],
       "default_model": "mimo_model",
       "allowed_mcp": [],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
       "good_for": [
         "Use when planning or executing local CLI commands in Lucode. Requires command intent, risk, approval, and fallback to sa"
       ],
       "not_for": [],
-      "cost_level": "medium",
-      "risk_level": "medium",
-      "selectable": true,
+      "cost_level": "low",
+      "risk_level": "high",
+      "borrowable": true,
+      "assignable": false,
+      "selectable": false,
       "internal": false,
-      "planner_visible": false,
+      "planner_visible": true,
       "source": "sample",
       "path": "skills/cli-command-safety"
     },
@@ -66,12 +80,19 @@
       ],
       "default_model": "deepseek_V4_flash_model",
       "allowed_mcp": [],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
       "good_for": [
         "多 Agent 执行后的最终汇总技能。用于读取多个临时 Agent 的输出，去重、合并冲突、保留证据，并生成给用户的最终中文回答。"
       ],
       "not_for": [],
       "cost_level": "medium",
       "risk_level": "medium",
+      "borrowable": false,
+      "assignable": false,
       "selectable": false,
       "internal": true,
       "planner_visible": false,
@@ -82,7 +103,7 @@
       "id": "humanizer_zh",
       "folder": "Humanizer-zh-main",
       "display_name_zh": "中文去 AI 味",
-      "summary_zh": "| 去除文本中的 AI 生成痕迹。适用于编辑或审阅文本，使其听起来更自然、更像人类书写。 基于维基百科的\"AI 写作特征\"综合指南。检测并修复以下模式：夸大的象征意义、 宣传性语言、以 -ing 结尾的肤浅分析、模糊的归因、破折号过度使用、三段式法则、 AI 词汇、否定式排比、过多的连接性短语。",
+      "summary_zh": "去除文本中的 AI 生成痕迹。适用于编辑或审阅文本，使其听起来更自然、更像人类书写。 基于维基百科的\"AI 写作特征\"综合指南。检测并修复以下模式：夸大的象征意义、 宣传性语言、以 -ing 结尾的肤浅分析、模糊的归因、破折号过度使用、三段式法则、 AI 词汇、否定式排比、过多的连接性短语。",
       "tags": [
         "writing",
         "chinese",
@@ -92,6 +113,16 @@
       ],
       "default_model": "deepseek_V4_flash_model",
       "allowed_mcp": [],
+      "allowed_tools": [
+        "Read",
+        "Write",
+        "Edit",
+        "AskUserQuestion"
+      ],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
       "good_for": [
         "中文润色",
         "文案改写",
@@ -105,9 +136,11 @@
       ],
       "cost_level": "low",
       "risk_level": "low",
+      "borrowable": true,
+      "assignable": true,
       "selectable": true,
       "internal": false,
-      "planner_visible": false,
+      "planner_visible": true,
       "source": "sample",
       "path": "skills/Humanizer-zh-main"
     },
@@ -137,6 +170,11 @@
         "context7_docs",
         "grep_code_search"
       ],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
       "good_for": [
         "编写代码",
         "修改代码",
@@ -151,9 +189,11 @@
       ],
       "cost_level": "medium",
       "risk_level": "medium",
+      "borrowable": true,
+      "assignable": true,
       "selectable": true,
       "internal": false,
-      "planner_visible": false,
+      "planner_visible": true,
       "source": "sample",
       "path": "skills/jpc_now_skill"
     },
@@ -168,12 +208,19 @@
       ],
       "default_model": "deepseek_V4_pro_model",
       "allowed_mcp": [],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
       "good_for": [
         "动态多智能体系统的主脑规划技能。根据优化后的用户请求、Skill 图书馆和 MCP 图书馆，判断是否直接回答、创建单个 Agent、创建多个 Agent、联网搜索或向用户澄清。"
       ],
       "not_for": [],
       "cost_level": "medium",
       "risk_level": "medium",
+      "borrowable": false,
+      "assignable": false,
       "selectable": false,
       "internal": true,
       "planner_visible": false,
@@ -183,16 +230,13 @@
     {
       "id": "project_explorer",
       "folder": "project-explorer",
-      "display_name_zh": "项目探索",
+      "display_name_zh": "project-explorer",
       "summary_zh": "帮助开发者快速了解新项目的技能。包括分析项目架构、识别技术栈、理解目录结构、查找重要配置文件、指导开发新模块的入手点、以及了解项目部署和访问方式。当开发者刚进入新公司或接手新项目时，使用这个技能来快速掌握项目全貌。",
       "tags": [
         "project",
-        "repository",
-        "architecture",
-        "onboarding",
-        "filesystem"
+        "skill"
       ],
-      "default_model": "deepseek_V4_flash_model",
+      "default_model": "deepseek_v4_flash_model",
       "allowed_mcp": [
         "project_filesystem_readonly",
         "code_locator",
@@ -203,22 +247,22 @@
         "context7_docs",
         "grep_code_search"
       ],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
       "good_for": [
-        "项目结构分析",
-        "技术栈识别",
-        "运行方式说明",
-        "配置文件理解"
+        "帮助开发者快速了解新项目的技能。包括分析项目架构、识别技术栈、理解目录结构、查找重要配置文件、指导开发新模块的入手点、以及了解项目部署和访问方式。当开发者刚进入新公司或接手新项目时，使用这个技能来快速掌握项目全貌。"
       ],
-      "not_for": [
-        "直接修改代码",
-        "中文文案润色",
-        "创建新 skill"
-      ],
+      "not_for": [],
       "cost_level": "medium",
       "risk_level": "low",
+      "borrowable": true,
+      "assignable": true,
       "selectable": true,
       "internal": false,
-      "planner_visible": false,
+      "planner_visible": true,
       "source": "sample",
       "path": "skills/project-explorer"
     },
@@ -232,12 +276,19 @@
       ],
       "default_model": "deepseek_V4_pro_model",
       "allowed_mcp": [],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
       "good_for": [
         "优化用户原始问题，使其更清晰、具体、可执行。用于动态多智能体系统的前置副脑，在主脑规划前整理用户意图、背景、约束和潜在歧义。"
       ],
       "not_for": [],
       "cost_level": "medium",
       "risk_level": "medium",
+      "borrowable": false,
+      "assignable": false,
       "selectable": false,
       "internal": true,
       "planner_visible": false,
@@ -267,6 +318,11 @@
         "context7_docs",
         "grep_code_search"
       ],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
       "good_for": [
         "创建 skill",
         "优化 skill",
@@ -280,9 +336,11 @@
       ],
       "cost_level": "high",
       "risk_level": "medium",
+      "borrowable": true,
+      "assignable": true,
       "selectable": true,
       "internal": false,
-      "planner_visible": false,
+      "planner_visible": true,
       "source": "sample",
       "path": "skills/skill-creator"
     },
@@ -298,12 +356,19 @@
       ],
       "default_model": "mimo_model",
       "allowed_mcp": [],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
       "good_for": [
         "Route user requests to the best specialist Agent in a multi-agent system. Use whenever a conversation has multiple skill"
       ],
       "not_for": [],
       "cost_level": "medium",
       "risk_level": "medium",
+      "borrowable": false,
+      "assignable": false,
       "selectable": false,
       "internal": true,
       "planner_visible": false,

@@ -28,6 +28,7 @@ class CommandSpec:
 
 
 COMMAND_SPECS: tuple[CommandSpec, ...] = (
+    CommandSpec("/skill", "查看某个 Skill 的来源、触发词和建议工具", "扩展", argument_hint="<name>"),
     CommandSpec("/help", "查看命令菜单和常用操作", "基础", aliases=("/", "/?")),
     CommandSpec("/status", "查看当前运行状态、MCP、Git 和回滚点", "基础"),
     CommandSpec("/config", "查看当前模型、隐私和运行配置", "配置"),

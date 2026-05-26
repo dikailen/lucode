@@ -100,10 +100,7 @@ async def _run_single_agent(
     if inline_context:
         agent = factory.create_direct_answer_agent(
             task.model,
-            (
-                "请只基于用户请求、任务说明和提供的项目文件片段完成只读分析；"
-                "不要声称已经调用工具，不要要求用户再粘贴文件。"
-            ),
+            factory.inline_direct_answer_instruction(task),
         )
         try:
             run_agent_kwargs = _run_agent_kwargs(run_agent, max_turns=4, approval_policy=approval_policy)

@@ -1,4 +1,5 @@
 from catalog_system.loader import (
+    compact_cli_safety_rules_for_prompt,
     compact_mcp_catalog_for_prompt,
     compact_permission_policy_for_prompt,
     compact_skill_catalog_for_prompt,
@@ -28,6 +29,7 @@ def build_query_refiner(model):
 def build_orchestrator_planner(model):
     Agent = agent_class()
     skill_catalog = compact_skill_catalog_for_prompt()
+    cli_safety_rules = compact_cli_safety_rules_for_prompt()
     mcp_catalog = compact_mcp_catalog_for_prompt()
     permission_policy = compact_permission_policy_for_prompt()
     model_catalog = compact_model_catalog_for_prompt()
@@ -36,6 +38,8 @@ def build_orchestrator_planner(model):
         load_skill("orchestrator_planner")
         + "\n\n## Skill 图书馆\n"
         + skill_catalog
+        + "\n\n## CLI 安全借阅规则\n"
+        + cli_safety_rules
         + "\n\n## MCP 图书馆\n"
         + mcp_catalog
         + "\n\n## 权限策略\n"

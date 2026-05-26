@@ -16,6 +16,7 @@
         "get_file_info"
       ],
       "allowed_for_skills": [
+        "lucode_native_capability",
         "jpc_now_skill",
         "project_explorer"
       ],
@@ -54,6 +55,7 @@
         "get_file_outline"
       ],
       "allowed_for_skills": [
+        "lucode_native_capability",
         "jpc_now_skill",
         "project_explorer"
       ],
@@ -81,6 +83,7 @@
         "safe_delete_file"
       ],
       "allowed_for_skills": [
+        "lucode_native_capability",
         "jpc_now_skill",
         "project_explorer",
         "skill_creator"
@@ -102,6 +105,7 @@
         "delete_file"
       ],
       "allowed_for_skills": [
+        "lucode_native_capability",
         "jpc_now_skill",
         "project_explorer",
         "skill_creator"
@@ -130,6 +134,7 @@
         "run_command"
       ],
       "allowed_for_skills": [
+        "lucode_native_capability",
         "jpc_now_skill",
         "skill_creator"
       ],
@@ -159,6 +164,7 @@
         "git_commit"
       ],
       "allowed_for_skills": [
+        "lucode_native_capability",
         "jpc_now_skill",
         "project_explorer",
         "skill_creator"
@@ -185,6 +191,7 @@
         "web_fetch"
       ],
       "allowed_for_skills": [
+        "lucode_native_capability",
         "jpc_now_skill",
         "project_explorer",
         "skill_creator"
@@ -215,6 +222,7 @@
         "query-docs"
       ],
       "allowed_for_skills": [
+        "lucode_native_capability",
         "jpc_now_skill",
         "project_explorer",
         "skill_creator"
@@ -242,6 +250,7 @@
         "searchGitHub"
       ],
       "allowed_for_skills": [
+        "lucode_native_capability",
         "jpc_now_skill",
         "project_explorer",
         "skill_creator"

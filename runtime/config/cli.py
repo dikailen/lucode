@@ -37,6 +37,7 @@ from runtime.config.model_tuner import build_model_tuner_state, render_model_tun
 from runtime.config.extensions import (
     render_all_mcp,
     render_all_skills,
+    render_skill_detail,
     render_workspace_mcp,
     render_workspace_skills,
 )
@@ -95,6 +96,9 @@ def render_readonly_command(command: str, settings: RuntimeSettings, workspace_c
         return render_workspace_skills(workspace_context)
     if lower == "/skills_all":
         return render_all_skills(workspace_context)
+    skill_match = re.match(r"^/skill\s+(.+)$", normalized, flags=re.IGNORECASE)
+    if skill_match:
+        return render_skill_detail(skill_match.group(1).strip(), workspace_context)
     if lower == "/mcp":
         return render_workspace_mcp(workspace_context)
     if lower == "/mcp_all":

@@ -4604,6 +4604,55 @@ class WorkspaceExtensionC26Tests(unittest.TestCase):
         self.assertIn("global_style", all_output)
         self.assertIn("task_router", all_output)
 
+    def test_skill_detail_command_renders_workspace_skill_metadata(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"c26_skill_detail_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c26_skill_detail_user_{uuid.uuid4().hex}"
+        skill_dir = workspace / ".lucode" / "skills" / "api-reviewer"
+        skill_dir.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: 项目 API 审查",
+                    "description: 当前项目 API 规范审查",
+                    "allowed-tools:",
+                    "  - project_filesystem_readonly",
+                    "  - code_locator",
+                    "trigger:",
+                    "  - API 审查",
+                    "  - 接口规范",
+                    "argument-hint: <接口或文件>",
+                    "---",
+                    "审查项目 API 的命名、兼容性和错误处理。",
+                ]
+            ),
+            encoding="utf-8-sig",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        output = render_readonly_command("/skill api-reviewer", RuntimeSettings(), context)
+
+        self.assertIn("Skill 详情", output)
+        self.assertIn("api_reviewer", output)
+        self.assertIn("当前项目 API 规范审查", output)
+        self.assertIn("project_filesystem_readonly", output)
+        self.assertIn("code_locator", output)
+        self.assertIn("API 审查", output)
+        self.assertIn(str(skill_dir), output)
+
     def test_mcp_commands_show_workspace_mcp_as_untrusted_and_all_sources(self):
         from runtime.config.cli import render_readonly_command
         from runtime.config.settings import RuntimeSettings
@@ -8147,6 +8196,59 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("### runtime/ui/welcome.py", context)
         self.assertIn("render_welcome_dashboard", context)
 
+    def test_inline_readonly_file_context_expands_explicit_safe_directory_targets(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.execution.dynamic import _inline_project_file_context
+
+        root = TEMP_ROOT / f"inline_context_dir_{uuid.uuid4().hex}"
+        (root / "src").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(root))
+        (root / "README.md").write_text("# Demo\n\nRead src too.\n", encoding="utf-8")
+        (root / "src" / "api.py").write_text("def get_user():\n    return {'status': 200}\n", encoding="utf-8")
+        (root / "src" / "client.js").write_text("export const status = 200;\n", encoding="utf-8")
+        (root / "src" / "config.json").write_text('{"authHeader":"Authorization"}\n', encoding="utf-8")
+        (root / "src" / "token.secret").write_text("should-not-inline\n", encoding="utf-8")
+        task = PlannedTask(
+            id="inspect",
+            title="分析 README 和 src",
+            instruction="只读分析 README.md 和 src 目录。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["project_filesystem_readonly", "code_locator"],
+            read_set=["README.md", "src"],
+        )
+
+        context = _inline_project_file_context(root, task, "只读分析 README.md 和 src 目录")
+
+        self.assertIn("### README.md", context)
+        self.assertIn("### src/api.py", context)
+        self.assertIn("### src/client.js", context)
+        self.assertIn("### src/config.json", context)
+        self.assertNotIn("token.secret", context)
+
+    def test_inline_readonly_file_context_detects_directory_from_instruction_text(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.execution.dynamic import _inline_project_file_context
+
+        root = TEMP_ROOT / f"inline_context_dir_text_{uuid.uuid4().hex}"
+        (root / "src").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(root))
+        (root / "src" / "api.py").write_text("def get_user():\n    return {'status': 200}\n", encoding="utf-8")
+        (root / "src" / "client.js").write_text("export const status = 200;\n", encoding="utf-8")
+        task = PlannedTask(
+            id="inspect",
+            title="分析 src 目录",
+            instruction="请只读分析 src 目录。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["project_filesystem_readonly", "code_locator"],
+        )
+
+        context = _inline_project_file_context(root, task, "请只读分析 src 目录")
+
+        self.assertIn("### src/api.py", context)
+        self.assertIn("### src/client.js", context)
+
     def test_run_context_store_records_file_snapshot_artifacts(self):
         from runtime.execution.run_context import RunContextStore
 
@@ -8231,6 +8333,124 @@ class PipelineTests(unittest.TestCase):
         rendered = store.render_for_task("next")
         self.assertIn("README.md", rendered)
         self.assertIn("solo_context", rendered)
+
+    def test_solo_input_injects_matching_workspace_skill(self):
+        from runtime.execution.run_context import RunContextStore
+        from runtime.execution.solo_runner import _solo_input_with_inline_context
+
+        workspace = TEMP_ROOT / f"solo_skill_context_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"solo_skill_user_{uuid.uuid4().hex}"
+        skill_dir = workspace / ".lucode" / "skills" / "api-reviewer"
+        skill_dir.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: 项目 API 审查",
+                    "description: 当前项目接口审查规则",
+                    "trigger:",
+                    "  - API 审查",
+                    "  - 接口规范",
+                    "---",
+                    "先检查接口兼容性，再检查错误码一致性。",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        old_user_home = os.environ.get("LUCODE_USER_HOME")
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ["LUCODE_USER_HOME"] = str(user_home)
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        self.addCleanup(lambda: _restore_env("LUCODE_USER_HOME", old_user_home))
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        store = RunContextStore(workspace)
+
+        prompt = _solo_input_with_inline_context(
+            "请按 API 审查规则看一下接口设计。",
+            "local_model",
+            workspace,
+            store,
+        )
+
+        self.assertIn("匹配到的可借阅 Skill", prompt)
+        self.assertIn("api_reviewer", prompt)
+        self.assertIn("当前项目接口审查规则", prompt)
+        self.assertIn("先检查接口兼容性", prompt)
+        self.assertNotIn("jpc_now_skill", prompt)
+
+    def test_solo_input_can_borrow_matching_builtin_library_skill(self):
+        from runtime.execution.run_context import RunContextStore
+        from runtime.execution.solo_runner import _solo_input_with_inline_context
+
+        workspace = TEMP_ROOT / f"solo_builtin_skill_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        prompt = _solo_input_with_inline_context(
+            "请用 project_explorer 分析这个项目结构。",
+            "local_model",
+            workspace,
+            RunContextStore(workspace),
+        )
+
+        self.assertIn("匹配到的可借阅 Skill", prompt)
+        self.assertIn("project_explorer", prompt)
+        self.assertIn("项目探索者", prompt)
+
+    def test_solo_short_input_does_not_match_description_only_skill(self):
+        from runtime.execution.run_context import RunContextStore
+        from runtime.execution.solo_runner import _solo_input_with_inline_context
+
+        workspace = TEMP_ROOT / f"solo_short_skill_{uuid.uuid4().hex}"
+        skill_dir = workspace / ".lucode" / "skills" / "api-reviewer"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: 项目 API 审查\ndescription: API 兼容性审查规则\ntrigger: [API 审查]\n---\n检查接口兼容性。\n",
+            encoding="utf-8",
+        )
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        prompt = _solo_input_with_inline_context(
+            "API",
+            "local_model",
+            workspace,
+            RunContextStore(workspace),
+        )
+
+        self.assertNotIn("匹配到的可借阅 Skill", prompt)
+        self.assertNotIn("api_reviewer", prompt)
+
+    def test_solo_skill_matching_uses_project_root_without_workspace_env(self):
+        from runtime.execution.run_context import RunContextStore
+        from runtime.execution.solo_runner import _solo_input_with_inline_context
+
+        workspace = TEMP_ROOT / f"solo_skill_no_env_{uuid.uuid4().hex}"
+        skill_dir = workspace / ".lucode" / "skills" / "api-reviewer"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: 项目 API 审查\ndescription: 当前项目接口审查规则\ntrigger: [API 审查]\n---\n检查接口兼容性。\n",
+            encoding="utf-8",
+        )
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ.pop("LUCODE_WORKSPACE_ROOT", None)
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        prompt = _solo_input_with_inline_context(
+            "请按 API 审查规则看一下接口设计。",
+            "local_model",
+            workspace,
+            RunContextStore(workspace),
+        )
+
+        self.assertIn("api_reviewer", prompt)
+        self.assertIn("检查接口兼容性", prompt)
 
     def test_inline_readonly_file_context_records_run_context_store(self):
         from planning.planner_schema import PlannedTask
@@ -9177,6 +9397,70 @@ class AgentFactorySoloTests(unittest.TestCase):
         self.assertNotIn("command_runner", instructions)
         self.assertNotIn("workspace_edit", instructions)
         self.assertNotIn("web_search", instructions)
+
+    def test_task_agent_includes_resolved_workspace_skill_metadata(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.agents.factory import AgentFactory
+
+        workspace = TEMP_ROOT / f"agent_factory_skill_meta_{uuid.uuid4().hex}"
+        skill_dir = workspace / ".lucode" / "skills" / "project-explorer"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: 项目覆盖探索\ndescription: 当前项目覆盖版规则。\n---\n\n# Workspace Override\n",
+            encoding="utf-8",
+        )
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        task = PlannedTask(
+            id="inspect",
+            title="分析项目",
+            instruction="使用项目覆盖探索规则。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["project_filesystem_readonly"],
+        )
+
+        instructions = AgentFactory(None, None)._task_instructions(task)
+
+        self.assertIn("Loaded Skill Metadata", instructions)
+        self.assertIn("source: workspace", instructions)
+        self.assertIn("当前项目覆盖版规则", instructions)
+        self.assertIn("do not claim that the skill rules were not provided", instructions)
+        self.assertIn("Lucode has already loaded this workspace/user skill", instructions)
+        self.assertIn("do not say the workspace skill was not used", instructions)
+
+    def test_inline_direct_answer_agent_can_reference_loaded_workspace_skill(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.agents.factory import AgentFactory
+
+        workspace = TEMP_ROOT / f"agent_factory_inline_skill_meta_{uuid.uuid4().hex}"
+        skill_dir = workspace / ".lucode" / "skills" / "project-explorer"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: 项目覆盖探索\ndescription: 当前项目覆盖版规则。\n---\n\n# Workspace Override\n",
+            encoding="utf-8",
+        )
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        task = PlannedTask(
+            id="inspect",
+            title="分析项目",
+            instruction="使用项目覆盖探索规则。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["project_filesystem_readonly", "code_locator"],
+        )
+
+        instructions = AgentFactory(None, None).inline_direct_answer_instruction(task)
+
+        self.assertIn("当前任务仍然使用已解析的 skill", instructions)
+        self.assertIn("project_explorer", instructions)
+        self.assertIn("source: workspace", instructions)
+        self.assertIn("do not say the workspace skill was not used", instructions)
 
     def test_task_agent_readonly_budget_mentions_large_file_segmentation(self):
         from planning.planner_schema import PlannedTask
@@ -10447,6 +10731,22 @@ class CatalogRefreshTests(unittest.TestCase):
         self.assertIn("context7_docs", project_explorer["allowed_mcp"])
         self.assertIn("grep_code_search", project_explorer["allowed_mcp"])
 
+    def test_lucode_native_mcp_grants_are_bidirectional(self):
+        from catalog_system.refresher import build_mcp_catalog, build_skill_catalog
+
+        skill_catalog = build_skill_catalog(PROJECT_ROOT)
+        mcp_catalog = build_mcp_catalog(PROJECT_ROOT)
+        native = next(item for item in skill_catalog["skills"] if item["id"] == "lucode_native_capability")
+        by_id = {item["id"]: item for item in mcp_catalog["mcp_servers"]}
+
+        missing_grants = [
+            mcp_id
+            for mcp_id in native["allowed_mcp"]
+            if "lucode_native_capability" not in set(by_id[mcp_id].get("allowed_for_skills") or [])
+        ]
+
+        self.assertEqual(missing_grants, [])
+
     def test_skill_catalog_discovers_added_skill_folder(self):
         from catalog_system.refresher import build_skill_catalog
 
@@ -10479,6 +10779,147 @@ class CatalogRefreshTests(unittest.TestCase):
         item = next(item for item in catalog["skills"] if item["id"] == "bom_skill")
 
         self.assertEqual(item["summary_zh"], "PowerShell UTF8 BOM skill。")
+
+    def test_skill_catalog_frontmatter_supports_yaml_lists_and_triggers(self):
+        from catalog_system.refresher import build_skill_catalog
+
+        project_root = TEMP_ROOT / f"skill_catalog_multiline_{uuid.uuid4().hex}"
+        skill_dir = project_root / ".lucode" / "skills" / "api-reviewer"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: 项目 API 审查",
+                    "description: >",
+                    "  当前项目 API 规范审查，",
+                    "  关注兼容性和错误处理。",
+                    "allowed-tools:",
+                    "  - project_filesystem_readonly",
+                    "  - code_locator",
+                    "  - Read",
+                    "trigger: [API 审查, 接口规范]",
+                    "disable-model-invocation: true",
+                    "---",
+                    "正文",
+                ]
+            ),
+            encoding="utf-8-sig",
+        )
+        self.addCleanup(lambda: _safe_rmtree(project_root))
+
+        catalog = build_skill_catalog(project_root)
+        item = next(item for item in catalog["skills"] if item["id"] == "api_reviewer")
+
+        self.assertIn("当前项目 API 规范审查", item["summary_zh"])
+        self.assertEqual(item["allowed_tools"], ["project_filesystem_readonly", "code_locator", "Read"])
+        self.assertEqual(item["allowed_mcp"], ["project_filesystem_readonly", "code_locator"])
+        self.assertEqual(item["trigger"], ["API 审查", "接口规范"])
+        self.assertTrue(item["disable_model_invocation"])
+
+    def test_curated_sample_metadata_is_not_overwritten_by_frontmatter(self):
+        from catalog_system.refresher import build_skill_catalog
+
+        project_root = TEMP_ROOT / f"skill_catalog_curated_{uuid.uuid4().hex}"
+        skill_dir = project_root / "skills" / "project-explorer"
+        skill_dir.mkdir(parents=True)
+        (project_root / "catalogs").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: project-explorer\ndescription: raw frontmatter only\n---\n\n# Project Explorer\n",
+            encoding="utf-8",
+        )
+        (project_root / "catalogs" / "skill_catalog.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "skills": [
+                        {
+                            "id": "project_explorer",
+                            "folder": "project-explorer",
+                            "display_name_zh": "项目探索",
+                            "summary_zh": "人工整理后的项目探索说明。",
+                            "tags": ["project", "repository", "architecture"],
+                            "default_model": "deepseek_V4_flash_model",
+                            "allowed_mcp": ["project_filesystem_readonly"],
+                            "good_for": ["项目结构分析", "技术栈识别"],
+                            "not_for": ["直接修改代码"],
+                            "source": "sample",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: _safe_rmtree(project_root))
+
+        catalog = build_skill_catalog(project_root, include_dynamic=False)
+        item = next(item for item in catalog["skills"] if item["id"] == "project_explorer")
+
+        self.assertEqual(item["display_name_zh"], "项目探索")
+        self.assertEqual(item["summary_zh"], "人工整理后的项目探索说明。")
+        self.assertEqual(item["tags"], ["project", "repository", "architecture"])
+        self.assertEqual(item["good_for"], ["项目结构分析", "技术栈识别"])
+        self.assertEqual(item["not_for"], ["直接修改代码"])
+
+    def test_skill_catalog_cache_invalidates_when_skill_file_changes(self):
+        from catalog_system.refresher import build_skill_catalog
+
+        project_root = TEMP_ROOT / f"skill_catalog_cache_{uuid.uuid4().hex}"
+        skill_dir = project_root / ".lucode" / "skills" / "api-reviewer"
+        skill_dir.mkdir(parents=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("---\nname: API reviewer\ndescription: 第一版说明。\n---\n", encoding="utf-8")
+        self.addCleanup(lambda: _safe_rmtree(project_root))
+
+        first = build_skill_catalog(project_root)
+        self.assertEqual(next(item for item in first["skills"] if item["id"] == "api_reviewer")["summary_zh"], "第一版说明。")
+
+        skill_file.write_text("---\nname: API reviewer\ndescription: 第二版说明。\n---\n", encoding="utf-8")
+
+        second = build_skill_catalog(project_root)
+        self.assertEqual(next(item for item in second["skills"] if item["id"] == "api_reviewer")["summary_zh"], "第二版说明。")
+
+    def test_runtime_skill_catalog_merges_workspace_without_persisting_it(self):
+        from catalog_system import loader as catalog_loader
+        from catalog_system.refresher import refresh_catalogs
+
+        app_root = TEMP_ROOT / f"runtime_skill_catalog_app_{uuid.uuid4().hex}"
+        workspace = TEMP_ROOT / f"runtime_skill_catalog_workspace_{uuid.uuid4().hex}"
+        core_dir = app_root / "core_skills" / "lucode-native-capability"
+        workspace_skill_dir = workspace / ".lucode" / "skills" / "api-reviewer"
+        core_dir.mkdir(parents=True)
+        workspace_skill_dir.mkdir(parents=True)
+        (core_dir / "SKILL.md").write_text(
+            "---\nname: lucode-native-capability\ndescription: Lucode 原生能力。\n---\n",
+            encoding="utf-8",
+        )
+        (workspace_skill_dir / "SKILL.md").write_text(
+            "---\nname: API reviewer\ndescription: 当前项目 API 审查。\n---\n",
+            encoding="utf-8",
+        )
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(app_root))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        refresh_catalogs(app_root, probe_mode="off")
+        static_catalog = json.loads((app_root / "catalogs" / "skill_catalog.json").read_text(encoding="utf-8"))
+        self.assertNotIn("api_reviewer", {item["id"] for item in static_catalog["skills"]})
+
+        old_project_root = catalog_loader.PROJECT_ROOT
+        old_catalog_dir = catalog_loader.CATALOG_DIR
+        catalog_loader.PROJECT_ROOT = app_root
+        catalog_loader.CATALOG_DIR = app_root / "catalogs"
+        self.addCleanup(lambda: setattr(catalog_loader, "PROJECT_ROOT", old_project_root))
+        self.addCleanup(lambda: setattr(catalog_loader, "CATALOG_DIR", old_catalog_dir))
+
+        runtime_catalog = catalog_loader.load_skill_catalog()
+        self.assertIn("api_reviewer", {item["id"] for item in runtime_catalog["skills"]})
+
+        persisted_catalog = json.loads((app_root / "catalogs" / "skill_catalog.json").read_text(encoding="utf-8"))
+        self.assertNotIn("api_reviewer", {item["id"] for item in persisted_catalog["skills"]})
 
     def test_skill_catalog_discovers_user_and_workspace_skill_layers_from_env(self):
         from catalog_system.loader import compact_skill_catalog_for_prompt
@@ -10521,6 +10962,25 @@ class CatalogRefreshTests(unittest.TestCase):
         self.assertIn("global_review", prompt_catalog)
         self.assertIn("project_review", prompt_catalog)
 
+    def test_release_catalog_does_not_scan_app_home_local_lucode_skills_without_workspace_env(self):
+        from catalog_system.refresher import build_skill_catalog
+
+        skill_dir = PROJECT_ROOT / ".lucode" / "skills" / f"local-only-{uuid.uuid4().hex}"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: local-only\ndescription: 本地测试 skill。\n---\n",
+            encoding="utf-8",
+        )
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ.pop("LUCODE_WORKSPACE_ROOT", None)
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(skill_dir.parent))
+
+        catalog = build_skill_catalog(PROJECT_ROOT)
+        ids = {item["id"] for item in catalog["skills"]}
+
+        self.assertFalse(any(item.startswith("local_only") for item in ids))
+
     def test_dynamic_user_and_workspace_skills_can_be_loaded_after_discovery(self):
         from catalog_system.refresher import build_skill_catalog
         from skills.loader import load_skill, skill_description
@@ -10556,6 +11016,54 @@ class CatalogRefreshTests(unittest.TestCase):
         self.assertEqual(skill_description("global_review"), "用户全局审查。")
         self.assertEqual(skill_description("project_review"), "当前项目审查。")
 
+    def test_workspace_skill_overrides_sample_registry_skill_when_loading(self):
+        from catalog_system.refresher import build_skill_catalog
+        from skills.loader import load_skill, skill_description
+
+        workspace = TEMP_ROOT / f"load_skill_workspace_override_{uuid.uuid4().hex}"
+        skill_dir = workspace / ".lucode" / "skills" / "project-explorer"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: project-explorer\ndescription: 项目覆盖审查。\n---\n\n# Workspace Project Explorer\n只使用当前项目覆盖版规则。\n",
+            encoding="utf-8",
+        )
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        catalog = build_skill_catalog(PROJECT_ROOT)
+        by_id = {item["id"]: item for item in catalog["skills"]}
+
+        self.assertEqual(by_id["project_explorer"]["source"], "workspace")
+        self.assertIn("只使用当前项目覆盖版规则", load_skill("project_explorer"))
+        self.assertEqual(skill_description("project_explorer"), "项目覆盖审查。")
+
+    def test_workspace_skill_override_does_not_inherit_sample_policy(self):
+        from catalog_system.refresher import build_skill_catalog
+
+        workspace = TEMP_ROOT / f"workspace_skill_policy_override_{uuid.uuid4().hex}"
+        skill_dir = workspace / ".lucode" / "skills" / "project-explorer"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: 项目覆盖审查\ndescription: 项目覆盖审查。\n---\n\n# Workspace Override\n",
+            encoding="utf-8",
+        )
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        catalog = build_skill_catalog(PROJECT_ROOT)
+        workspace_item = [
+            item
+            for item in catalog["skills"]
+            if item["id"] == "project_explorer" and item["source"] == "workspace"
+        ][0]
+
+        self.assertEqual(workspace_item["allowed_mcp"], [])
+        self.assertEqual(workspace_item["display_name_zh"], "项目覆盖审查")
+
     def test_dynamic_skill_loader_rejects_catalog_paths_outside_known_roots(self):
         from skills import loader as skill_loader
 
@@ -10578,7 +11086,33 @@ class CatalogRefreshTests(unittest.TestCase):
             with self.assertRaises(KeyError):
                 skill_loader.load_skill("outside_skill")
 
-    def test_planner_prompt_keeps_sample_skills_out_of_default_library(self):
+    def test_dynamic_skill_loader_rejects_absolute_catalog_paths(self):
+        from skills import loader as skill_loader
+
+        workspace = TEMP_ROOT / f"absolute_skill_workspace_{uuid.uuid4().hex}"
+        skill_dir = workspace / ".lucode" / "skills" / "absolute-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\ndescription: 绝对路径。\n---\n\n# absolute\n", encoding="utf-8")
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        with patch.object(
+            skill_loader,
+            "_catalog_item_for",
+            return_value={
+                "id": "absolute_skill",
+                "folder": "absolute-skill",
+                "source": "workspace",
+                "path": str(skill_dir),
+                "summary_zh": "绝对路径。",
+            },
+        ):
+            with self.assertRaises(KeyError):
+                skill_loader.load_skill("absolute_skill")
+
+    def test_planner_prompt_shows_borrowable_skills_but_hides_internal_skills(self):
         from catalog_system.loader import compact_skill_catalog_for_prompt
         from catalog_system.refresher import build_skill_catalog
 
@@ -10587,18 +11121,44 @@ class CatalogRefreshTests(unittest.TestCase):
 
         self.assertIn("lucode_native_capability", by_id)
         self.assertTrue(by_id["lucode_native_capability"]["internal"])
-        self.assertTrue(by_id["lucode_native_capability"]["selectable"])
-        self.assertTrue(by_id["lucode_native_capability"]["planner_visible"])
+        self.assertFalse(by_id["lucode_native_capability"]["borrowable"])
+        self.assertFalse(by_id["lucode_native_capability"]["assignable"])
+        self.assertFalse(by_id["lucode_native_capability"]["selectable"])
+        self.assertFalse(by_id["lucode_native_capability"]["planner_visible"])
         self.assertEqual(by_id["lucode_native_capability"]["source"], "core")
+
+        self.assertIn("cli_command_safety", by_id)
+        self.assertFalse(by_id["cli_command_safety"]["internal"])
+        self.assertTrue(by_id["cli_command_safety"]["borrowable"])
+        self.assertFalse(by_id["cli_command_safety"]["assignable"])
+        self.assertFalse(by_id["cli_command_safety"]["selectable"])
+        self.assertTrue(by_id["cli_command_safety"]["planner_visible"])
+
         self.assertEqual(by_id["jpc_now_skill"]["source"], "sample")
+        self.assertTrue(by_id["jpc_now_skill"]["borrowable"])
+        self.assertTrue(by_id["jpc_now_skill"]["assignable"])
         self.assertTrue(by_id["jpc_now_skill"]["selectable"])
-        self.assertFalse(by_id["jpc_now_skill"]["planner_visible"])
+        self.assertTrue(by_id["jpc_now_skill"]["planner_visible"])
         self.assertEqual(by_id["project_explorer"]["source"], "sample")
+        self.assertTrue(by_id["project_explorer"]["planner_visible"])
+        self.assertFalse(by_id["orchestrator_planner"]["selectable"])
+        self.assertFalse(by_id["orchestrator_planner"]["assignable"])
+        self.assertFalse(by_id["orchestrator_planner"]["borrowable"])
+        self.assertFalse(by_id["orchestrator_planner"]["planner_visible"])
+        self.assertFalse(by_id["query_refiner"]["planner_visible"])
+        self.assertFalse(by_id["final_synthesizer"]["planner_visible"])
 
         prompt_catalog = compact_skill_catalog_for_prompt(catalog=catalog)
-        self.assertIn("lucode_native_capability", prompt_catalog)
-        self.assertNotIn("jpc_now_skill", prompt_catalog)
-        self.assertNotIn("project_explorer", prompt_catalog)
+        self.assertNotIn("lucode_native_capability", prompt_catalog)
+        self.assertIn("jpc_now_skill | 可执行", prompt_catalog)
+        self.assertIn("project_explorer | 可执行", prompt_catalog)
+        self.assertIn("skill_creator", prompt_catalog)
+        self.assertIn("humanizer_zh", prompt_catalog)
+        self.assertIn("cli_command_safety | 仅规则借阅", prompt_catalog)
+        self.assertNotIn("orchestrator_planner", prompt_catalog)
+        self.assertNotIn("query_refiner", prompt_catalog)
+        self.assertNotIn("final_synthesizer", prompt_catalog)
+        self.assertNotIn("task_router", prompt_catalog)
 
     def test_mcp_catalog_discovers_unknown_mcp_file_as_pending(self):
         from catalog_system.refresher import build_mcp_catalog
@@ -13152,6 +13712,16 @@ class LocalModelPlannerCompatibilityTests(unittest.TestCase):
         self.assertIn("本地模型未返回合法 JSON", plan.reason)
         self.assertIn("简单介绍", plan.direct_answer_instruction)
 
+    def test_orchestrator_planner_borrows_cli_command_safety_rules(self):
+        from planning.planner import build_orchestrator_planner
+
+        planner = build_orchestrator_planner(model=object())
+
+        self.assertIn("CLI Command Safety", planner.instructions)
+        self.assertIn("CommandAnalyzer v2", planner.instructions)
+        self.assertIn("rm -rf", planner.instructions)
+        self.assertIn("主脑在规划 command_runner", planner.instructions)
+
     def test_plain_code_locator_output_falls_back_to_single_agent(self):
         from planning.planner_schema import parse_planner_result
 
@@ -13195,6 +13765,105 @@ class LocalModelPlannerCompatibilityTests(unittest.TestCase):
         self.assertEqual(plan.route_type, "single_agent")
         self.assertEqual(plan.tasks[0].model, "local_model")
         validation = validate_plan(plan, privacy_policy=PrivacyPolicy.from_env())
+        self.assertTrue(validation.valid, validation.errors)
+
+    def test_rule_only_and_internal_skills_cannot_be_assigned_as_tasks(self):
+        from planning.plan_validator import validate_plan
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.safety.privacy import PrivacyPolicy
+
+        os.environ["AGENTS_PRIVACY_MODE"] = "cloud_allowed"
+        os.environ["MIMO_API_KEY"] = "mimo-key"
+        os.environ["MIMO_BASE_URL"] = "https://api.example.com/v1"
+        os.environ["MIMO_MODEL"] = "tool-model"
+
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="native readonly review",
+            refined_request="只读审查 API",
+            tasks=[
+                PlannedTask(
+                    id="api-review",
+                    title="审查 API",
+                    instruction="只读审查 API 兼容性、错误码和鉴权。",
+                    skill_id="lucode_native_capability",
+                    model="mimo_v25_model",
+                    mcp=["project_filesystem_readonly", "code_locator"],
+                )
+            ],
+        )
+
+        validation = validate_plan(plan, privacy_policy=PrivacyPolicy.from_env())
+
+        self.assertFalse(validation.valid)
+        self.assertTrue(any("内核契约" in error for error in validation.errors), validation.errors)
+
+        rule_plan = PlannerResult(
+            route_type="single_agent",
+            reason="borrow safety rules",
+            refined_request="检查命令风险",
+            tasks=[
+                PlannedTask(
+                    id="command-safety",
+                    title="检查命令风险",
+                    instruction="判断 rm -rf 是否安全。",
+                    skill_id="cli_command_safety",
+                    model="mimo_v25_model",
+                    mcp=[],
+                )
+            ],
+        )
+
+        rule_validation = validate_plan(rule_plan, privacy_policy=PrivacyPolicy.from_env())
+
+        self.assertFalse(rule_validation.valid)
+        self.assertTrue(any("只能借阅" in error for error in rule_validation.errors), rule_validation.errors)
+
+    def test_workspace_skill_declared_allowed_tools_validate_without_static_mcp_grant(self):
+        from catalog_system.refresher import build_skill_catalog
+        from planning.plan_validator import validate_plan
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.safety.privacy import PrivacyPolicy
+
+        workspace = TEMP_ROOT / f"validator_workspace_skill_{uuid.uuid4().hex}"
+        skill_dir = workspace / ".lucode" / "skills" / "api-reviewer"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: API reviewer\ndescription: API review\nallowed-tools: [project_filesystem_readonly, code_locator]\n---\n",
+            encoding="utf-8",
+        )
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        catalog = build_skill_catalog(PROJECT_ROOT)
+        self.assertEqual(
+            next(item for item in catalog["skills"] if item["id"] == "api_reviewer")["allowed_mcp"],
+            ["project_filesystem_readonly", "code_locator"],
+        )
+
+        os.environ["AGENTS_PRIVACY_MODE"] = "cloud_allowed"
+        os.environ["MODEL_CLOUD_API_KEY"] = "cloud-key"
+        os.environ["MODEL_CLOUD_BASE_URL"] = "https://api.example.com/v1"
+        os.environ["MODEL_CLOUD_MODEL"] = "tool-model"
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="workspace skill",
+            refined_request="审查 API",
+            tasks=[
+                PlannedTask(
+                    id="api-review",
+                    title="审查 API",
+                    instruction="只读审查 API。",
+                    skill_id="api_reviewer",
+                    model="cloud_model",
+                    mcp=["project_filesystem_readonly", "code_locator"],
+                )
+            ],
+        )
+
+        validation = validate_plan(plan, privacy_policy=PrivacyPolicy.from_env())
+
         self.assertTrue(validation.valid, validation.errors)
 
     def test_explicit_context7_and_grep_requests_are_promoted_to_remote_mcp_task(self):

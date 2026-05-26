@@ -2,7 +2,7 @@ from catalog_system.model_catalog import ModelRegistry
 from planning.planner_schema import PlannedTask
 from runtime.common.text_utils import sanitize_text
 from runtime.agents.sdk import agent_class
-from skills.loader import load_skill
+from skills.loader import load_skill, skill_runtime_metadata
 
 
 class AgentFactory:
@@ -35,6 +35,7 @@ class AgentFactory:
     def _task_instructions(self, task: PlannedTask, execution_mode: str = "") -> str:
         return sanitize_text(
             load_skill(task.skill_id)
+            + self._skill_runtime_context(task)
             + "\n\n## 本次临时任务\n"
             + task.instruction
             + self._execution_contract(task)
@@ -47,6 +48,44 @@ class AgentFactory:
             + "- 用清晰的小标题和短段落回答，重点放在用户真正问的内容。\n"
             + "\n请直接完成本次任务，输出给用户可读的最终结果。"
         )
+
+    def inline_direct_answer_instruction(self, task: PlannedTask) -> str:
+        """Instruction for readonly inline-context tasks that still belong to a resolved skill."""
+
+        return sanitize_text(
+            "请只基于用户请求、任务说明和提供的项目文件片段完成只读分析；"
+            "不要要求用户再粘贴文件。\n"
+            "当前任务仍然使用已解析的 skill，内联文件片段是 Lucode 为该 skill 任务预读取的上下文，"
+            "不是绕过 skill 或工具链。\n"
+            + self._skill_runtime_context(task)
+        )
+
+    def _skill_runtime_context(self, task: PlannedTask) -> str:
+        try:
+            meta = skill_runtime_metadata(task.skill_id)
+        except Exception:
+            return ""
+        source = str(meta.get("source") or "unknown")
+        summary = str(meta.get("summary") or "").strip()
+        path = str(meta.get("path") or "").strip()
+        lines = [
+            "\n\n## Loaded Skill Metadata",
+            f"- id: {meta.get('id') or task.skill_id}",
+            f"- source: {source}",
+        ]
+        if summary:
+            lines.append(f"- summary: {summary}")
+        if path:
+            lines.append(f"- path: {path}")
+        lines.append(
+            "- Apply the SKILL START/END rules above. If source is workspace or user, do not claim that the skill rules were not provided."
+        )
+        if source in {"workspace", "user"}:
+            lines.append(
+                "- Lucode has already loaded this workspace/user skill before the task starts; "
+                "do not say the workspace skill was not used just because you did not read .lucode during this task."
+            )
+        return "\n".join(lines)
 
     def _execution_contract(self, task: PlannedTask) -> str:
         lines = []

@@ -65,8 +65,13 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
             errors.append(f"未知 skill：{task.skill_id}")
             continue
 
-        if not skill.get("selectable", True):
-            errors.append(f"skill 不可由主脑动态选择：{task.skill_id}")
+        if not skill.get("assignable", skill.get("selectable", True)):
+            if skill.get("internal"):
+                errors.append(f"skill 是 Lucode 内核契约，不能作为员工任务执行：{task.skill_id}")
+            elif skill.get("borrowable"):
+                errors.append(f"skill 只能借阅，不能作为员工任务执行：{task.skill_id}")
+            else:
+                errors.append(f"skill 不可由主脑动态选择：{task.skill_id}")
 
         if task.write_intent and "workspace_edit" not in task.mcp:
             errors.append(f"任务 {task.id} 声明了 write_intent，但没有申请 workspace_edit。")
@@ -93,7 +98,12 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
                 errors.append(f"skill {task.skill_id} 不允许使用 MCP {mcp_id}")
 
             allowed_for_skills = set(mcp.get("allowed_for_skills") or [])
-            if task.skill_id not in allowed_for_skills:
+            dynamic_declared_skill = (
+                skill.get("source") in {"user", "workspace"}
+                and task.skill_id in skills
+                and mcp_id in allowed_mcp
+            )
+            if task.skill_id not in allowed_for_skills and not dynamic_declared_skill:
                 errors.append(f"MCP {mcp_id} 未授权给 skill {task.skill_id}")
 
             if mcp_id in NETWORK_MCP_IDS and privacy_policy.mode == "offline":
