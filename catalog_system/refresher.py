@@ -40,6 +40,9 @@ INTERNAL_SKILLS = {
     "orchestrator_planner",
     "final_synthesizer",
 }
+DEPRECATED_SKILLS = {
+    "task_router",
+}
 _SKILL_CATALOG_CACHE: dict[tuple, dict] = {}
 _SKILL_CATALOG_CACHE_LOCK = threading.Lock()
 
@@ -182,6 +185,10 @@ def build_skill_catalog(project_root: Path, *, include_dynamic: bool = True, use
             if resolved in seen_skill_paths:
                 continue
             seen_skill_paths.add(resolved)
+            folder = skill_file.parent.name
+            skill_id = folder_to_id.get(folder) or _normalize_id(folder)
+            if skill_id in DEPRECATED_SKILLS:
+                continue
             skill_items.append(
                 _catalog_item_for_skill_file(
                     skill_file,

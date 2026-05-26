@@ -343,37 +343,6 @@
       "planner_visible": true,
       "source": "sample",
       "path": "skills/skill-creator"
-    },
-    {
-      "id": "task_router",
-      "folder": "task-router",
-      "display_name_zh": "task-router",
-      "summary_zh": "快速判断用户请求是否属于闲聊、单一专家任务，或需要升级给 orchestrator-planner 做完整动态规划。此技能保留为轻量分类器和历史兼容层，不负责执行任务。",
-      "tags": [
-        "code",
-        "project",
-        "skill"
-      ],
-      "default_model": "mimo_model",
-      "allowed_mcp": [],
-      "allowed_tools": [],
-      "trigger": [],
-      "argument_hint": "",
-      "model": "",
-      "disable_model_invocation": false,
-      "good_for": [
-        "Route user requests to the best specialist Agent in a multi-agent system. Use whenever a conversation has multiple skill"
-      ],
-      "not_for": [],
-      "cost_level": "medium",
-      "risk_level": "medium",
-      "borrowable": false,
-      "assignable": false,
-      "selectable": false,
-      "internal": true,
-      "planner_visible": false,
-      "source": "sample",
-      "path": "skills/task-router"
     }
   ],
   "future_memory_interface": {

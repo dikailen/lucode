@@ -94,17 +94,9 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
             if not mcp.get("implemented"):
                 errors.append(f"MCP 尚未实现：{mcp_id}")
 
-            if mcp_id not in allowed_mcp:
-                errors.append(f"skill {task.skill_id} 不允许使用 MCP {mcp_id}")
-
-            allowed_for_skills = set(mcp.get("allowed_for_skills") or [])
-            dynamic_declared_skill = (
-                skill.get("source") in {"user", "workspace"}
-                and task.skill_id in skills
-                and mcp_id in allowed_mcp
-            )
-            if task.skill_id not in allowed_for_skills and not dynamic_declared_skill:
-                errors.append(f"MCP {mcp_id} 未授权给 skill {task.skill_id}")
+            auth_error = _mcp_authorization_error(task.skill_id, skill, mcp_id, mcp)
+            if auth_error:
+                errors.append(auth_error)
 
             if mcp_id in NETWORK_MCP_IDS and privacy_policy.mode == "offline":
                 if privacy_policy.mcp_allowed(mcp_id):
@@ -113,6 +105,22 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
                     errors.append(privacy_policy.mcp_warning(mcp_id))
 
     return PlanValidation(valid=not errors, errors=errors, warnings=warnings)
+
+
+def _mcp_authorization_error(skill_id: str, skill: dict, mcp_id: str, mcp: dict) -> str | None:
+    """Return one clear MCP authorization error, or None when the task is allowed."""
+
+    allowed_mcp = set(skill.get("allowed_mcp") or [])
+    if mcp_id not in allowed_mcp:
+        return f"skill {skill_id} 不允许使用 MCP {mcp_id}"
+
+    if skill.get("source") in {"user", "workspace"}:
+        return None
+
+    allowed_for_skills = set(mcp.get("allowed_for_skills") or [])
+    if skill_id not in allowed_for_skills:
+        return f"MCP {mcp_id} 未授权给 skill {skill_id}"
+    return None
 
 
 def _uses_supervised_lead_finalization(plan: PlannerResult) -> bool:

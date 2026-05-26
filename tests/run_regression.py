@@ -10718,6 +10718,18 @@ class FailureMemoryTests(unittest.TestCase):
 
 
 class CatalogRefreshTests(unittest.TestCase):
+    def test_deprecated_task_router_is_kept_on_disk_but_not_in_runtime_catalog(self):
+        from catalog_system.refresher import build_skill_catalog
+        from skills.registry import SKILLS
+
+        self.assertIn("task_router", SKILLS)
+        self.assertTrue((PROJECT_ROOT / "skills" / "task-router" / "SKILL.md").exists())
+
+        catalog = build_skill_catalog(PROJECT_ROOT, include_dynamic=False, use_cache=False)
+        ids = {item["id"] for item in catalog["skills"]}
+
+        self.assertNotIn("task_router", ids)
+
     def test_mcp_catalog_builder_keeps_hosted_remote_mcp_entries(self):
         from catalog_system.refresher import build_mcp_catalog, build_skill_catalog
 
@@ -13865,6 +13877,37 @@ class LocalModelPlannerCompatibilityTests(unittest.TestCase):
         validation = validate_plan(plan, privacy_policy=PrivacyPolicy.from_env())
 
         self.assertTrue(validation.valid, validation.errors)
+
+    def test_static_skill_mcp_validation_reports_single_clear_authorization_error(self):
+        from planning.plan_validator import validate_plan
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.safety.privacy import PrivacyPolicy
+
+        os.environ["AGENTS_PRIVACY_MODE"] = "cloud_allowed"
+        os.environ["MODEL_CLOUD_API_KEY"] = "cloud-key"
+        os.environ["MODEL_CLOUD_BASE_URL"] = "https://api.example.com/v1"
+        os.environ["MODEL_CLOUD_MODEL"] = "tool-model"
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="bad mcp",
+            refined_request="润色文本",
+            tasks=[
+                PlannedTask(
+                    id="rewrite",
+                    title="润色文本",
+                    instruction="润色这段中文。",
+                    skill_id="humanizer_zh",
+                    model="cloud_model",
+                    mcp=["workspace_edit"],
+                )
+            ],
+        )
+
+        validation = validate_plan(plan, privacy_policy=PrivacyPolicy.from_env())
+
+        self.assertFalse(validation.valid)
+        auth_errors = [error for error in validation.errors if "workspace_edit" in error]
+        self.assertEqual(auth_errors, ["skill humanizer_zh 不允许使用 MCP workspace_edit"])
 
     def test_explicit_context7_and_grep_requests_are_promoted_to_remote_mcp_task(self):
         from planning.planner_schema import parse_planner_result
