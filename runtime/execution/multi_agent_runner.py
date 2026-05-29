@@ -8,11 +8,18 @@ from mcp_servers import apply_full_supervisor_readonly_budget_profile, create_re
 from planning.planner_schema import PlannerResult
 from runtime.config.execution_mode import normalize_execution_mode
 from runtime.execution.execution_contract import summary_helper_enabled, supervisor_route
+from runtime.execution.lead_reviewer import (
+    emit_lead_review_events,
+    readonly_hard_constraint_from_plan,
+    render_lead_review_findings,
+    review_worker_reports,
+)
 from runtime.execution.parallel_scheduler import _execution_batches_for_mode, _format_parallel_batch_audit
 from runtime.execution.pipeline import PipelineRunState
 from runtime.execution.progress import _print_progress_snapshot
 from runtime.execution.supervisor_observer import emit_supervisor_observation, render_supervisor_context_for_workers
 from runtime.execution.task_runner import _run_planned_task
+from runtime.execution.worker_reporter import build_worker_report, render_worker_report
 from runtime.workspace.patch_ledger import PatchProposalLedger
 from runtime.workspace.run_workspace import RunWorkspace
 
@@ -39,6 +46,7 @@ async def _run_multi_agent(
     route = supervisor_route(plan)
     use_summary_helper = summary_helper_enabled(plan)
     worker_outputs: list[tuple[str, str, str]] = []
+    worker_reports = []
     supervisor_view = None
     if run_state:
         supervisor_view = emit_supervisor_observation(plan, mode=mode, event_bus=run_state.event_bus)
@@ -72,6 +80,7 @@ async def _run_multi_agent(
                     )
                     workspace.write_task_output(task.id, title, output)
                     worker_outputs.append((str(getattr(task, "id", "") or ""), title, output))
+                    worker_reports.append(build_worker_report(task, output, run_state=run_state))
                     if show_progress and run_state:
                         _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"已完成：{task.title}")
                     continue
@@ -127,8 +136,11 @@ async def _run_multi_agent(
                 for task, (title, output) in zip(batch, normalized_results):
                     workspace.write_task_output(task.id, title, output)
                     worker_outputs.append((str(getattr(task, "id", "") or ""), title, output))
+                    worker_reports.append(build_worker_report(task, output, run_state=run_state))
                 if show_progress and run_state:
                     _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"已完成：{active}")
+
+        lead_review_findings = _review_full_worker_reports(plan, worker_reports, run_state, mode=mode)
 
         if mode == "full" and route == "team" and not use_summary_helper:
             if run_state:
@@ -142,7 +154,15 @@ async def _run_multi_agent(
                 )
             if show_progress and run_state:
                 _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active="主管收口")
-            output = _render_lead_supervisor_output(plan, run_dir, run_state, mode, worker_outputs)
+            output = _render_lead_supervisor_output(
+                plan,
+                run_dir,
+                run_state,
+                mode,
+                worker_outputs,
+                worker_reports,
+                lead_review_findings,
+            )
             if run_state:
                 run_state.emit_event(
                     "LeadCompleted",
@@ -185,7 +205,19 @@ def _seed_supervisor_context_pack(run_state: PipelineRunState, supervisor_view, 
     if mode != "full" or route != "team":
         return False
     run_context = getattr(run_state, "run_context", None)
-    if run_context is None or not hasattr(run_context, "record_tool_output"):
+    if run_context is None:
+        return False
+    if hasattr(run_context, "record_context_pack"):
+        recorded = False
+        for pack in list(getattr(supervisor_view, "context_packs", []) or []):
+            try:
+                run_context.record_context_pack(pack, task_id="supervisor")
+                recorded = True
+            except Exception:
+                continue
+        if recorded:
+            return True
+    if not hasattr(run_context, "record_tool_output"):
         return False
     summary = render_supervisor_context_for_workers(supervisor_view)
     if not summary:
@@ -215,6 +247,18 @@ def _apply_full_supervisor_budget_profile(factory, tasks: list, mode: str) -> bo
     )
     manager = getattr(factory, "mcp_manager", None)
     return apply_full_supervisor_readonly_budget_profile(manager, mcp_ids)
+
+
+def _review_full_worker_reports(plan: PlannerResult, worker_reports: list, run_state: PipelineRunState | None, *, mode: str) -> list:
+    if mode != "full" or not worker_reports:
+        return []
+    findings = review_worker_reports(
+        plan.tasks,
+        worker_reports,
+        readonly_hard_constraint=readonly_hard_constraint_from_plan(plan),
+    )
+    emit_lead_review_events(run_state, findings, mode=mode)
+    return findings
 
 
 def _ordered_tasks_for_execution(plan: PlannerResult) -> list:
@@ -274,31 +318,108 @@ def _render_lead_supervisor_output(
     run_state: PipelineRunState | None,
     mode: str,
     worker_outputs: list[tuple[str, str, str]] | None = None,
+    worker_reports: list | None = None,
+    lead_review_findings: list | None = None,
 ) -> str:
     lines = [
         "主管最终汇报",
+        "",
+        "## 任务判断",
         f"- 模式：{mode}",
         f"- 路线：{supervisor_route(plan) or 'team'}",
         f"- SummaryHelper：{summary_helper_enabled(plan)}",
+        f"- 任务数：{len(list(getattr(plan, 'tasks', []) or []))}",
+        "",
+        "## Worker 执行结果",
     ]
-    if worker_outputs:
-        lines.append("- worker 报告：")
+    if worker_reports:
+        for report in worker_reports:
+            lines.append(_indent_block(render_worker_report(report), "  "))
+    elif worker_outputs:
         for task_id, title, output in worker_outputs:
             label = task_id or title or "task"
             lines.append(f"  - {label}: {_compact_worker_output(output)}")
     elif run_state:
-        lines.append("- worker 报告：")
         for record in list(getattr(run_state, "tasks", []) or []):
             preview = str(getattr(record, "output_preview", "") or "").strip()
             lines.append(f"  - {record.id}: {preview or '无输出预览'}")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## 文件影响"])
+    lines.extend(_render_file_impact_lines(worker_reports))
+    lines.extend(["", "## 验证结果"])
+    lines.extend(_render_verification_lines(worker_reports))
+    lines.extend(["", "## 主管审查"])
+    if lead_review_findings:
+        lines.append(_indent_block(render_lead_review_findings(lead_review_findings), "  "))
+    else:
+        lines.append("  LeadReview")
+        lines.append("  - findings: none")
     try:
         names = sorted(path.name for path in run_dir.glob("*.md"))
     except Exception:
         names = []
     if names:
+        lines.extend(["", "## 产物文件"])
         lines.append("- 产物文件：")
         lines.extend(f"  - {name}" for name in names)
+    lines.extend(["", "## 最终结论"])
+    if lead_review_findings:
+        error_count = sum(1 for finding in lead_review_findings if getattr(finding, "severity", "") == "error")
+        warning_count = sum(1 for finding in lead_review_findings if getattr(finding, "severity", "") == "warning")
+        lines.append(f"- 主管已完成收口审查：error={error_count}, warning={warning_count}。")
+        if error_count:
+            lines.append("- 存在 error 级风险，请优先查看“主管审查”。")
+    else:
+        lines.append("- 主管已完成收口审查，未发现 WorkerReport 风险。")
     return "\n".join(lines)
+
+
+def _render_file_impact_lines(worker_reports: list | None) -> list[str]:
+    reports = list(worker_reports or [])
+    if not reports:
+        return ["- files_read: none", "- files_written: none"]
+    read_paths = _unique_report_values(path for report in reports for path in list(getattr(report, "files_read", []) or []))
+    written_paths = _unique_report_values(
+        path for report in reports for path in list(getattr(report, "files_written", []) or [])
+    )
+    return [
+        f"- files_read: {', '.join(read_paths) if read_paths else 'none'}",
+        f"- files_written: {', '.join(written_paths) if written_paths else 'none'}",
+    ]
+
+
+def _render_verification_lines(worker_reports: list | None) -> list[str]:
+    reports = list(worker_reports or [])
+    claimed = [
+        artifact.split(":", 1)[1].strip()
+        for report in reports
+        for artifact in list(getattr(report, "artifacts", []) or [])
+        if str(artifact).startswith("claimed_verification:")
+    ]
+    if claimed:
+        return [f"- {item}" for item in _unique_report_values(claimed)]
+    tool_actions = _unique_report_values(
+        f"{call.get('tool')}.{call.get('action')}".strip(".")
+        for report in reports
+        for call in list(getattr(report, "tool_calls", []) or [])
+        if call.get("tool") or call.get("action")
+    )
+    if tool_actions:
+        return [f"- 工具证据：{', '.join(tool_actions)}"]
+    return ["- 未收到 worker 自述验证结果；以确定性工具/事件记录为准。"]
+
+
+def _unique_report_values(values) -> list[str]:
+    result: list[str] = []
+    seen = set()
+    for value in values:
+        clean = str(value or "").strip().replace("\\", "/")
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        result.append(clean)
+    return result
 
 
 def _compact_worker_output(output: str, limit: int = 1200) -> str:
@@ -306,6 +427,10 @@ def _compact_worker_output(output: str, limit: int = 1200) -> str:
     if len(value) <= limit:
         return value
     return value[:limit] + f"...[truncated {len(value) - limit} chars]"
+
+
+def _indent_block(text: str, prefix: str) -> str:
+    return "\n".join(prefix + line for line in str(text or "").splitlines())
 
 
 def _run_planned_task_accepts_execution_mode() -> bool:

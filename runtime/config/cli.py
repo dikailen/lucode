@@ -435,8 +435,8 @@ def render_diff_command(project_root: Path, max_chars: int = 4000) -> str:
     lines = ["Diff 摘要"]
     if stat_result.returncode != 0:
         return "\n".join(lines + [f"git diff 不可用：{_stderr_or_stdout(stat_result)}"])
-    stat = stat_result.stdout.strip()
-    names = [line.strip() for line in name_result.stdout.splitlines() if line.strip()] if name_result.returncode == 0 else []
+    stat = _redact_cli_output(stat_result.stdout.strip())
+    names = [_redact_cli_output(line.strip()) for line in name_result.stdout.splitlines() if line.strip()] if name_result.returncode == 0 else []
     if not stat and not names:
         lines.append("当前没有未暂存 diff。")
         return "\n".join(lines)
@@ -450,12 +450,12 @@ def render_diff_command(project_root: Path, max_chars: int = 4000) -> str:
         lines.append("")
         lines.append("统计：")
         lines.append(stat)
-    diff_text = diff_result.stdout if diff_result.returncode == 0 else ""
+    diff_text = _redact_cli_output(diff_result.stdout) if diff_result.returncode == 0 else ""
     if diff_text:
         lines.append("")
         lines.append("预览：")
         lines.append(_truncate(diff_text, limit))
-    return "\n".join(lines)
+    return _redact_cli_output("\n".join(lines))
 
 
 def _render_config(settings: RuntimeSettings) -> str:
@@ -984,6 +984,18 @@ def _truncate(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[:limit] + f"\n...[已截断 {len(value) - limit} 字符]"
+
+
+def _redact_cli_output(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"sk-[A-Za-z0-9._-]+", "[REDACTED_SECRET]", text)
+    text = re.sub(r"sk_[A-Za-z0-9._-]+", "[REDACTED_SECRET]", text)
+    text = re.sub(
+        r"(?i)(api[_-]?key|token|secret|authorization|password)(\s*[:=]\s*)([^\s,\]\}\"']+)",
+        r"\1\2[REDACTED_SECRET]",
+        text,
+    )
+    return text
 
 
 def _parse_model_select_value(value: str) -> tuple[str, list[str]]:

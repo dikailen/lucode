@@ -41,6 +41,7 @@ class AgentFactory:
             + self._execution_contract(task)
             + self._tool_budget(task, execution_mode=execution_mode)
             + self._tool_rules(task)
+            + self._worker_report_contract(task, execution_mode=execution_mode)
             + "\n## 输出风格\n"
             + "- 默认使用中文。\n"
             + "- 默认不要使用 emoji。\n"
@@ -257,6 +258,19 @@ class AgentFactory:
         if not mcp:
             lines.append("- 本任务没有分配 MCP 工具，请直接基于上文和前序任务输出完成。")
         return "\n".join(lines) + "\n"
+
+    def _worker_report_contract(self, task: PlannedTask, execution_mode: str = "") -> str:
+        if str(execution_mode or "").strip().lower() != "full":
+            return ""
+        return (
+            "\n## WorkerReport\n"
+            "full 主管模式下，请在最终回答末尾保留一个简短的 Markdown WorkerReport 块，供主管收口审查：\n"
+            "- 完成内容: 用一句话说明本任务实际完成了什么。\n"
+            "- 读取依据: 列出关键文件、命令结果或上下文来源；没有则写 none。\n"
+            "- 修改内容: 列出实际改动的文件或写 none；不要用自述覆盖真实工具/文件记录。\n"
+            "- 验证结果: 列出已运行的验证和结果；未验证要明确写未验证。\n"
+            "- 风险/未完成: 列出剩余风险、边界或 none。\n"
+        )
 
     def create_direct_answer_agent(self, model_id: str, instruction: str):
         Agent = agent_class()

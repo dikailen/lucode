@@ -45,6 +45,15 @@ def _restore_env(name: str, old_value: str | None) -> None:
         os.environ[name] = old_value
 
 
+def _snapshot_env(names: list[str]) -> dict[str, str | None]:
+    return {name: os.environ.get(name) for name in names}
+
+
+def _restore_env_snapshot(snapshot: dict[str, str | None]) -> None:
+    for name, old_value in snapshot.items():
+        _restore_env(name, old_value)
+
+
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -8274,6 +8283,37 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("README 项目说明", rendered)
         self.assertIn("inspect", rendered)
 
+    def test_run_context_store_records_context_pack_once_for_multiple_workers(self):
+        from runtime.agent.supervisor import ContextPack
+        from runtime.execution.run_context import RunContextStore
+
+        workspace = TEMP_ROOT / f"run_context_pack_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        pack = ContextPack(
+            pack_id="supervisor_context_pack",
+            summary="Shared scout result for full workers.",
+            shared_files=[
+                {"path": "README.md", "summary": "Project overview.", "owner_task_id": "read_a"},
+                {"path": "pyproject.toml", "summary": "Project metadata.", "owner_task_id": "read_b"},
+            ],
+            source_task_ids=["read_a", "read_b"],
+        )
+        store = RunContextStore(workspace)
+
+        first = store.record_context_pack(pack, task_id="supervisor")
+        second = store.record_context_pack(pack, task_id="read_a")
+        rendered_a = store.render_for_task("read_a")
+        rendered_b = store.render_for_task("read_b")
+
+        self.assertEqual(first.artifact_id, second.artifact_id)
+        self.assertEqual(len(store.context_packs), 1)
+        self.assertIn("ContextPack", rendered_a)
+        self.assertIn("supervisor_context_pack", rendered_a)
+        self.assertIn("README.md", rendered_a)
+        self.assertIn("pyproject.toml", rendered_b)
+        self.assertEqual(rendered_a.count("supervisor_context_pack"), 1)
+
     def test_dynamic_execution_result_preserves_string_behavior(self):
         from runtime.execution.dynamic import DynamicExecutionResult
 
@@ -9506,6 +9546,9 @@ class AgentFactorySoloTests(unittest.TestCase):
         self.assertIn("读取计划", instructions)
         self.assertIn("主管扩容", instructions)
         self.assertIn("共享给后续 Agent", instructions)
+        self.assertIn("## WorkerReport", instructions)
+        self.assertIn("验证结果", instructions)
+        self.assertIn("风险/未完成", instructions)
 
 
 class ModelRoleConfigTests(unittest.TestCase):
@@ -10723,12 +10766,48 @@ class CatalogRefreshTests(unittest.TestCase):
         from skills.registry import SKILLS
 
         self.assertIn("task_router", SKILLS)
-        self.assertTrue((PROJECT_ROOT / "skills" / "task-router" / "SKILL.md").exists())
+        skill_file = PROJECT_ROOT / "skills" / "task-router" / "SKILL.md"
+        self.assertTrue(skill_file.exists())
+        self.assertIn("deprecated: true", skill_file.read_text(encoding="utf-8-sig"))
 
         catalog = build_skill_catalog(PROJECT_ROOT, include_dynamic=False, use_cache=False)
         ids = {item["id"] for item in catalog["skills"]}
 
         self.assertNotIn("task_router", ids)
+
+    def test_skill_policy_constants_are_shared_across_catalog_and_runtime(self):
+        from runtime.config.skill_policy import (
+            BORROWABLE_SKILL_SOURCES,
+            INTERNAL_SKILLS,
+            PROTECTED_SYSTEM_SKILLS,
+            RULE_ONLY_SKILLS,
+        )
+
+        self.assertEqual(PROTECTED_SYSTEM_SKILLS, INTERNAL_SKILLS)
+        self.assertIn("sample", BORROWABLE_SKILL_SOURCES)
+        self.assertIn("user", BORROWABLE_SKILL_SOURCES)
+        self.assertIn("workspace", BORROWABLE_SKILL_SOURCES)
+        self.assertIn("cli_command_safety", RULE_ONLY_SKILLS)
+        self.assertIn("lucode_native_capability", INTERNAL_SKILLS)
+
+    def test_solo_skill_matcher_resolves_catalog_relative_paths_from_any_cwd(self):
+        from runtime.config.extensions import ExtensionRoots
+        from runtime.execution.skill_matcher import _skill_body_excerpt
+        from runtime.execution.skill_matcher import render_matching_user_skill_context
+
+        previous_cwd = Path.cwd()
+        temp_cwd = TEMP_ROOT / f"skill_matcher_cwd_{uuid.uuid4().hex}" / "nested"
+        temp_cwd.mkdir(parents=True)
+        self.addCleanup(lambda: os.chdir(previous_cwd))
+        self.addCleanup(lambda: _safe_rmtree(temp_cwd.parent))
+        os.chdir(temp_cwd)
+
+        context = ExtensionRoots(app_home=PROJECT_ROOT, user_home=temp_cwd / "user_home", workspace_root=temp_cwd)
+        prompt = render_matching_user_skill_context("请用 project_explorer 分析项目结构。", workspace_context=context)
+
+        self.assertIn("project_explorer", prompt)
+        self.assertIn("项目", prompt)
+        self.assertIn("Project Explorer", _skill_body_excerpt("skills/project-explorer"))
 
     def test_mcp_catalog_builder_keeps_hosted_remote_mcp_entries(self):
         from catalog_system.refresher import build_mcp_catalog, build_skill_catalog
@@ -11802,47 +11881,59 @@ class RuntimeSettingsTests(unittest.TestCase):
 
 
 class ModelBackendPrivacyTests(unittest.TestCase):
+    ENV_KEYS = [
+        "AGENTS_PRIVACY_MODE",
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_MODEL",
+        "DEEPSEEK_pro_API_KEY",
+        "DEEPSEEK_BASE_pro_URL",
+        "DEEPSEEK_pro_MODEL",
+        "MODEL_DEEPSEEK_API_KEY",
+        "MODEL_DEEPSEEK_BASE_URL",
+        "MODEL_DEEPSEEK_MODELS",
+        "MODEL_DEEPSEEK_BACKEND",
+        "MODEL_LOCAL_API_KEY",
+        "MODEL_LOCAL_BASE_URL",
+        "MODEL_LOCAL_MODEL",
+        "MODEL_LOCAL_BACKEND",
+        "MODEL_LOCAL_DISPLAY_NAME",
+        "MODEL_LOCAL_PROVIDER",
+        "MODEL_CLOUD_API_KEY",
+        "MODEL_CLOUD_BASE_URL",
+        "MODEL_CLOUD_MODEL",
+        "MODEL_CLOUD_BACKEND",
+        "MODEL_CLOUD_PROVIDER",
+        "MODEL_CLOUD_DISPLAY_NAME",
+        "MODEL_SILICONFLOW_API_KEY",
+        "MODEL_SILICONFLOW_BASE_URL",
+        "MODEL_SILICONFLOW_MODELS",
+        "MODEL_SILICONFLOW_BACKEND",
+        "MODEL_SILICONFLOW_PROVIDER",
+        "MODEL_SILICONFLOW_DISPLAY_PREFIX",
+        "MODEL_SILICONFLOW_STRENGTHS",
+        "MODEL_SILICONFLOW_BEST_FOR_SKILLS",
+        "MODEL_SILICONFLOW_COST_LEVEL",
+        "MODEL_SILICONFLOW_REASONING_LEVEL",
+        "MODEL_SILICONFLOW_SUPPORTS_TOOLS",
+        "MIMO_API_KEY",
+        "MIMO_API_BASE_URL",
+        "MIMO_API_MODEL",
+        "MIMO_API_MODELS",
+        "MIMO_API_DISPLAY_PREFIX",
+        "AGENTS_OFFLINE_NETWORK_MCP_POLICY",
+    ]
+
+    def setUp(self):
+        from dotenv import load_dotenv
+        from catalog_system.model_catalog import clear_model_catalog_cache
+
+        load_dotenv(PROJECT_ROOT / ".env")
+        clear_model_catalog_cache()
+        self._env_snapshot = _snapshot_env(self.ENV_KEYS)
+
     def tearDown(self):
-        for key in [
-            "AGENTS_PRIVACY_MODE",
-            "DEEPSEEK_API_KEY",
-            "DEEPSEEK_BASE_URL",
-            "DEEPSEEK_MODEL",
-            "DEEPSEEK_pro_API_KEY",
-            "DEEPSEEK_BASE_pro_URL",
-            "DEEPSEEK_pro_MODEL",
-            "MODEL_DEEPSEEK_API_KEY",
-            "MODEL_DEEPSEEK_BASE_URL",
-            "MODEL_DEEPSEEK_MODELS",
-            "MODEL_DEEPSEEK_BACKEND",
-            "MODEL_LOCAL_API_KEY",
-            "MODEL_LOCAL_BASE_URL",
-            "MODEL_LOCAL_MODEL",
-            "MODEL_LOCAL_BACKEND",
-            "MODEL_LOCAL_DISPLAY_NAME",
-            "MODEL_LOCAL_PROVIDER",
-            "MODEL_CLOUD_API_KEY",
-            "MODEL_CLOUD_BASE_URL",
-            "MODEL_CLOUD_MODEL",
-            "MODEL_CLOUD_BACKEND",
-            "MODEL_CLOUD_PROVIDER",
-            "MODEL_CLOUD_DISPLAY_NAME",
-            "MODEL_SILICONFLOW_API_KEY",
-            "MODEL_SILICONFLOW_BASE_URL",
-            "MODEL_SILICONFLOW_MODELS",
-            "MODEL_SILICONFLOW_BACKEND",
-            "MODEL_SILICONFLOW_PROVIDER",
-            "MODEL_SILICONFLOW_DISPLAY_PREFIX",
-            "MODEL_SILICONFLOW_STRENGTHS",
-            "MODEL_SILICONFLOW_BEST_FOR_SKILLS",
-            "MODEL_SILICONFLOW_COST_LEVEL",
-            "MODEL_SILICONFLOW_REASONING_LEVEL",
-            "MODEL_SILICONFLOW_SUPPORTS_TOOLS",
-            "MIMO_API_MODELS",
-            "MIMO_API_DISPLAY_PREFIX",
-            "AGENTS_OFFLINE_NETWORK_MCP_POLICY",
-        ]:
-            os.environ.pop(key, None)
+        _restore_env_snapshot(self._env_snapshot)
         from catalog_system.model_catalog import clear_model_catalog_cache
         clear_model_catalog_cache()
 
@@ -13727,7 +13818,7 @@ class LocalModelPlannerCompatibilityTests(unittest.TestCase):
     def test_orchestrator_planner_borrows_cli_command_safety_rules(self):
         from planning.planner import build_orchestrator_planner
 
-        planner = build_orchestrator_planner(model=object())
+        planner = build_orchestrator_planner(model=None)
 
         self.assertIn("CLI Command Safety", planner.instructions)
         self.assertIn("CommandAnalyzer v2", planner.instructions)

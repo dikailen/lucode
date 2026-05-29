@@ -26,6 +26,16 @@ class ToolOutputArtifact:
     task_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class ContextPackArtifact:
+    artifact_id: str
+    pack_id: str
+    summary: str
+    shared_files: tuple[dict, ...] = field(default_factory=tuple)
+    source_task_ids: tuple[str, ...] = field(default_factory=tuple)
+    task_ids: tuple[str, ...] = field(default_factory=tuple)
+
+
 class RunContextStore:
     """In-memory context pack shared by tasks in one dynamic execution run."""
 
@@ -43,6 +53,7 @@ class RunContextStore:
         self.max_excerpt_chars = max(200, int(max_excerpt_chars or 1200))
         self.file_snapshots: dict[str, FileSnapshotArtifact] = {}
         self.tool_outputs: list[ToolOutputArtifact] = []
+        self.context_packs: dict[str, ContextPackArtifact] = {}
 
     def record_file_snapshot(
         self,
@@ -92,16 +103,43 @@ class RunContextStore:
             self.tool_outputs = self.tool_outputs[-self.max_items :]
         return artifact
 
+    def record_context_pack(self, pack, *, task_id: str = "") -> ContextPackArtifact:
+        pack_id = _safe_token(getattr(pack, "pack_id", "") or "context_pack")
+        shared_files = tuple(dict(item) for item in list(getattr(pack, "shared_files", []) or []) if isinstance(item, dict))
+        source_task_ids = tuple(str(item) for item in list(getattr(pack, "source_task_ids", []) or []) if str(item).strip())
+        artifact_id = f"context_pack:{pack_id}"
+        previous = self.context_packs.get(artifact_id)
+        task_ids = _append_task_id(previous.task_ids if previous else (), task_id)
+        artifact = ContextPackArtifact(
+            artifact_id=artifact_id,
+            pack_id=pack_id,
+            summary=_compact_line(str(getattr(pack, "summary", "") or ""), 360),
+            shared_files=shared_files,
+            source_task_ids=source_task_ids,
+            task_ids=task_ids,
+        )
+        self.context_packs[artifact_id] = artifact
+        return artifact
+
     def render_for_task(self, task_id: str = "") -> str:
+        packs = list(self.context_packs.values())[-self.max_items :]
         files = list(self.file_snapshots.values())[-self.max_items :]
         tools = self.tool_outputs[-self.max_items :]
-        if not files and not tools:
+        if not packs and not files and not tools:
             return ""
 
         lines = [
             "本轮共享上下文：",
             "下面是前序任务已经读取或生成的证据摘要；如需逐字核对，再按需读取原文件。",
         ]
+        if packs:
+            lines.append("ContextPack（主管公共资料包）：")
+            for artifact in packs:
+                tasks = _format_task_ids(artifact.task_ids or artifact.source_task_ids)
+                lines.append(f"- {artifact.pack_id}（来源 {tasks}）：{artifact.summary}")
+                shared = _format_shared_files(artifact.shared_files)
+                if shared:
+                    lines.append(f"  共享资源：{shared}")
         if files:
             lines.append("已读文件：")
             for artifact in files:
@@ -139,6 +177,20 @@ def _append_task_id(existing: tuple[str, ...], task_id: str) -> tuple[str, ...]:
 
 def _format_task_ids(task_ids: tuple[str, ...]) -> str:
     return ", ".join(task_ids) if task_ids else "unknown"
+
+
+def _format_shared_files(shared_files: tuple[dict, ...]) -> str:
+    paths = []
+    seen = set()
+    for item in shared_files:
+        path = str(item.get("path") or "").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+        if len(paths) >= 8:
+            break
+    return ", ".join(paths)
 
 
 def _default_file_summary(relative: str, excerpt: str) -> str:

@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from runtime.config.extensions import discover_skill_layers
+from runtime.config.skill_policy import BORROWABLE_SKILL_SOURCES
 
 
-BORROWABLE_SKILL_SOURCES = ("workspace", "user", "sample")
 MAX_MATCHES = 2
 MAX_BODY_CHARS = 900
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_MATCH_SOURCE_ORDER = tuple(source for source in ("workspace", "user", "sample") if source in BORROWABLE_SKILL_SOURCES)
 
 
 def render_matching_user_skill_context(user_input: str, workspace_context=None) -> str:
@@ -20,7 +22,7 @@ def render_matching_user_skill_context(user_input: str, workspace_context=None) 
     except Exception:
         return ""
     seen_ids: set[str] = set()
-    for source in BORROWABLE_SKILL_SOURCES:
+    for source in _MATCH_SOURCE_ORDER:
         for item in layers.get(source) or []:
             if item.get("blocked") or item.get("borrowable") is False:
                 continue
@@ -87,7 +89,10 @@ def _normalize_match_text(value) -> str:
 def _skill_body_excerpt(path_value) -> str:
     if not path_value:
         return ""
-    skill_file = Path(str(path_value)) / "SKILL.md"
+    skill_path = Path(str(path_value))
+    if not skill_path.is_absolute():
+        skill_path = PROJECT_ROOT / skill_path
+    skill_file = skill_path / "SKILL.md"
     try:
         text = skill_file.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:

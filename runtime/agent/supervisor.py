@@ -56,7 +56,11 @@ class ResourceLease:
 
 @dataclass(frozen=True)
 class WorkerReport:
-    """Structured report submitted by a worker in the future supervised loop."""
+    """Structured report submitted by a worker.
+
+    `files_written` is actual observed tool evidence. PlannedTask.write_intent
+    remains the declared write scope used for authorization comparisons.
+    """
 
     task_id: str
     status: str = "pending"

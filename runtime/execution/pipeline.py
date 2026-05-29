@@ -256,7 +256,8 @@ def apply_pipeline_gate(plan: PlannerResult, refined_request: str) -> GateDecisi
     code_tasks = [task for task in plan.tasks if _is_code_task(task)]
     is_code = bool(code_tasks) or _contains_any(text, CODE_MARKERS)
     code_text = "\n".join([refined_request, *(_task_text(task) for task in code_tasks)]).lower()
-    edit_intent = bool(code_tasks) and _contains_any(code_text, EDIT_MARKERS)
+    declared_write_intent = any(getattr(task, "write_intent", []) for task in code_tasks)
+    edit_intent = bool(code_tasks) and (_contains_any(code_text, EDIT_MARKERS) or declared_write_intent)
     test_intent = bool(code_tasks) and _contains_any(code_text, TEST_MARKERS)
     needs_code_pipeline = plan.route_type in {"single_agent", "multi_agent"} and is_code
     should_verify = needs_code_pipeline and (edit_intent or test_intent)

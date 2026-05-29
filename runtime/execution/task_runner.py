@@ -25,6 +25,7 @@ from runtime.execution.inline_context import (
     _resolve_explicit_project_file_paths,
 )
 from runtime.execution.pipeline import PipelineRunState, build_verification_report
+from runtime.hooks import TaskScopedHooks
 from runtime.workspace.patch_ledger import PatchProposalLedger
 
 
@@ -135,6 +136,7 @@ async def _run_planned_task(
             max_turns=_max_turns_for_task(task),
             approval_policy=approval_policy,
         )
+        scoped_hooks = _task_scoped_hooks(hooks, run_state, task)
         result = await run_agent(
             agent,
             _task_prompt(
@@ -144,7 +146,7 @@ async def _run_planned_task(
                 workspace_context,
                 shared_context,
             ),
-            hooks,
+            scoped_hooks,
             **run_agent_kwargs,
         )
     except Exception as exc:
@@ -204,6 +206,13 @@ def _record_fast_path_context(run_context, tool: str, action: str, output: str, 
         )
     except Exception:
         return
+
+
+def _task_scoped_hooks(hooks, run_state: PipelineRunState | None, task):
+    event_bus = getattr(run_state, "event_bus", None)
+    if hooks is None or event_bus is None:
+        return hooks
+    return TaskScopedHooks(hooks, task_id=str(getattr(task, "id", "") or ""), event_bus=event_bus)
 
 
 def _shared_context_for_task(run_state: PipelineRunState | None, task) -> str:
