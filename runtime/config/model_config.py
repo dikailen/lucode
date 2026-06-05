@@ -567,14 +567,14 @@ def _dump_lucode_toml(config: dict[str, Any]) -> str:
     root_items = {
         key: value
         for key, value in config.items()
-        if key not in {"model", "roles", "provider"} and not isinstance(value, dict)
+        if key not in {"model", "roles", "ui", "provider"} and not isinstance(value, dict)
     }
     for key in sorted(root_items):
         lines.append(f"{key} = {_toml_value(root_items[key])}")
     if root_items:
         lines.append("")
 
-    for section in ["model", "roles"]:
+    for section in ["model", "roles", "ui"]:
         mapping = config.get(section)
         if isinstance(mapping, dict) and mapping:
             lines.append(f"[{section}]")

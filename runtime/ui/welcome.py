@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import os
 import unicodedata
+from io import StringIO
 
 from catalog_system.model_catalog import load_model_catalog
 from runtime.config.settings import RuntimeSettings
 from runtime.config.workspace import WorkspaceContext
+from runtime.ui.capabilities import normalize_dynamic_ui_mode
+from runtime.ui.theme import DEFAULT_UI_THEME, resolve_ui_theme
 
 
 BLUE = "\033[94m"
 RESET = "\033[0m"
-LOGO_STATUS_GAP = 10
+LOGO_STATUS_GAP = 8
 BOX_TOP_LEFT = "\u256d"
 BOX_TOP_RIGHT = "\u256e"
 BOX_BOTTOM_LEFT = "\u2570"
@@ -19,7 +22,6 @@ BOX_HORIZONTAL = "\u2500"
 BOX_VERTICAL = "\u2502"
 
 MASCOT_LOGO = [
-    "      lucode",
     "      /\\_/\\",
     "     ( o.o )",
     "      > ^ <",
@@ -36,63 +38,131 @@ def render_welcome_dashboard(
     use_color: bool | None = None,
     show_logo: bool = True,
 ) -> str:
-    """Render the concise C1.5 startup dashboard."""
+    """Render the startup dashboard."""
 
     catalog = model_catalog if model_catalog is not None else load_model_catalog()
+    if _should_use_rich_welcome():
+        try:
+            return _render_rich_welcome_dashboard(workspace, settings, catalog, show_logo=show_logo)
+        except Exception:
+            pass
+    return _render_plain_welcome_dashboard(workspace, settings, catalog, use_color=use_color, show_logo=show_logo)
+
+
+def _render_plain_welcome_dashboard(
+    workspace: WorkspaceContext,
+    settings: RuntimeSettings,
+    catalog: dict,
+    *,
+    use_color: bool | None = None,
+    show_logo: bool = True,
+) -> str:
     color_enabled = _color_enabled(use_color)
+    rows = _welcome_rows(workspace, settings, catalog, color_enabled=color_enabled, show_logo=show_logo)
+    return _render_box(rows, color_enabled)
+
+
+def _render_rich_welcome_dashboard(
+    workspace: WorkspaceContext,
+    settings: RuntimeSettings,
+    catalog: dict,
+    *,
+    show_logo: bool = True,
+) -> str:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.text import Text
+
+    theme = resolve_ui_theme(workspace_root=workspace.workspace_root, user_home=workspace.user_home)
+    console_file = StringIO()
+    rows = _welcome_rows(workspace, settings, catalog, color_enabled=False, show_logo=show_logo)
+    content_width = max((_display_width(line) for line in rows), default=0)
+    panel_width = max(content_width + 8, 72)
+    console = Console(
+        file=console_file,
+        force_terminal=True,
+        color_system="truecolor",
+        width=panel_width,
+        height=max(len(rows) + 4, 10),
+        legacy_windows=False,
+        record=False,
+    )
+    title = Text(" lucode ", style=f"bold {theme.brand or DEFAULT_UI_THEME.brand}")
+    console.print(
+        Panel(
+            "\n".join(rows),
+            title=title,
+            border_style=theme.border or DEFAULT_UI_THEME.border,
+            width=panel_width,
+            expand=False,
+        )
+    )
+    return console_file.getvalue().rstrip()
+
+
+def _should_use_rich_welcome() -> bool:
+    return normalize_dynamic_ui_mode() == "on"
+
+
+def _welcome_rows(
+    workspace: WorkspaceContext,
+    settings: RuntimeSettings,
+    catalog: dict,
+    *,
+    color_enabled: bool,
+    show_logo: bool,
+) -> list[str]:
     logo_lines = MASCOT_LOGO if show_logo else [COMPACT_BRAND]
     logo = [_blue(line, color_enabled) for line in logo_lines]
     status = _status_lines(workspace, settings, catalog)
     width = max((_display_width(line) for line in logo), default=0) + (LOGO_STATUS_GAP if logo else 0)
+    row_count = max(len(logo), len(status))
+    logo_top_padding = _center_offset(row_count, len(logo))
+    status_top_padding = _center_offset(row_count, len(status))
 
     rows = []
-    for index in range(max(len(logo), len(status))):
-        left = logo[index] if index < len(logo) else ""
-        right = status[index] if index < len(status) else ""
+    for index in range(row_count):
+        logo_index = index - logo_top_padding
+        status_index = index - status_top_padding
+        left = logo[logo_index] if 0 <= logo_index < len(logo) else ""
+        right = status[status_index] if 0 <= status_index < len(status) else ""
         rows.append(f"{left}{_visible_padding(left, width)}{right}".rstrip())
-    return _render_box(rows, color_enabled)
+    return rows
 
 
 def _status_lines(workspace: WorkspaceContext, settings: RuntimeSettings, catalog: dict) -> list[str]:
     model_text = _model_summary(settings, catalog)
-    lines = [
-        f"项目    {workspace.workspace_root}",
-        f"配置    {' .lucode 已发现'.strip() if workspace.has_project_config else '未初始化'}",
+    mode = str(settings.execution_mode or "solo").strip().lower()
+    model_label = "主脑" if mode in {"serial", "full"} else "模型"
+    return [
+        f"项目  {workspace.workspace_root}",
+        "",
+        f"模式  {_mode_label(mode)}",
+        "",
+        f"{model_label}  {model_text}",
+        "",
+        f"工具  {_tool_summary(mode)}",
     ]
-    if settings.execution_mode == "serial":
-        lines.extend(
-            [
-                "模式    serial 串行多代理",
-                f"主脑    {model_text}",
-                "执行    多任务串行",
-                "副脑    final-synthesizer",
-                "审查    计划校验开启",
-                "并行    关闭",
-            ]
-        )
-    elif settings.execution_mode == "full":
-        lines.extend(
-            [
-                "模式    full 审核并行",
-                f"主脑    {model_text}",
-                "执行组  多 Agent 安全批次",
-                "副脑    synthesizer / auditor",
-                "账本    patch ledger 开启",
-                "并行    仅无冲突任务",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "模式    solo 单代理",
-                f"模型    {model_text}",
-                f"隐私    {_privacy_label(settings.privacy_mode)}",
-                "工具    按需加载",
-                "备份    已开启",
-                "输入 / 查看命令",
-            ]
-        )
-    return lines
+
+
+def _center_offset(outer_count: int, inner_count: int) -> int:
+    return max((outer_count - inner_count) // 2, 0)
+
+
+def _mode_label(mode: str) -> str:
+    return {
+        "solo": "solo 单代理",
+        "serial": "serial 串行多代理",
+        "full": "full 审核并行",
+    }.get(mode, f"{mode or 'solo'} 单代理")
+
+
+def _tool_summary(mode: str) -> str:
+    if mode == "full":
+        return "按需加载 · 审批保护"
+    if mode == "serial":
+        return "按需加载 · 计划校验"
+    return "按需加载"
 
 
 def _model_summary(settings: RuntimeSettings, catalog: dict) -> str:
@@ -111,14 +181,6 @@ def _model_summary(settings: RuntimeSettings, catalog: dict) -> str:
     if fallback_count:
         return f"{name}  +{fallback_count} 备用"
     return str(name)
-
-
-def _privacy_label(mode: str) -> str:
-    return {
-        "offline": "离线本地",
-        "local_first": "本地优先",
-        "cloud_allowed": "允许云端",
-    }.get(str(mode or "").strip(), str(mode or "未知"))
 
 
 def _color_enabled(value: bool | None) -> bool:

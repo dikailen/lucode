@@ -100,6 +100,35 @@
       "path": "skills/final-synthesizer"
     },
     {
+      "id": "full_worker_contract",
+      "folder": "full-worker-contract",
+      "display_name_zh": "full-worker-contract",
+      "summary_zh": "full team mode Worker role contract. Defines worker boundaries, evidence discipline, and WorkerReport requirements for supervised execution.",
+      "tags": [
+        "general"
+      ],
+      "default_model": "deepseek_V4_flash_model",
+      "allowed_mcp": [],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
+      "good_for": [
+        "full team mode Worker role contract. Defines worker boundaries, evidence discipline, and WorkerReport requirements for s"
+      ],
+      "not_for": [],
+      "cost_level": "medium",
+      "risk_level": "medium",
+      "borrowable": false,
+      "assignable": false,
+      "selectable": false,
+      "internal": true,
+      "planner_visible": false,
+      "source": "sample",
+      "path": "skills/full-worker-contract"
+    },
+    {
       "id": "humanizer_zh",
       "folder": "Humanizer-zh-main",
       "display_name_zh": "中文去 AI 味",
@@ -294,6 +323,35 @@
       "planner_visible": false,
       "source": "sample",
       "path": "skills/query-refiner"
+    },
+    {
+      "id": "serial_executor_contract",
+      "folder": "serial-executor-contract",
+      "display_name_zh": "serial-executor-contract",
+      "summary_zh": "serial mode sequential execution Agent role contract. Defines serial-only boundaries so task agents do not borrow full team or supervisor behavior.",
+      "tags": [
+        "general"
+      ],
+      "default_model": "deepseek_V4_flash_model",
+      "allowed_mcp": [],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
+      "good_for": [
+        "serial mode sequential execution Agent role contract. Defines serial-only boundaries so task agents do not borrow full t"
+      ],
+      "not_for": [],
+      "cost_level": "medium",
+      "risk_level": "medium",
+      "borrowable": false,
+      "assignable": false,
+      "selectable": false,
+      "internal": true,
+      "planner_visible": false,
+      "source": "sample",
+      "path": "skills/serial-executor-contract"
     },
     {
       "id": "skill_creator",

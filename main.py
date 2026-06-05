@@ -26,9 +26,10 @@ from runtime.ui.welcome import render_welcome_dashboard
 # 当前 main.py 所在目录，也就是项目根目录。
 BASE_DIR = Path(__file__).resolve().parent
 
-# 读取当前项目目录下的 .env 文件。
-# 你的 API Key、base_url、模型名都放在 .env 里，代码通过 os.getenv(...) 读取。
-load_dotenv(BASE_DIR / ".env")
+# .env 仍作为兼容设置读取；主 Provider 配置优先使用 .lucode/config.toml，
+# API key 优先保存到用户级 auth.json。设置 LUCODE_DISABLE_DOTENV=1 可测试禁用兼容层。
+if str(os.environ.get("LUCODE_DISABLE_DOTENV") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+    load_dotenv(BASE_DIR / ".env")
 
 # Windows PowerShell 有时默认使用 GBK 编码。
 # 这里把 Python 标准输出改成 UTF-8，避免中文、特殊符号打印时报编码错误。

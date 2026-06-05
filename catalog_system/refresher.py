@@ -13,6 +13,12 @@ from runtime.config.skill_frontmatter import (
     frontmatter_text,
     read_skill_frontmatter,
 )
+from runtime.config.skill_policy import (
+    BORROWABLE_SKILL_SOURCES,
+    DEPRECATED_SKILLS,
+    INTERNAL_SKILLS,
+    RULE_ONLY_SKILLS,
+)
 from skills.registry import SKILLS
 
 
@@ -28,20 +34,6 @@ CORE_MCP_IDS = {
     "web_search",
     "context7_docs",
     "grep_code_search",
-}
-BORROWABLE_SKILL_SOURCES = {"sample", "user", "workspace"}
-RULE_ONLY_SKILLS = {
-    "cli_command_safety",
-}
-INTERNAL_SKILLS = {
-    "lucode_native_capability",
-    "task_router",
-    "query_refiner",
-    "orchestrator_planner",
-    "final_synthesizer",
-}
-DEPRECATED_SKILLS = {
-    "task_router",
 }
 _SKILL_CATALOG_CACHE: dict[tuple, dict] = {}
 _SKILL_CATALOG_CACHE_LOCK = threading.Lock()

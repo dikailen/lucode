@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import unicodedata
 
-from runtime.ui.event_render import render_execution_events
+from runtime.history.expand_store import ExpandBlockStore
+from runtime.ui.event_render import render_execution_event_summary
 
 
 BOX_TOP_LEFT = "\u256d"
@@ -82,7 +83,19 @@ def _task_detail_line(record) -> str:
 def _event_lines(run_state) -> list[str]:
     event_bus = getattr(run_state, "event_bus", None)
     snapshot = event_bus.snapshot() if event_bus is not None and hasattr(event_bus, "snapshot") else []
-    return ["", *render_execution_events(snapshot, limit=6).splitlines()]
+    summary = render_execution_event_summary(snapshot, limit=8, expand_store=_expand_store_for_run_state(run_state))
+    return ["", *summary.splitlines()] if summary else []
+
+
+def _expand_store_for_run_state(run_state):
+    run_context = getattr(run_state, "run_context", None)
+    project_root = getattr(run_context, "project_root", None)
+    if project_root is None:
+        return None
+    try:
+        return ExpandBlockStore(project_root)
+    except Exception:
+        return None
 
 
 def _box(lines: list[str]) -> str:

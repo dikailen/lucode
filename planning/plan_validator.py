@@ -78,10 +78,12 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
 
         model = models.get(task.model)
         if not model:
-            errors.append(f"未知模型：{task.model}")
-        elif not model.get("configured"):
-            errors.append(f"模型未在 .env 中完整配置：{task.model}")
-        elif not privacy_policy.model_allowed(model):
+            errors.append(f"模型未在当前有效配置中注册：{task.model}")
+            continue
+        if not model.get("configured"):
+            errors.append(f"模型已注册但未在当前有效配置中完整可用：{task.model}")
+            continue
+        if not privacy_policy.model_allowed(model):
             errors.append(privacy_policy.model_error(task.model, model))
 
         allowed_mcp = set(skill.get("allowed_mcp") or [])

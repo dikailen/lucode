@@ -5,15 +5,22 @@ import importlib.util
 import os
 import sys
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Sequence
 
 from runtime.commands.completion import (
     create_slash_command_completer,
+    slash_auto_suggestion,
     slash_prompt_message,
     slash_prompt_session_kwargs,
 )
 from runtime.common.text_utils import sanitize_text
+from runtime.ui.theme import prompt_toolkit_prompt_style, resolve_ui_theme
+
+
+def _null_context():
+    return nullcontext()
 
 
 @dataclass
@@ -122,9 +129,10 @@ class StdinConsoleAdapter:
     interactive = True
     _EOF = object()
 
-    def __init__(self, enable_prompt_toolkit: bool | None = None):
+    def __init__(self, enable_prompt_toolkit: bool | None = None, output_controller=None):
         self._deferred_lines = []
         self._enable_prompt_toolkit = enable_prompt_toolkit
+        self.output_controller = output_controller
         self._loop = None
         self._queue = None
         self._reader_started = False
@@ -133,29 +141,33 @@ class StdinConsoleAdapter:
         self._runtime_prompt_session = None
         self._choice_prompt_session = None
         self._secret_prompt_session = None
+        self._prompt_style = _current_prompt_style()
 
     async def read_line(self, prompt: str = "\n你：") -> str:
         if self._deferred_lines:
             return self._deferred_lines.pop(0)
-        if self._should_use_prompt_toolkit():
-            return await self._read_prompt_toolkit_line(prompt, complete_slash=True)
-        print(prompt, end="", flush=True)
-        self._ensure_reader()
-        item = await self._queue.get()
-        if item is self._EOF:
-            raise EOFError
-        return item
+        with self._temporary_interactive_phase("main input"):
+            self._refresh_prompt_theme()
+            if self._should_use_prompt_toolkit():
+                return await self._read_prompt_toolkit_line(prompt, complete_slash=True)
+            print(prompt, end="", flush=True)
+            self._ensure_reader()
+            item = await self._queue.get()
+            if item is self._EOF:
+                raise EOFError
+            return item
 
     async def read_runtime_line(self) -> str:
         if self._deferred_lines:
             return self._deferred_lines.pop(0)
-        if self._should_use_prompt_toolkit():
-            return await self._read_prompt_toolkit_line("", complete_slash=False)
-        self._ensure_reader()
-        item = await self._queue.get()
-        if item is self._EOF:
-            raise EOFError
-        return item
+        with self._temporary_interactive_phase("runtime input"):
+            if self._should_use_prompt_toolkit():
+                return await self._read_prompt_toolkit_line("", complete_slash=False)
+            self._ensure_reader()
+            item = await self._queue.get()
+            if item is self._EOF:
+                raise EOFError
+            return item
 
     async def read_runtime_control_line(self) -> str:
         """Read control input during a running turn without prompt_toolkit repaint."""
@@ -178,37 +190,41 @@ class StdinConsoleAdapter:
     ) -> str:
         if self._deferred_lines:
             return self._deferred_lines.pop(0)
-        if self._should_use_prompt_toolkit():
-            try:
-                return await self._read_prompt_toolkit_choice(
-                    prompt,
-                    choices,
-                    bottom_toolbar=bottom_toolbar,
-                    reserve_space_for_menu=reserve_space_for_menu,
-                )
-            except Exception:
-                pass
-        print(prompt, end="", flush=True)
-        self._ensure_reader()
-        item = await self._queue.get()
-        if item is self._EOF:
-            raise EOFError
-        return item
+        with self._temporary_interactive_phase("choice input"):
+            self._refresh_prompt_theme()
+            if self._should_use_prompt_toolkit():
+                try:
+                    return await self._read_prompt_toolkit_choice(
+                        prompt,
+                        choices,
+                        bottom_toolbar=bottom_toolbar,
+                        reserve_space_for_menu=reserve_space_for_menu,
+                    )
+                except Exception:
+                    pass
+            print(prompt, end="", flush=True)
+            self._ensure_reader()
+            item = await self._queue.get()
+            if item is self._EOF:
+                raise EOFError
+            return item
 
     async def read_secret_line(self, prompt: str) -> str:
         if self._deferred_lines:
             return self._deferred_lines.pop(0)
-        if self._should_use_prompt_toolkit():
-            try:
-                return await self._read_prompt_toolkit_secret(prompt)
-            except Exception:
-                pass
-        print(prompt, end="", flush=True)
-        self._ensure_reader()
-        item = await self._queue.get()
-        if item is self._EOF:
-            raise EOFError
-        return item
+        with self._temporary_interactive_phase("secret input"):
+            self._refresh_prompt_theme()
+            if self._should_use_prompt_toolkit():
+                try:
+                    return await self._read_prompt_toolkit_secret(prompt)
+                except Exception:
+                    pass
+            print(prompt, end="", flush=True)
+            self._ensure_reader()
+            item = await self._queue.get()
+            if item is self._EOF:
+                raise EOFError
+            return item
 
     async def read_form(
         self,
@@ -225,16 +241,17 @@ class StdinConsoleAdapter:
             return None
         if not self._should_use_prompt_toolkit():
             return None
-        try:
-            return await self._read_prompt_toolkit_form(
-                title=title,
-                fields=fields,
-                actions=actions,
-                message=message,
-                footer=footer,
-            )
-        except Exception:
-            return None
+        with self._temporary_interactive_phase("form input"):
+            try:
+                return await self._read_prompt_toolkit_form(
+                    title=title,
+                    fields=fields,
+                    actions=actions,
+                    message=message,
+                    footer=footer,
+                )
+            except Exception:
+                return None
 
     def defer(self, line: str) -> None:
         if line is None:
@@ -265,6 +282,20 @@ class StdinConsoleAdapter:
             return False
         return should_enable_prompt_toolkit(prompt_toolkit_available=self._enable_prompt_toolkit)
 
+    def _temporary_interactive_phase(self, reason: str):
+        controller = getattr(self, "output_controller", None)
+        if controller is None or not hasattr(controller, "temporary_phase"):
+            return _null_context()
+        try:
+            from runtime.ui.output_controller import OutputPhase
+
+            snapshot = controller.snapshot() if hasattr(controller, "snapshot") else None
+            if getattr(snapshot, "phase", None) == OutputPhase.APPROVAL_WAITING:
+                return _null_context()
+            return controller.temporary_phase(OutputPhase.INTERACTIVE_INPUT, reason=reason)
+        except Exception:
+            return _null_context()
+
     async def _read_prompt_toolkit_line(self, prompt: str, *, complete_slash: bool) -> str:
         try:
             from prompt_toolkit import PromptSession
@@ -279,12 +310,7 @@ class StdinConsoleAdapter:
 
         if complete_slash:
             if self._main_prompt_session is None:
-                self._main_prompt_session = PromptSession(
-                    completer=create_slash_command_completer(),
-                    complete_while_typing=True,
-                    mouse_support=prompt_mouse_support_enabled(),
-                    **slash_prompt_session_kwargs(),
-                )
+                self._main_prompt_session = _create_main_prompt_session(PromptSession, prompt_style=self._prompt_style)
             session = self._main_prompt_session
         else:
             if self._runtime_prompt_session is None:
@@ -293,6 +319,8 @@ class StdinConsoleAdapter:
 
         with patch_stdout():
             prompt_message = slash_prompt_message(prompt) if complete_slash else prompt
+            if complete_slash:
+                return await session.prompt_async(prompt_message, style=_prompt_style_dict(self._prompt_style))
             return await session.prompt_async(prompt_message)
 
     async def _read_prompt_toolkit_choice(
@@ -335,16 +363,7 @@ class StdinConsoleAdapter:
                         display_meta=choice.meta,
                     )
 
-        bindings = KeyBindings()
-
-        @bindings.add("q")
-        def _exit_on_empty_q(event):
-            buffer = event.current_buffer
-            if buffer.text:
-                buffer.insert_text("q")
-                return
-            buffer.insert_text("q")
-            buffer.validate_and_handle()
+        bindings = create_choice_prompt_key_bindings()
 
         if self._choice_prompt_session is None:
             self._choice_prompt_session = PromptSession()
@@ -354,7 +373,7 @@ class StdinConsoleAdapter:
 
         style = Style.from_dict(
             {
-                "prompt": "ansiblue bold",
+                "prompt": self._prompt_style,
                 "completion-menu.completion": "bg:#202020 #d0d0d0",
                 "completion-menu.completion.current": "bg:#005fff #ffffff bold",
                 "scrollbar.background": "bg:#303030",
@@ -390,7 +409,10 @@ class StdinConsoleAdapter:
         if self._secret_prompt_session is None:
             self._secret_prompt_session = PromptSession(is_password=True)
         with patch_stdout():
-            return await self._secret_prompt_session.prompt_async([("class:prompt", prompt)])
+            return await self._secret_prompt_session.prompt_async([("class:prompt", prompt)], style=_prompt_style_dict(self._prompt_style))
+
+    def _refresh_prompt_theme(self) -> None:
+        self._prompt_style = _current_prompt_style()
 
     async def _read_prompt_toolkit_form(
         self,
@@ -602,11 +624,14 @@ class StdinConsoleAdapter:
 class RuntimeCommandSession:
     """Watch stdin while a turn is running so /stop can cancel in-flight work."""
 
-    def __init__(self, console, timeout_seconds: float | None = None):
+    def __init__(self, console, timeout_seconds: float | None = None, output_controller=None):
         self.console = console
         self.timeout_seconds = timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
+        self.output_controller = output_controller
         self._approval_future = None
         self._approval_requested = None
+        self.approval_waiting = False
+        self._approval_phase_token = None
 
     async def run(self, work_coro):
         if callable(work_coro):
@@ -648,6 +673,8 @@ class RuntimeCommandSession:
                     if self._approval_requested is not None:
                         self._approval_requested.clear()
                     if self._approval_future is not None and not self._approval_future.done():
+                        self.approval_waiting = True
+                        self._enter_approval_phase()
                         if input_task is not None and not input_task.done():
                             input_task.cancel()
                             await asyncio.gather(input_task, return_exceptions=True)
@@ -669,6 +696,7 @@ class RuntimeCommandSession:
                         input_task.cancel()
                         await asyncio.gather(input_task, return_exceptions=True)
                     await _cancel_task_without_blocking(work_task)
+                    self._mark_failed("turn timeout")
                     return RuntimeTurnResult(
                         final_output="本轮执行超过超时时间，已自动中断。你可以把任务拆小一点，或稍后重试。",
                         stopped=True,
@@ -679,19 +707,25 @@ class RuntimeCommandSession:
                 if self._approval_future is not None and not self._approval_future.done():
                     if _is_stop_command(line):
                         self._approval_future.set_result("")
+                        self.approval_waiting = False
+                        self._restore_approval_phase()
                         await _cancel_task_without_blocking(work_task)
+                        self._mark_failed("stopped")
                         return RuntimeTurnResult(
                             final_output="已收到 /stop，本轮执行已中断。你可以直接重新输入新的问题。",
                             stopped=True,
                         )
                     self._approval_future.set_result(line)
+                    self.approval_waiting = False
+                    self._restore_approval_phase()
                 elif _is_stop_command(line):
                     await _cancel_task_without_blocking(work_task)
+                    self._mark_failed("stopped")
                     return RuntimeTurnResult(
                         final_output="已收到 /stop，本轮执行已中断。你可以直接重新输入新的问题。",
                         stopped=True,
                     )
-                elif _is_orphan_approval_token(line):
+                elif self._should_drop_orphan_approval_token(line):
                     pass
                 elif line:
                     self.console.defer(line)
@@ -699,6 +733,7 @@ class RuntimeCommandSession:
                 if control_input_enabled and input_task is not None:
                     input_task = asyncio.create_task(self._read_control_line())
         finally:
+            self._restore_approval_phase()
             if approval_task and not approval_task.done():
                 approval_task.cancel()
                 await asyncio.gather(approval_task, return_exceptions=True)
@@ -728,6 +763,8 @@ class RuntimeCommandSession:
             return sanitize_text(answer).strip().lower()
         finally:
             self._approval_future = None
+            self.approval_waiting = False
+            self._restore_approval_phase()
 
     async def _read_control_line(self) -> str:
         reader = getattr(self.console, "read_runtime_control_line", None)
@@ -743,6 +780,42 @@ class RuntimeCommandSession:
             except Exception:
                 return False
         return True
+
+    def _should_drop_orphan_approval_token(self, line: str) -> bool:
+        return not self.approval_waiting and _is_orphan_approval_token(line)
+
+    def _enter_approval_phase(self) -> None:
+        if self._approval_phase_token is not None:
+            return
+        controller = getattr(self, "output_controller", None)
+        if controller is None or not hasattr(controller, "push_phase"):
+            return
+        try:
+            from runtime.ui.output_controller import OutputPhase
+
+            self._approval_phase_token = controller.push_phase(OutputPhase.APPROVAL_WAITING, reason="approval waiting")
+        except Exception:
+            self._approval_phase_token = None
+
+    def _restore_approval_phase(self) -> None:
+        if self._approval_phase_token is None:
+            return
+        controller = getattr(self, "output_controller", None)
+        token = self._approval_phase_token
+        self._approval_phase_token = None
+        if controller is not None and hasattr(controller, "restore"):
+            try:
+                controller.restore(token)
+            except Exception:
+                pass
+
+    def _mark_failed(self, reason: str) -> None:
+        controller = getattr(self, "output_controller", None)
+        if controller is not None and hasattr(controller, "enter_failed"):
+            try:
+                controller.enter_failed(reason)
+            except Exception:
+                pass
 
     async def _read_approval_line(self) -> str:
         read_choice_line = getattr(self.console, "read_choice_line", None)
@@ -775,6 +848,53 @@ async def _cancel_task_without_blocking(task: asyncio.Task, timeout: float = 2.0
     for pending_task in pending:
         pending_task.add_done_callback(_consume_late_result)
     return False
+
+
+def create_choice_prompt_key_bindings():
+    from prompt_toolkit.key_binding import KeyBindings
+
+    bindings = KeyBindings()
+
+    @bindings.add("q")
+    def _exit_on_empty_q(event):
+        buffer = event.current_buffer
+        if buffer.text:
+            buffer.insert_text("q")
+            return
+        buffer.insert_text("q")
+        buffer.validate_and_handle()
+
+    @bindings.add("j")
+    def _choice_next(event):
+        buffer = event.current_buffer
+        if buffer.text:
+            buffer.insert_text("j")
+            return
+        try:
+            buffer.complete_next()
+        except Exception:
+            pass
+
+    @bindings.add("k")
+    def _choice_previous(event):
+        buffer = event.current_buffer
+        if buffer.text:
+            buffer.insert_text("k")
+            return
+        try:
+            buffer.complete_previous()
+        except Exception:
+            pass
+
+    return bindings
+
+
+def _current_prompt_style() -> str:
+    return prompt_toolkit_prompt_style(resolve_ui_theme())
+
+
+def _prompt_style_dict(prompt_style: str):
+    return slash_prompt_session_kwargs(prompt_style=prompt_style).get("style")
 
 
 def _approval_choices() -> list[ConsoleChoice]:
@@ -824,3 +944,44 @@ def _is_tty(stream) -> bool:
         return bool(isatty())
     except Exception:
         return False
+
+
+def _create_main_prompt_session(prompt_session_cls, *, prompt_style: str = "ansiblue bold"):
+    kwargs = {
+        "completer": create_slash_command_completer(),
+        "complete_while_typing": True,
+        "mouse_support": prompt_mouse_support_enabled(),
+        **slash_prompt_session_kwargs(prompt_style=prompt_style),
+    }
+    try:
+        from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+        from prompt_toolkit.history import FileHistory
+        from runtime.history.input_history import ensure_main_input_history_path
+
+        kwargs["history"] = FileHistory(str(ensure_main_input_history_path()))
+        kwargs["auto_suggest"] = SlashCommandAutoSuggest(AutoSuggestFromHistory())
+    except Exception:
+        pass
+    return prompt_session_cls(**kwargs)
+
+
+try:
+    from prompt_toolkit.auto_suggest import AutoSuggest as _PromptToolkitAutoSuggest
+except Exception:
+    _PromptToolkitAutoSuggest = object
+
+
+class SlashCommandAutoSuggest(_PromptToolkitAutoSuggest):
+    def __init__(self, fallback):
+        self._fallback = fallback
+
+    def get_suggestion(self, buffer, document):
+        try:
+            from prompt_toolkit.auto_suggest import Suggestion
+
+            text = slash_auto_suggestion(document.text_before_cursor)
+            if text:
+                return Suggestion(text)
+        except Exception:
+            pass
+        return self._fallback.get_suggestion(buffer, document)

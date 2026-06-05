@@ -34,13 +34,15 @@ class AgentFactory:
 
     def _task_instructions(self, task: PlannedTask, execution_mode: str = "") -> str:
         return sanitize_text(
-            load_skill(task.skill_id)
+            self._role_contract_for_mode(execution_mode)
+            + load_skill(task.skill_id)
             + self._skill_runtime_context(task)
             + "\n\n## 本次临时任务\n"
             + task.instruction
             + self._execution_contract(task)
             + self._tool_budget(task, execution_mode=execution_mode)
             + self._tool_rules(task)
+            + self._worker_report_contract(task, execution_mode=execution_mode)
             + "\n## 输出风格\n"
             + "- 默认使用中文。\n"
             + "- 默认不要使用 emoji。\n"
@@ -48,6 +50,14 @@ class AgentFactory:
             + "- 用清晰的小标题和短段落回答，重点放在用户真正问的内容。\n"
             + "\n请直接完成本次任务，输出给用户可读的最终结果。"
         )
+
+    def _role_contract_for_mode(self, execution_mode: str = "") -> str:
+        mode = str(execution_mode or "").strip().lower()
+        if mode == "full":
+            return load_skill("full_worker_contract") + "\n\n"
+        if mode == "serial":
+            return load_skill("serial_executor_contract") + "\n\n"
+        return ""
 
     def inline_direct_answer_instruction(self, task: PlannedTask) -> str:
         """Instruction for readonly inline-context tasks that still belong to a resolved skill."""
@@ -129,7 +139,7 @@ class AgentFactory:
                         )
                     return (
                         "\n\n## 本次工具预算\n"
-                        "- full 主管模式：先写清读取计划、为什么读、预期读到什么，再让 worker 执行。\n"
+                        "- full 主管模式：可以先在内部判断读取顺序，但用户可见最终输出只写已经拿到的事实、摘要和限制。\n"
                         "- `locate_code` 最多调用 1 次。\n"
                         "- `get_file_outline` 最多调用 1 次。\n"
                         "- `read_file` / `read_multiple_files` 合计最多 4 次；读取到足够上下文后停止。\n"
@@ -258,19 +268,51 @@ class AgentFactory:
             lines.append("- 本任务没有分配 MCP 工具，请直接基于上文和前序任务输出完成。")
         return "\n".join(lines) + "\n"
 
-    def create_direct_answer_agent(self, model_id: str, instruction: str):
+    def _worker_report_contract(self, task: PlannedTask, execution_mode: str = "") -> str:
+        if str(execution_mode or "").strip().lower() != "full":
+            return ""
+        return (
+            "\n## WorkerReport\n"
+            "full 主管模式下，请在最终回答末尾保留一个简短的 Markdown WorkerReport 块，供主管收口审查：\n"
+            "- 正文必须是本任务已经完成后的实际结果，不要只写“我会先读取/正在获取/接下来分析”这类执行计划或过程状态。\n"
+            "- 如果工具预算不足或没有拿到真实内容，正文要明确说明“未能形成有效结果”和缺失原因，不要把准备步骤包装成结果。\n"
+            "- 完成内容: 用一句话说明本任务实际完成了什么。\n"
+            "- 读取依据: 列出关键文件、命令结果或上下文来源；没有则写 none。\n"
+            "- 修改内容: 列出实际改动的文件或写 none；不要用自述覆盖真实工具/文件记录。\n"
+            "- 验证结果: 列出已运行的验证和结果；未验证要明确写未验证。\n"
+            "- 风险/未完成: 列出剩余风险、边界或 none。\n"
+        )
+
+    def create_direct_answer_agent(self, model_id: str, instruction: str, execution_mode: str = ""):
         Agent = agent_class()
+        instructions = (
+            "你是动态多智能体系统的主脑。当前问题不需要创建专家 Agent。"
+            "请根据用户问题直接用中文回答，简洁、自然、准确。默认不要使用 emoji。"
+            "介绍自己时统一自称“动态多智能体助手”或“主脑规划器”，"
+            "不要自称 JPCoder AI、ChatGPT 或其它未由用户指定的品牌名。\n\n"
+            + self._direct_answer_mode_context(execution_mode)
+            + f"回答要求：{instruction}"
+        )
         return Agent(
             name="direct_answer_agent",
-            instructions=sanitize_text(
-                "你是动态多智能体系统的主脑。当前问题不需要创建专家 Agent。"
-                "请根据用户问题直接用中文回答，简洁、自然、准确。默认不要使用 emoji。"
-                "介绍自己时统一自称“动态多智能体助手”或“主脑规划器”，"
-                "不要自称 JPCoder AI、ChatGPT 或其它未由用户指定的品牌名。\n\n"
-                f"回答要求：{instruction}"
-            ),
+            instructions=sanitize_text(instructions),
             model=self.model_registry.get_model(model_id),
         )
+
+    def _direct_answer_mode_context(self, execution_mode: str = "") -> str:
+        mode = str(execution_mode or "").strip().lower()
+        if mode == "serial":
+            return (
+                "当前模式：serial。当前问题被判定为直接回答，不需要创建任务 Agent。"
+                "不要声称创建了 Supervisor、Worker、Lead Reviewer 或并行团队；"
+                "不要把 serial 模式描述成 full 团队模式。\n\n"
+            )
+        if mode == "full":
+            return (
+                "当前模式：full。当前问题已被判定为直接回答，不需要创建 worker、并行团队或主管审查。"
+                "可以说明 full 模式具备主管和团队执行能力，但不要声称本轮已经启动这些角色。\n\n"
+            )
+        return ""
 
     def create_solo_agent(self, model_id: str, mcp_servers=None):
         servers = list(mcp_servers or [])

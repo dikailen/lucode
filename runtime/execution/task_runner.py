@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,12 +8,14 @@ from pathlib import Path
 from planning.planner_schema import PlannedTask, PlannerResult
 from runtime.execution.fast_paths import (
     _can_fast_path_config_summary,
+    _can_fast_path_directory_summary,
     _can_fast_path_git_diff,
     _can_fast_path_mcp_catalog_count,
     _can_fast_path_project_manifest_summary,
     _can_fast_path_readme_mcp_count,
     _is_url_only_task,
     _run_config_summary_fast_path,
+    _run_directory_summary_fast_path,
     _run_git_diff_fast_path,
     _run_mcp_catalog_count_fast_path,
     _run_project_manifest_summary_fast_path,
@@ -25,6 +28,8 @@ from runtime.execution.inline_context import (
     _resolve_explicit_project_file_paths,
 )
 from runtime.execution.pipeline import PipelineRunState, build_verification_report
+from runtime.hooks import TaskScopedHooks
+from runtime.ui.live_status import dynamic_status
 from runtime.workspace.patch_ledger import PatchProposalLedger
 
 
@@ -35,9 +40,25 @@ class ReadonlyFastPathResult:
     action: str
 
 
-async def _run_direct_answer(raw_user_input, plan: PlannerResult, model_id, factory, hooks, run_agent) -> str:
-    agent = factory.create_direct_answer_agent(model_id, plan.direct_answer_instruction)
-    result = await run_agent(agent, raw_user_input, hooks)
+async def _run_direct_answer(
+    raw_user_input,
+    plan: PlannerResult,
+    model_id,
+    factory,
+    hooks,
+    run_agent,
+    execution_mode: str = "",
+) -> str:
+    agent = factory.create_direct_answer_agent(
+        model_id,
+        plan.direct_answer_instruction,
+        execution_mode=execution_mode,
+    )
+    run_agent_kwargs = {}
+    if _run_agent_accepts_stream_output(run_agent):
+        run_agent_kwargs["stream_output"] = False
+    with dynamic_status("direct answer", stage="direct"):
+        result = await run_agent(agent, raw_user_input, hooks, **run_agent_kwargs)
     return result.final_output
 
 
@@ -102,6 +123,7 @@ async def _run_planned_task(
     ledger: PatchProposalLedger | None = None,
     approval_policy=None,
     execution_mode: str = "",
+    show_status: bool = True,
 ) -> tuple[str, str]:
     if ledger:
         ledger.record_proposal(task, task.instruction)
@@ -134,19 +156,27 @@ async def _run_planned_task(
             run_agent,
             max_turns=_max_turns_for_task(task),
             approval_policy=approval_policy,
+            stream_output=False,
         )
-        result = await run_agent(
-            agent,
-            _task_prompt(
-                refined_request,
-                task.instruction,
-                dependency_context,
-                workspace_context,
-                shared_context,
-            ),
-            hooks,
-            **run_agent_kwargs,
+        scoped_hooks = _task_scoped_hooks(hooks, run_state, task)
+        status_context = (
+            dynamic_status(_task_status_label(task), mode=execution_mode, stage="worker")
+            if show_status
+            else contextlib.nullcontext()
         )
+        with status_context:
+            result = await run_agent(
+                agent,
+                _task_prompt(
+                    refined_request,
+                    task.instruction,
+                    dependency_context,
+                    workspace_context,
+                    shared_context,
+                ),
+                scoped_hooks,
+                **run_agent_kwargs,
+            )
     except Exception as exc:
         message = _friendly_task_error(exc)
         if run_state:
@@ -181,6 +211,14 @@ def _readonly_fast_path_result(project_root: Path, task, run_context=None) -> Re
         output = _run_config_summary_fast_path(project_root, task)
         _record_fast_path_context(run_context, "config", "summary", output, task)
         return ReadonlyFastPathResult(output=output, tool="config", action="summary")
+    if _can_fast_path_directory_summary(project_root, task):
+        output = _run_directory_summary_fast_path(project_root, task)
+        _record_fast_path_context(run_context, "project_filesystem_readonly", "directory_summary", output, task)
+        return ReadonlyFastPathResult(
+            output=output,
+            tool="project_filesystem_readonly",
+            action="directory_summary",
+        )
     if _can_fast_path_mcp_catalog_count(task):
         output = _run_mcp_catalog_count_fast_path(project_root, task)
         _record_fast_path_context(run_context, "mcp_catalog", "count", output, task)
@@ -204,6 +242,21 @@ def _record_fast_path_context(run_context, tool: str, action: str, output: str, 
         )
     except Exception:
         return
+
+
+def _task_status_label(task) -> str:
+    task_id = str(getattr(task, "id", "") or "").strip()
+    title = str(getattr(task, "title", "") or "").strip()
+    if task_id and title and task_id != title:
+        return f"{task_id} - {title}"
+    return title or task_id or "worker task"
+
+
+def _task_scoped_hooks(hooks, run_state: PipelineRunState | None, task):
+    event_bus = getattr(run_state, "event_bus", None)
+    if hooks is None or event_bus is None:
+        return hooks
+    return TaskScopedHooks(hooks, task_id=str(getattr(task, "id", "") or ""), event_bus=event_bus)
 
 
 def _shared_context_for_task(run_state: PipelineRunState | None, task) -> str:
@@ -362,10 +415,12 @@ def _dependency_context_for_task(task, outputs: dict[str, str]) -> str:
     return "\n\n".join(parts)
 
 
-def _run_agent_kwargs(run_agent, *, max_turns: int, approval_policy=None) -> dict:
+def _run_agent_kwargs(run_agent, *, max_turns: int, approval_policy=None, stream_output=None) -> dict:
     kwargs = {"max_turns": max_turns}
     if approval_policy is not None and _run_agent_accepts_approval_policy(run_agent):
         kwargs["approval_policy"] = approval_policy
+    if stream_output is not None and _run_agent_accepts_stream_output(run_agent):
+        kwargs["stream_output"] = stream_output
     return kwargs
 
 
@@ -375,6 +430,16 @@ def _run_agent_accepts_approval_policy(run_agent) -> bool:
     except (TypeError, ValueError):
         return True
     if "approval_policy" in parameters:
+        return True
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
+def _run_agent_accepts_stream_output(run_agent) -> bool:
+    try:
+        parameters = inspect.signature(run_agent).parameters
+    except (TypeError, ValueError):
+        return True
+    if "stream_output" in parameters:
         return True
     return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
 

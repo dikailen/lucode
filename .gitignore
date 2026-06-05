@@ -2,6 +2,7 @@
 __pycache__/
 .pytest_cache/
 .lucode/
+.codex-snapshot-*
 .idea/
 .agent_quarantine/
 .agent_runs/
@@ -12,6 +13,18 @@ build/
 dist/
 *.pyc
 package-lock.json
+
+# Local Chinese planning / review notes and machine-specific launcher.
+/计划文档/
+/后续改进计划*.md
+/多脑模型调音台修改计划执行表.md
+/full模式*.md
+/history微创手术.md
+/第九阶段手术.md
+/审查*.md
+/修改.md
+/cs.md
+/run_lucode_conda.bat
 
 # Local planning / review notes kept outside the product repository.
 计划文档/

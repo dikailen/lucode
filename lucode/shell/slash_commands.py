@@ -20,6 +20,7 @@ from runtime.config.cli import (
     render_readonly_command,
     render_status_command,
 )
+from runtime.config.theme_config import load_theme_name, save_theme_name
 from runtime.config.model_tuner import (
     apply_model_tuner_selection,
     build_model_tuner_state,
@@ -43,6 +44,7 @@ from runtime.history import HistoryFacade, HistoryStore, render_history_panel, r
 from runtime.kernel.session import create_token_logger_hooks
 from runtime.sessions import render_resume_preview, render_session_list
 from runtime.ui.welcome import render_welcome_dashboard
+from runtime.ui.theme import get_theme_preset, list_theme_presets, render_theme_list, render_theme_preview
 
 
 @dataclass
@@ -113,6 +115,18 @@ async def handle_slash_command(
 
     if lower_input == "/context":
         print(_render_last_run_context(last_run_context_summary))
+        return SlashCommandResult(handled=True)
+
+    if lower_input == "/theme" or lower_input.startswith("/theme "):
+        print(
+            _handle_theme_command(
+                user_input,
+                workspace_context=workspace_context,
+                runtime_settings=runtime_settings,
+                use_color=use_color,
+                show_logo=show_logo,
+            )
+        )
         return SlashCommandResult(handled=True)
 
     if lower_input == "/models":
@@ -197,6 +211,38 @@ async def handle_slash_command(
     return SlashCommandResult()
 
 
+def _handle_theme_command(
+    user_input: str,
+    *,
+    workspace_context,
+    runtime_settings,
+    use_color: bool | None,
+    show_logo: bool,
+) -> str:
+    parts = str(user_input or "").strip().split()
+    current = load_theme_name(
+        workspace_root=getattr(workspace_context, "workspace_root", None),
+        user_home=getattr(workspace_context, "user_home", None),
+    )
+    if len(parts) == 1 or (len(parts) >= 2 and parts[1].lower() == "list"):
+        return render_theme_list(current=current)
+    if len(parts) >= 2 and parts[1].lower() == "preview":
+        name = parts[2] if len(parts) >= 3 else current
+        return render_theme_preview(name, workspace_root=getattr(workspace_context, "workspace_root", None))
+
+    name = parts[1].lower()
+    if get_theme_preset(name) is None:
+        return f"未知主题：{name}\n可用主题：{', '.join(list_theme_presets())}"
+    saved = save_theme_name(name, workspace_root=getattr(workspace_context, "workspace_root", None))
+    return "\n".join(
+        [
+            f"已切换主题：{saved}",
+            render_theme_preview(saved, workspace_root=getattr(workspace_context, "workspace_root", None)),
+            render_welcome_dashboard(workspace_context, runtime_settings, use_color=use_color, show_logo=show_logo),
+        ]
+    )
+
+
 def _render_last_run_context(summary: str) -> str:
     text = str(summary or "").strip()
     if not text:
@@ -211,12 +257,17 @@ def _history_facade_for_session_store(session_store) -> HistoryFacade:
     return HistoryFacade(workspace_root, session_store=session_store)
 
 
+def _uses_choice_menu(console) -> bool:
+    return callable(getattr(console, "read_choice_line", None))
+
+
 async def _handle_model_tuner_session(*, console, runtime_settings, workspace_context, use_color: bool | None, show_logo: bool) -> None:
     selected_role = "orchestrator"
     message = "已进入模型调音台。选择会立即写入当前项目，输入 q 退出。"
     while True:
         state = build_model_tuner_state(runtime_settings, workspace_context, selected_role=selected_role)
-        print(render_model_tuner_snapshot(state, message=message))
+        if not _uses_choice_menu(console):
+            print(render_model_tuner_snapshot(state, message=message))
         try:
             user_input = (await _read_model_tuner_line(console, state)).strip()
         except EOFError:
@@ -285,7 +336,8 @@ async def _handle_connect_wizard_session(*, console, workspace_context, runtime_
     state = build_connect_wizard_state(workspace_context)
     message = "已进入 Provider 连接向导。先选择 Provider，后面会进入完整表单。"
     while True:
-        print(render_connect_wizard_snapshot(state, message=message))
+        if not _uses_choice_menu(console):
+            print(render_connect_wizard_snapshot(state, message=message))
         try:
             user_input = (await _read_connect_wizard_line(console, state)).strip()
         except EOFError:
@@ -305,6 +357,8 @@ async def _handle_connect_wizard_session(*, console, workspace_context, runtime_
                 runtime_settings=runtime_settings,
             )
             state = build_connect_wizard_state(workspace_context)
+            if _uses_choice_menu(console):
+                print(message)
             continue
         if lower.startswith(("delete ", "remove ")):
             provider_id = command.split(maxsplit=1)[1].strip()
@@ -315,6 +369,8 @@ async def _handle_connect_wizard_session(*, console, workspace_context, runtime_
                 runtime_settings=runtime_settings,
             )
             state = build_connect_wizard_state(workspace_context)
+            if _uses_choice_menu(console):
+                print(message)
             continue
         if lower in {"connect", "save", "淇濆瓨"} and not state.selected_provider:
             message = "请先选择 Provider。"
@@ -348,6 +404,8 @@ async def _handle_connect_wizard_session(*, console, workspace_context, runtime_
             except _ConnectWizardRestartProvider:
                 state = build_connect_wizard_state(workspace_context)
                 message = "已返回 Provider 选择。"
+                if _uses_choice_menu(console):
+                    print(message)
                 continue
             return
 

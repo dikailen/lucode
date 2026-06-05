@@ -23,8 +23,10 @@ async def run_history_browser(
     purpose: str = "resume",
 ) -> HistoryBrowserSelection:
     items = facade.list_items(limit=limit)
+    choice_reader = getattr(console, "read_choice_line", None)
     if not items:
-        print(render_history_panel(workspace_root=workspace_root, items=[], selected_index=0))
+        if not callable(choice_reader):
+            print(render_history_panel(workspace_root=workspace_root, items=[], selected_index=0))
         return HistoryBrowserSelection("cancel")
 
     selected_index = 0
@@ -32,16 +34,17 @@ async def run_history_browser(
     while True:
         selected = items[selected_index]
         preview = facade.preview(selected.history_id)
-        print(
-            render_history_panel(
-                workspace_root=workspace_root,
-                items=items,
-                selected_index=selected_index,
-                preview=preview,
-                message=message,
-                footer=_history_footer(purpose),
+        if not callable(choice_reader):
+            print(
+                render_history_panel(
+                    workspace_root=workspace_root,
+                    items=items,
+                    selected_index=selected_index,
+                    preview=preview,
+                    message=message,
+                    footer=_history_footer(purpose),
+                )
             )
-        )
         try:
             command = await _read_history_choice(console, items, selected_index, purpose=purpose)
         except EOFError:

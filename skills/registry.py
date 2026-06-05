@@ -35,4 +35,12 @@ SKILLS = {
         "folder": "final-synthesizer",
         "description": "负责在多 Agent 任务完成后汇总多个结果，生成最终回答。",
     },
+    "full_worker_contract": {
+        "folder": "full-worker-contract",
+        "description": "full 团队模式 Worker 角色契约，约束员工边界、证据纪律和 WorkerReport 输出。",
+    },
+    "serial_executor_contract": {
+        "folder": "serial-executor-contract",
+        "description": "serial 模式顺序执行 Agent 角色契约，约束串行任务边界和模式话术。",
+    },
 }

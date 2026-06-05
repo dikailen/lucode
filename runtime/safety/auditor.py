@@ -145,6 +145,8 @@ def audit_execution(
 
     if not final_output.strip():
         remaining_issues.append("最终回答为空。")
+    elif _looks_like_process_only_final_answer(final_output):
+        remaining_issues.append("最终回答只描述准备或正在执行的步骤，没有给出实际结果。")
 
     passed = not remaining_issues
     summary = "本轮执行满足计划验收要求。" if passed else "本轮执行仍有未完成问题，需要继续修复。"
@@ -387,6 +389,67 @@ def _looks_like_specific_term(value: str) -> bool:
     if len(text) <= 8 and not _is_generic_semantic_term(text):
         return True
     return False
+
+
+def _looks_like_process_only_final_answer(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = _normalize_text(text)
+    process_markers = [
+        "我会先",
+        "我将先",
+        "我准备",
+        "接下来",
+        "正在",
+        "将根据需要",
+        "根据需要补充",
+        "最后输出",
+        "先列出",
+        "获取两个目录",
+        "获取目录",
+    ]
+    process_count = sum(1 for marker in process_markers if _normalize_text(marker) in normalized)
+    if process_count < 2:
+        return False
+    concrete_markers = [
+        "负责",
+        "包含",
+        "主要文件",
+        "用途",
+        "覆盖",
+        "发现",
+        "结论",
+        "摘要如下",
+        "已检查",
+        "已完成",
+        "runtime/",
+        "tests/",
+        ".py",
+        ".md",
+        ".json",
+        ".toml",
+        ".yaml",
+        ".yml",
+    ]
+    concrete_count = sum(1 for marker in concrete_markers if _normalize_text(marker) in normalized)
+    if concrete_count >= 3:
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    bullet_lines = [line for line in lines if line.startswith(("-", "*"))]
+    if bullet_lines and all(_process_only_bullet(line) for line in bullet_lines):
+        return True
+    return process_count >= 3 and concrete_count <= 1
+
+
+def _process_only_bullet(line: str) -> bool:
+    text = _normalize_text(line)
+    if not text:
+        return False
+    process_tokens = ["runtime/ui", "tests", "目录", "列表", "获取"]
+    return any(_normalize_text(token) in text for token in process_tokens) and not any(
+        token in text for token in [".py", ".md", ".json", "负责", "用途", "包含"]
+    )
 
 
 def _one_line(value: str, limit: int = 160) -> str:

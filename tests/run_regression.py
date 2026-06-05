@@ -45,6 +45,15 @@ def _restore_env(name: str, old_value: str | None) -> None:
         os.environ[name] = old_value
 
 
+def _snapshot_env(names: list[str]) -> dict[str, str | None]:
+    return {name: os.environ.get(name) for name in names}
+
+
+def _restore_env_snapshot(snapshot: dict[str, str | None]) -> None:
+    for name, old_value in snapshot.items():
+        _restore_env(name, old_value)
+
+
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -1271,6 +1280,49 @@ class OperationLogTests(unittest.TestCase):
         self.assertFalse(record["approval"]["required"])
         self.assertEqual(record["params_summary"]["file_count"], 3)
 
+    def test_runtime_fast_path_summarizes_readonly_directories(self):
+        from planning.planner_schema import PlannedTask
+        from runtime.execution.fast_paths import (
+            _can_fast_path_directory_summary,
+            _run_directory_summary_fast_path,
+        )
+
+        workspace = TEMP_ROOT / f"directory_summary_{uuid.uuid4().hex}"
+        (workspace / "runtime" / "ui").mkdir(parents=True)
+        (workspace / "tests").mkdir(parents=True)
+        (workspace / "runtime" / "ui" / "final_answer_renderer.py").write_text(
+            "from __future__ import annotations\n\n\ndef render_final_answer_text(output):\n    return output\n",
+            encoding="utf-8",
+        )
+        (workspace / "tests" / "test_supervisor_contracts.py").write_text(
+            "import unittest\n\nclass DemoTests(unittest.TestCase):\n    pass\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        os.environ["AGENTS_OPERATION_LOG_PATH"] = str(self.quarantine_dir / "operations.jsonl")
+        task = PlannedTask(
+            id="inspect_dirs",
+            title="检查 runtime/ui 和 tests 目录",
+            instruction="输出结构摘要和内容摘要。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["project_filesystem_readonly", "code_locator"],
+            read_set=["runtime/ui", "tests"],
+        )
+
+        try:
+            self.assertTrue(_can_fast_path_directory_summary(workspace, task))
+            output = _run_directory_summary_fast_path(workspace, task)
+        finally:
+            os.environ.pop("AGENTS_OPERATION_LOG_PATH", None)
+
+        self.assertIn("runtime/ui/final_answer_renderer.py", output)
+        self.assertIn("tests/test_supervisor_contracts.py", output)
+        record = self._records()[-1]
+        self.assertEqual(record["tool"], "runtime_fast_path.project_filesystem_readonly")
+        self.assertEqual(record["action"], "directory_summary")
+        self.assertEqual(record["params_summary"]["directories"], ["runtime/ui", "tests"])
+
     def test_runtime_fast_path_git_diff_logs_readonly_summary(self):
         from planning.planner_schema import PlannedTask
         from runtime.execution.fast_paths import _can_fast_path_git_diff, _run_git_diff_fast_path
@@ -2213,6 +2265,7 @@ class RuntimeHelpersTests(unittest.TestCase):
         self.assertTrue(any("恢复" in toolbar for toolbar in console.toolbars))
         self.assertFalse(any("删除" in toolbar for toolbar in console.toolbars))
         self.assertIn("已恢复会话", buffer.getvalue())
+        self.assertNotIn("Lucode History", buffer.getvalue())
 
     def test_history_facade_delete_removes_legacy_session_file(self):
         from runtime.history import HistoryFacade
@@ -2451,6 +2504,7 @@ class RuntimeHelpersTests(unittest.TestCase):
         self.assertTrue(session_file.exists())
         self.assertTrue(any("删除" in toolbar for toolbar in console.toolbars))
         self.assertIn("已取消删除历史会话", buffer.getvalue())
+        self.assertNotIn("Lucode History", buffer.getvalue())
 
     def test_history_remove_command_deletes_after_confirmation(self):
         from lucode.shell.slash_commands import handle_slash_command
@@ -2942,6 +2996,54 @@ class RuntimeHelpersTests(unittest.TestCase):
         self.assertTrue(hooks.streamed_output_seen)
         self.assertEqual(hooks.streamed_output_chars, len("你好，欢迎使用 Lucode。"))
 
+    def test_streaming_runner_buffers_tiny_deltas_until_flush_boundary(self):
+        import runtime.agent.runner as runner_module
+
+        class FakeData:
+            def __init__(self, delta):
+                self.type = "response.output_text.delta"
+                self.delta = delta
+
+        class FakeEvent:
+            type = "raw_response_event"
+
+            def __init__(self, delta):
+                self.data = FakeData(delta)
+
+        class FakeStreamResult:
+            final_output = "第一行\n第二行"
+
+            async def stream_events(self):
+                for char in "第一行\n第二行":
+                    yield FakeEvent(char)
+
+        class FakeRunner:
+            @staticmethod
+            def run_streamed(*args, **kwargs):
+                return FakeStreamResult()
+
+        class Hooks:
+            streamed_output_seen = False
+            streamed_output_chars = 0
+
+        hooks = Hooks()
+        original_runner_class = runner_module.runner_class
+        original_streaming_enabled = runner_module.streaming_enabled
+        runner_module.runner_class = lambda: FakeRunner
+        runner_module.streaming_enabled = lambda: True
+        try:
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                result = asyncio.run(runner_module.run_agent_once(object(), "你好", hooks, max_turns=3))
+        finally:
+            runner_module.runner_class = original_runner_class
+            runner_module.streaming_enabled = original_streaming_enabled
+
+        self.assertEqual(result.final_output, "第一行\n第二行")
+        self.assertNotIn("第\n一\n行", buffer.getvalue())
+        self.assertIn("第一行\n第二行", buffer.getvalue())
+        self.assertEqual(hooks.streamed_output_chars, len("第一行\n第二行"))
+
     def test_streaming_runner_recovers_tail_close_after_visible_output(self):
         import runtime.agent.runner as runner_module
 
@@ -3162,18 +3264,19 @@ class WelcomeDashboardTests(unittest.TestCase):
 
         output = render_welcome_dashboard(context, settings, model_catalog=catalog, use_color=False)
 
-        self.assertLessEqual(len(output.splitlines()), 14)
+        self.assertLessEqual(len(output.splitlines()), 10)
         self.assertTrue(output.splitlines()[0].startswith("╭"))
         self.assertTrue(output.splitlines()[-1].startswith("╰"))
         self.assertIn(str(workspace_root), output)
-        self.assertIn("lucode", output)
         self.assertIn("( o.o )", output)
         self.assertIn("模式", output)
         self.assertIn("solo 单代理", output)
         self.assertIn("deepseek-v4-pro  +2 备用", output)
-        self.assertIn("允许云端", output)
         self.assertIn("按需加载", output)
-        self.assertIn("输入 / 查看命令", output)
+        self.assertRegex(output, r"项目  .+\n.*\n.*模式  solo 单代理")
+        self.assertNotIn("输入 / 查看命令", output)
+        self.assertNotIn("备份", output)
+        self.assertNotIn("隐私", output)
         self.assertNotIn("主脑模型优先级", output)
         self.assertNotIn("/config、/api show", output)
 
@@ -3235,7 +3338,7 @@ class WelcomeDashboardTests(unittest.TestCase):
         )
 
         self.assertIn(str(workspace_root), output)
-        self.assertIn("模式    solo 单代理", output)
+        self.assertIn("模式  solo 单代理", output)
         self.assertIn("lucode", output)
         self.assertNotIn("      lucode", output)
         self.assertNotIn("( o.o )", output)
@@ -3268,7 +3371,77 @@ class WelcomeDashboardTests(unittest.TestCase):
 
         self.assertIn("full 审核并行", output)
         self.assertIn("主脑", output)
-        self.assertIn("并行", output)
+        self.assertIn("工具", output)
+        self.assertIn("按需加载", output)
+        self.assertIn("审批保护", output)
+
+    def test_rich_welcome_dashboard_renders_all_execution_modes(self):
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.ui.welcome import render_welcome_dashboard
+
+        workspace_root = (TEMP_ROOT / f"dashboard_rich_modes_{uuid.uuid4().hex}").resolve()
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=Path.home() / ".lucode",
+            workspace_root=workspace_root,
+            project_config_dir=workspace_root / ".lucode",
+            has_project_config=True,
+        )
+        catalog = {"models": [{"id": "local_model", "model_name": "qwen3:8b", "configured": True}]}
+
+        with patch.dict(os.environ, {"AGENTS_DYNAMIC_UI": "on"}, clear=False):
+            solo = render_welcome_dashboard(
+                context,
+                RuntimeSettings(execution_mode="solo", privacy_mode="local_first", orchestrator_model_priority=["local_model"]),
+                model_catalog=catalog,
+                use_color=False,
+            )
+            serial = render_welcome_dashboard(
+                context,
+                RuntimeSettings(execution_mode="serial", privacy_mode="local_first", orchestrator_model_priority=["local_model"]),
+                model_catalog=catalog,
+                use_color=False,
+            )
+            full = render_welcome_dashboard(
+                context,
+                RuntimeSettings(execution_mode="full", privacy_mode="local_first", orchestrator_model_priority=["local_model"]),
+                model_catalog=catalog,
+                use_color=False,
+            )
+
+        self.assertIn("lucode", solo.splitlines()[0])
+        self.assertIn("solo 单代理", solo)
+        self.assertIn("serial 串行多代理", serial)
+        self.assertIn("full 审核并行", full)
+        self.assertIn(str(workspace_root), full)
+        self.assertIn("工具", full)
+
+    def test_welcome_dashboard_dynamic_ui_off_keeps_plain_fallback(self):
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+        from runtime.ui.welcome import render_welcome_dashboard
+
+        workspace_root = (TEMP_ROOT / f"dashboard_plain_{uuid.uuid4().hex}").resolve()
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=Path.home() / ".lucode",
+            workspace_root=workspace_root,
+            project_config_dir=workspace_root / ".lucode",
+            has_project_config=True,
+        )
+
+        with patch.dict(os.environ, {"AGENTS_DYNAMIC_UI": "off"}, clear=False):
+            output = render_welcome_dashboard(
+                context,
+                RuntimeSettings(execution_mode="full", privacy_mode="local_first"),
+                model_catalog={"models": []},
+                use_color=False,
+            )
+
+        self.assertTrue(output.splitlines()[0].startswith("╭"))
+        self.assertNotIn("lucode ─", output.splitlines()[0])
+        self.assertIn("full 审核并行", output)
 
 
 class ProviderConfigC2Tests(unittest.TestCase):
@@ -3494,6 +3667,170 @@ class ProviderConfigC2Tests(unittest.TestCase):
         self.assertEqual(models["deepseek_chat_model"]["provider_ref"], "deepseek/deepseek-chat")
         self.assertEqual(models["deepseek_chat_model"]["base_url"], "https://api.deepseek.com")
         self.assertNotIn("sk-c2-secret", json.dumps(catalog, ensure_ascii=False))
+
+    def test_model_catalog_uses_lucode_config_when_env_compat_disabled(self):
+        from catalog_system.model_catalog import clear_model_catalog_cache, load_model_catalog
+        from runtime.config.model_config import connect_provider
+
+        workspace = TEMP_ROOT / f"c2_no_env_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_no_env_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        with patch.dict(
+            os.environ,
+            {
+                "LUCODE_WORKSPACE_ROOT": str(workspace),
+                "LUCODE_USER_HOME": str(user_home),
+                "LUCODE_DISABLE_ENV_COMPAT": "1",
+            },
+            clear=False,
+        ):
+            connect_provider(
+                "my_proxy",
+                api_key="sk-c2-secret",
+                workspace_root=workspace,
+                user_home=user_home,
+                homepage="https://proxy.example.com",
+                base_url="https://api.proxy.example.com/v1",
+                models=["qwen-max"],
+                custom=True,
+            )
+            clear_model_catalog_cache()
+            catalog = load_model_catalog(force_reload=True)
+
+        models = {item["id"]: item for item in catalog["models"]}
+        self.assertIn("my_proxy_qwen_max_model", models)
+        self.assertTrue(models["my_proxy_qwen_max_model"]["configured"])
+        self.assertEqual(models["my_proxy_qwen_max_model"]["source"], "lucode_config")
+        self.assertNotIn("sk-c2-secret", json.dumps(catalog, ensure_ascii=False))
+
+    def test_env_model_compat_can_be_disabled(self):
+        from catalog_system.model_catalog import clear_model_catalog_cache, load_model_catalog
+
+        env = {
+            "MODEL_ENVCOMPAT_API_KEY": "sk-env-secret",
+            "MODEL_ENVCOMPAT_BASE_URL": "https://api.envcompat.example.com/v1",
+            "MODEL_ENVCOMPAT_MODEL": "env-model",
+            "MODEL_ENVCOMPAT_BACKEND": "openai_compatible",
+            "MODEL_ENVCOMPAT_DISPLAY_NAME": "Env Compat",
+            "LUCODE_DISABLE_ENV_COMPAT": "1",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            clear_model_catalog_cache()
+            catalog = load_model_catalog(force_reload=True)
+
+        models = {item["id"]: item for item in catalog["models"]}
+        self.assertNotIn("envcompat_model", models)
+        self.assertNotIn("sk-env-secret", json.dumps(catalog, ensure_ascii=False))
+
+    def test_dotenv_disable_also_disables_env_model_compat(self):
+        from catalog_system.model_catalog import clear_model_catalog_cache, load_model_catalog
+
+        env = {
+            "MODEL_ENVCOMPAT_API_KEY": "sk-env-secret",
+            "MODEL_ENVCOMPAT_BASE_URL": "https://api.envcompat.example.com/v1",
+            "MODEL_ENVCOMPAT_MODEL": "env-model",
+            "MODEL_ENVCOMPAT_BACKEND": "openai_compatible",
+            "MODEL_ENVCOMPAT_DISPLAY_NAME": "Env Compat",
+            "LUCODE_DISABLE_DOTENV": "1",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("LUCODE_DISABLE_ENV_COMPAT", None)
+            clear_model_catalog_cache()
+            catalog = load_model_catalog(force_reload=True)
+
+        models = {item["id"]: item for item in catalog["models"]}
+        self.assertNotIn("envcompat_model", models)
+        self.assertNotIn("sk-env-secret", json.dumps(catalog, ensure_ascii=False))
+
+    def test_env_model_compat_still_loads_when_enabled(self):
+        from catalog_system.model_catalog import clear_model_catalog_cache, load_model_catalog
+
+        env = {
+            "MODEL_ENVCOMPAT_API_KEY": "sk-env-secret",
+            "MODEL_ENVCOMPAT_BASE_URL": "https://api.envcompat.example.com/v1",
+            "MODEL_ENVCOMPAT_MODEL": "env-model",
+            "MODEL_ENVCOMPAT_BACKEND": "openai_compatible",
+            "MODEL_ENVCOMPAT_DISPLAY_NAME": "Env Compat",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("LUCODE_DISABLE_ENV_COMPAT", None)
+            clear_model_catalog_cache()
+            catalog = load_model_catalog(force_reload=True)
+
+        models = {item["id"]: item for item in catalog["models"]}
+        self.assertIn("envcompat_model", models)
+        self.assertTrue(models["envcompat_model"]["configured"])
+        self.assertEqual(models["envcompat_model"]["source"], "env")
+        self.assertNotIn("sk-env-secret", json.dumps(catalog, ensure_ascii=False))
+
+    def test_lucode_config_wins_over_env_model_with_same_id(self):
+        from catalog_system.model_catalog import clear_model_catalog_cache, load_model_catalog
+        from runtime.config.model_config import connect_provider
+
+        workspace = TEMP_ROOT / f"c2_precedence_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"c2_precedence_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        env = {
+            "LUCODE_WORKSPACE_ROOT": str(workspace),
+            "LUCODE_USER_HOME": str(user_home),
+            "MODEL_MY_PROXY_API_KEY": "sk-env-secret",
+            "MODEL_MY_PROXY_BASE_URL": "https://env.example.com/v1",
+            "MODEL_MY_PROXY_MODEL": "qwen-max",
+            "MODEL_MY_PROXY_BACKEND": "openai_compatible",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            connect_provider(
+                "my_proxy",
+                api_key="sk-c2-secret",
+                workspace_root=workspace,
+                user_home=user_home,
+                homepage="https://proxy.example.com",
+                base_url="https://config.example.com/v1",
+                models=["qwen-max"],
+                custom=True,
+            )
+            clear_model_catalog_cache()
+            catalog = load_model_catalog(force_reload=True)
+
+        model = {item["id"]: item for item in catalog["models"]}["my_proxy_qwen_max_model"]
+        self.assertEqual(model["source"], "lucode_config")
+        self.assertEqual(model["base_url"], "https://config.example.com/v1")
+        self.assertNotIn("sk-env-secret", json.dumps(catalog, ensure_ascii=False))
+
+    def test_plan_validator_error_no_longer_mentions_env(self):
+        from planning.plan_validator import validate_plan
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.safety.privacy import PrivacyPolicy
+
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="test",
+            refined_request="test",
+            tasks=[
+                PlannedTask(
+                    id="t1",
+                    title="Task",
+                    instruction="Do task.",
+                    skill_id="project_explorer",
+                    model="missing_model",
+                    mcp=["project_filesystem_readonly"],
+                )
+            ],
+        )
+
+        validation = validate_plan(plan, privacy_policy=PrivacyPolicy("allow_cloud"))
+
+        self.assertFalse(validation.valid)
+        self.assertTrue(any("当前有效配置" in error for error in validation.errors))
+        self.assertFalse(any(".env" in error for error in validation.errors))
 
     def test_models_select_updates_project_config_and_runtime_priorities(self):
         from runtime.config.model_config import connect_provider, select_model_priority
@@ -4073,11 +4410,14 @@ class ProviderConfigC2Tests(unittest.TestCase):
         commands = [spec.command for spec in specs]
         prefixes = known_command_prefixes()
         resume = next(spec for spec in specs if spec.command == "/resume")
+        expand = next(spec for spec in specs if spec.command == "/expand")
         select = next(spec for spec in specs if spec.command == "/models select")
         refiner = next(spec for spec in specs if spec.command == "/refiner")
 
         self.assertEqual(len(commands), len(set(commands)))
         self.assertEqual(resume.group, "会话")
+        self.assertEqual(expand.group, "会话")
+        self.assertIn("id", expand.argument_hint)
         self.assertIn("last", resume.argument_hint)
         self.assertTrue(select.writable)
         self.assertIn("/model select", select.aliases)
@@ -4144,6 +4484,156 @@ class ProviderConfigC2Tests(unittest.TestCase):
         brain_texts = [item.text for item in brain_items]
         self.assertIn("/models brain 执行 deepseek/deepseek-chat", brain_texts)
         self.assertIn("执行专家脑", next(item.meta for item in brain_items if item.text.startswith("/models brain 执行")))
+
+    def test_reference_completion_detects_active_tokens(self):
+        from runtime.commands.completion import active_reference_token
+
+        file_ref = active_reference_token("请看 @REA")
+        skill_ref = active_reference_token("使用 #project")
+        home_ref = active_reference_token("打开 ~/Doc")
+
+        self.assertEqual(file_ref.kind, "file")
+        self.assertEqual(file_ref.query, "REA")
+        self.assertEqual(file_ref.start_position, -4)
+        self.assertEqual(skill_ref.kind, "skill")
+        self.assertEqual(skill_ref.query, "project")
+        self.assertEqual(home_ref.kind, "home")
+        self.assertEqual(home_ref.query, "Doc")
+        self.assertIsNone(active_reference_token("普通中文输入"))
+
+    def test_reference_completion_lists_project_files_without_reading_content(self):
+        from runtime.commands.completion import reference_completion_items
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"ref_completion_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"ref_completion_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        (workspace / "README.md").write_text("SECRET_CONTENT_SHOULD_NOT_APPEAR", encoding="utf-8")
+        (workspace / ".env").write_text("API_KEY=SECRET_SHOULD_NOT_BE_SUGGESTED", encoding="utf-8")
+        (workspace / "secrets.env").write_text("API_KEY=SECRET_SHOULD_NOT_BE_SUGGESTED", encoding="utf-8")
+        (workspace / ".git").mkdir()
+        (workspace / ".git" / "README.md").write_text("ignored", encoding="utf-8")
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=False,
+        )
+
+        items = reference_completion_items("请看 @REA", workspace_context=context)
+        secret_items = reference_completion_items("请看 @secret", workspace_context=context)
+
+        self.assertIn("@README.md", [item.text for item in items])
+        self.assertNotIn("@.env", [item.text for item in items])
+        self.assertNotIn("@secrets.env", [item.text for item in secret_items])
+        self.assertNotIn("SECRET_CONTENT_SHOULD_NOT_APPEAR", "\n".join(item.meta for item in items))
+
+    def test_reference_completion_uses_workspace_env_when_context_missing(self):
+        from runtime.commands.completion import reference_completion_items
+
+        workspace = TEMP_ROOT / f"ref_completion_env_workspace_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        (workspace / "ENV_ONLY_REFERENCE.md").write_text("not read", encoding="utf-8")
+        old_workspace = os.environ.get("LUCODE_WORKSPACE_ROOT")
+        os.environ["LUCODE_WORKSPACE_ROOT"] = str(workspace)
+        self.addCleanup(lambda: _restore_env("LUCODE_WORKSPACE_ROOT", old_workspace))
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        items = reference_completion_items("请看 @ENV_ONLY")
+
+        self.assertIn("@ENV_ONLY_REFERENCE.md", [item.text for item in items])
+
+    def test_reference_completion_lists_borrowable_skills(self):
+        from runtime.commands.completion import reference_completion_items
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"ref_skill_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"ref_skill_user_{uuid.uuid4().hex}"
+        skill_dir = workspace / ".lucode" / "skills" / "project-helper"
+        skill_dir.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: Project Helper\ndescription: Helps inspect project structure.\n---\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        items = reference_completion_items("用 #project", workspace_context=context)
+
+        self.assertIn("#project_helper", [item.text for item in items])
+
+    def test_reference_completion_lists_home_paths(self):
+        from runtime.commands.completion import reference_completion_items
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"ref_home_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"ref_home_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        (user_home / "Documents").mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=False,
+        )
+
+        items = reference_completion_items("打开 ~/Doc", workspace_context=context)
+
+        self.assertIn("~/Documents/", [item.text for item in items])
+
+    def test_main_input_completer_keeps_slash_and_reference_priority(self):
+        from prompt_toolkit.completion import CompleteEvent
+        from prompt_toolkit.document import Document
+
+        from runtime.commands.completion import create_main_input_completer
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"main_input_ref_workspace_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"main_input_ref_user_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        (workspace / "README.md").write_text("not read", encoding="utf-8")
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=False,
+        )
+        completer = create_main_input_completer(context)
+
+        ref_items = list(completer.get_completions(Document("读 @REA", cursor_position=5), CompleteEvent()))
+        slash_items = list(completer.get_completions(Document("/con", cursor_position=4), CompleteEvent()))
+
+        self.assertIn("@README.md", [item.text for item in ref_items])
+        self.assertNotIn("/connect", [item.text for item in ref_items])
+        self.assertIn("/connect", [item.text for item in slash_items])
+
+    def test_main_input_refreshes_completion_for_reference_tokens(self):
+        from runtime.commands.completion import should_refresh_slash_completion
+
+        self.assertTrue(should_refresh_slash_completion("/con"))
+        self.assertTrue(should_refresh_slash_completion("读 @REA"))
+        self.assertTrue(should_refresh_slash_completion("用 #project"))
+        self.assertTrue(should_refresh_slash_completion("打开 ~/Doc"))
+        self.assertFalse(should_refresh_slash_completion("普通中文输入"))
 
     def test_slash_completion_caches_registry_and_model_choices_briefly(self):
         from runtime.commands import completion as completion_module
@@ -4225,6 +4715,31 @@ class ProviderConfigC2Tests(unittest.TestCase):
         self.assertTrue(buffer.started)
         self.assertFalse(buffer.select_first)
 
+    def test_ctrl_r_uses_lucode_history_completion_instead_of_reverse_search(self):
+        from runtime.commands.completion import create_slash_command_key_bindings
+
+        key_bindings = create_slash_command_key_bindings()
+        if key_bindings is None:
+            return
+        ctrl_r = next((binding for binding in key_bindings.bindings if str(binding.keys[0].value) == "c-r"), None)
+        self.assertIsNotNone(ctrl_r)
+        self.assertTrue(ctrl_r.eager())
+
+        class FakeBuffer:
+            def __init__(self):
+                self.started = False
+
+            def start_history_lines_completion(self):
+                self.started = True
+
+        class FakeEvent:
+            def __init__(self, buffer):
+                self.current_buffer = buffer
+
+        buffer = FakeBuffer()
+        ctrl_r.handler(FakeEvent(buffer))
+        self.assertTrue(buffer.started)
+
     def test_slash_prompt_uses_claude_style_menu_config(self):
         from runtime.commands.completion import (
             slash_prompt_bottom_toolbar,
@@ -4237,6 +4752,8 @@ class ProviderConfigC2Tests(unittest.TestCase):
 
         self.assertEqual(slash_prompt_message("\n你："), [("class:prompt", "\nlucode> ")])
         self.assertIn("命令菜单", slash_prompt_bottom_toolbar()[0][1])
+        self.assertIn("Ctrl+R", slash_prompt_bottom_toolbar()[0][1])
+        self.assertIn("Ctrl+C", slash_prompt_bottom_toolbar()[0][1])
         self.assertEqual(kwargs["complete_style"], CompleteStyle.COLUMN)
         self.assertGreaterEqual(kwargs["reserve_space_for_menu"], 12)
         self.assertIn("bottom_toolbar", kwargs)
@@ -4523,6 +5040,40 @@ class ProviderConfigC2Tests(unittest.TestCase):
         self.assertTrue(prompt_mouse_support_enabled({"LUCODE_PROMPT_MOUSE_SUPPORT": "1"}))
         self.assertFalse(choice_mouse_support_enabled({}))
         self.assertTrue(choice_mouse_support_enabled({"LUCODE_TUNER_MOUSE_SUPPORT": "1"}))
+        from lucode.shell.input_adapter import create_choice_prompt_key_bindings
+
+        choice_bindings = create_choice_prompt_key_bindings()
+        choice_keys = {str(getattr(binding.keys[0], "value", binding.keys[0])) for binding in choice_bindings.bindings if binding.keys}
+        self.assertIn("j", choice_keys)
+        self.assertIn("k", choice_keys)
+
+        class FakeChoiceBuffer:
+            def __init__(self):
+                self.text = ""
+                self.next_called = False
+                self.previous_called = False
+
+            def insert_text(self, text):
+                self.text += text
+
+            def complete_next(self):
+                self.next_called = True
+
+            def complete_previous(self):
+                self.previous_called = True
+
+        class FakeChoiceEvent:
+            def __init__(self, buffer):
+                self.current_buffer = buffer
+
+        choice_buffer = FakeChoiceBuffer()
+        j_binding = next(binding for binding in choice_bindings.bindings if str(getattr(binding.keys[0], "value", binding.keys[0])) == "j")
+        k_binding = next(binding for binding in choice_bindings.bindings if str(getattr(binding.keys[0], "value", binding.keys[0])) == "k")
+        j_binding.handler(FakeChoiceEvent(choice_buffer))
+        k_binding.handler(FakeChoiceEvent(choice_buffer))
+        self.assertTrue(choice_buffer.next_called)
+        self.assertTrue(choice_buffer.previous_called)
+        self.assertEqual(choice_buffer.text, "")
         self.assertTrue(fullscreen_form_mouse_support_enabled({}))
         self.assertFalse(fullscreen_form_mouse_support_enabled({"LUCODE_FORM_MOUSE_SUPPORT": "0"}))
         self.assertTrue(fullscreen_form_enabled({}))
@@ -4555,6 +5106,97 @@ class ProviderConfigC2Tests(unittest.TestCase):
             )
 
         self.assertIsNone(asyncio.run(read_disabled_form()))
+
+    def test_main_prompt_session_uses_persistent_history_and_suggestions(self):
+        from lucode.shell.input_adapter import _create_main_prompt_session
+        from runtime.history.input_history import ensure_main_input_history_path, main_input_history_path
+
+        home = TEMP_ROOT / f"input_history_home_{uuid.uuid4().hex}"
+        old_lucode_home = os.environ.get("LUCODE_HOME")
+        os.environ["LUCODE_HOME"] = str(home)
+        self.addCleanup(lambda: _restore_env("LUCODE_HOME", old_lucode_home))
+        self.addCleanup(lambda: _safe_rmtree(home))
+
+        class FakePromptSession:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        session = _create_main_prompt_session(FakePromptSession)
+        history_path = main_input_history_path()
+
+        self.assertEqual(ensure_main_input_history_path(), history_path)
+        self.assertEqual(Path(session.kwargs["history"].filename), history_path)
+        self.assertEqual(session.kwargs["auto_suggest"].__class__.__name__, "SlashCommandAutoSuggest")
+        self.assertEqual(session.kwargs["auto_suggest"]._fallback.__class__.__name__, "AutoSuggestFromHistory")
+        self.assertNotIn("enable_history_search", session.kwargs)
+        self.assertIn("bottom_toolbar", session.kwargs)
+        self.assertTrue(history_path.parent.exists())
+
+    def test_main_prompt_session_autosuggest_prefers_slash_commands(self):
+        from prompt_toolkit.buffer import Buffer
+        from prompt_toolkit.document import Document
+
+        from lucode.shell.input_adapter import _create_main_prompt_session
+
+        class FakePromptSession:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        session = _create_main_prompt_session(FakePromptSession)
+        suggest = session.kwargs["auto_suggest"]
+        suggestion = suggest.get_suggestion(Buffer(), Document("/con", cursor_position=4))
+
+        self.assertIsNotNone(suggestion)
+        self.assertEqual(suggestion.text, "fig")
+
+    def test_main_prompt_session_autosuggest_supports_prompt_toolkit_async_path(self):
+        from prompt_toolkit.buffer import Buffer
+        from prompt_toolkit.document import Document
+
+        from lucode.shell.input_adapter import _create_main_prompt_session
+
+        class FakePromptSession:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        async def get_suggestion_text():
+            session = _create_main_prompt_session(FakePromptSession)
+            suggestion = await session.kwargs["auto_suggest"].get_suggestion_async(
+                Buffer(),
+                Document("/con", cursor_position=4),
+            )
+            return None if suggestion is None else suggestion.text
+
+        self.assertEqual(asyncio.run(get_suggestion_text()), "fig")
+
+    def test_main_prompt_session_autosuggest_keeps_history_for_plain_text(self):
+        from prompt_toolkit.buffer import Buffer
+        from prompt_toolkit.document import Document
+        from prompt_toolkit.history import InMemoryHistory
+
+        from lucode.shell.input_adapter import _create_main_prompt_session
+
+        class FakePromptSession:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        session = _create_main_prompt_session(FakePromptSession)
+        history = InMemoryHistory()
+        history.append_string("hello lucode history")
+        buffer = Buffer(history=history)
+        suggestion = session.kwargs["auto_suggest"].get_suggestion(buffer, Document("hello", cursor_position=5))
+
+        self.assertIsNotNone(suggestion)
+        self.assertEqual(suggestion.text, " lucode history")
+
+    def test_non_main_prompt_sessions_do_not_share_main_input_history(self):
+        source = (PROJECT_ROOT / "lucode" / "shell" / "input_adapter.py").read_text(encoding="utf-8")
+
+        self.assertIn("_create_main_prompt_session(PromptSession)", source)
+        self.assertIn("self._runtime_prompt_session = PromptSession()", source)
+        self.assertIn("self._choice_prompt_session = PromptSession()", source)
+        self.assertIn("self._secret_prompt_session = PromptSession(is_password=True)", source)
+        self.assertEqual(source.count("ensure_main_input_history_path()"), 1)
 
 
 class WorkspaceExtensionC26Tests(unittest.TestCase):
@@ -5695,8 +6337,9 @@ class LucodeCliEntryTests(unittest.TestCase):
             run_agent,
             show_plan=False,
             settings=None,
+            display_input=None,
         ):
-            calls.append((run_input, project_root, run_agent, show_plan, settings.execution_mode))
+            calls.append((run_input, project_root, run_agent, show_plan, settings.execution_mode, display_input))
             return f"ok:{settings.execution_mode}"
 
         original = public_execution.execute_dynamic_request
@@ -5709,12 +6352,22 @@ class LucodeCliEntryTests(unittest.TestCase):
                 "run_agent": object(),
             }
             serial_context = ExecutionContext(
-                request=SimpleNamespace(user_input="serial task", workspace_root=PROJECT_ROOT, show_plan=False),
+                request=SimpleNamespace(
+                    user_input="[history]\nserial task",
+                    routing_input="serial task",
+                    workspace_root=PROJECT_ROOT,
+                    show_plan=False,
+                ),
                 settings=SimpleNamespace(execution_mode="serial"),
                 **common,
             )
             full_context = ExecutionContext(
-                request=SimpleNamespace(user_input="full task", workspace_root=PROJECT_ROOT, show_plan=True),
+                request=SimpleNamespace(
+                    user_input="[history]\nfull task",
+                    routing_input="full task",
+                    workspace_root=PROJECT_ROOT,
+                    show_plan=True,
+                ),
                 settings=SimpleNamespace(execution_mode="full"),
                 **common,
             )
@@ -5727,10 +6380,11 @@ class LucodeCliEntryTests(unittest.TestCase):
         self.assertEqual(
             [(call[0], call[1], call[3], call[4]) for call in calls],
             [
-                ("serial task", PROJECT_ROOT, False, "serial"),
-                ("full task", PROJECT_ROOT, True, "full"),
+                ("[history]\nserial task", PROJECT_ROOT, False, "serial"),
+                ("[history]\nfull task", PROJECT_ROOT, True, "full"),
             ],
         )
+        self.assertEqual([call[5] for call in calls], ["serial task", "full task"])
 
     def test_solo_strategy_bypasses_modes_wrapper(self):
         from types import SimpleNamespace
@@ -6197,6 +6851,7 @@ class RuntimeInterruptTests(unittest.IsolatedAsyncioTestCase):
         result = await session.run(approval_turn())
 
         self.assertEqual(result.final_output, "answer=yes")
+        self.assertFalse(session.approval_waiting)
 
     async def test_runtime_session_uses_choice_panel_for_approval_input(self):
         from main import RuntimeCommandSession
@@ -6236,6 +6891,7 @@ class RuntimeInterruptTests(unittest.IsolatedAsyncioTestCase):
         result = await session.run(approval_turn())
 
         self.assertEqual(result.final_output, "answer=session")
+        self.assertFalse(session.approval_waiting)
         self.assertTrue(console.runtime_reader_cancelled)
         self.assertEqual(console.choice_prompt, "审批> ")
         self.assertIn("y", console.choice_commands)
@@ -6275,6 +6931,38 @@ class RuntimeInterruptTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.final_output, "finished")
         self.assertEqual(console.deferred, [])
+
+    async def test_runtime_session_defers_non_approval_input_without_lexical_drop(self):
+        from main import RuntimeCommandSession
+
+        class FakeConsole:
+            interactive = True
+
+            def __init__(self):
+                self.lines = asyncio.Queue()
+                self.deferred = []
+                self.lines.put_nowait("普通下一轮问题")
+
+            def runtime_control_input_enabled(self):
+                return True
+
+            async def read_runtime_control_line(self):
+                return await self.lines.get()
+
+            def defer(self, line):
+                self.deferred.append(line)
+
+        async def short_turn():
+            await asyncio.sleep(0.01)
+            return "finished"
+
+        console = FakeConsole()
+        session = RuntimeCommandSession(console)
+        result = await session.run(short_turn())
+
+        self.assertEqual(result.final_output, "finished")
+        self.assertFalse(session.approval_waiting)
+        self.assertEqual(console.deferred, ["普通下一轮问题"])
 
     async def test_runtime_session_times_out_and_cancels_turn(self):
         from main import RuntimeCommandSession
@@ -6445,7 +7133,7 @@ class WelcomeRefreshC5Tests(unittest.TestCase):
 
         output = buffer.getvalue()
         self.assertEqual(kernel_calls, [])
-        self.assertIn("Lucode 多脑模型调音台", output)
+        self.assertNotIn("Lucode 多脑模型调音台", output)
         self.assertIn("已切换执行专家脑", output)
         self.assertIn("      lucode", output)
         self.assertIn("solo 单代理", output)
@@ -6455,6 +7143,46 @@ class WelcomeRefreshC5Tests(unittest.TestCase):
         self.assertTrue(any(getattr(item, "command", "") == "select 1" for item in first_choices))
         self.assertEqual(settings.executor_model_priority, ["deepseek_v4_pro_model"])
         self.assertEqual(load_lucode_config(workspace_root=workspace)["roles"]["executor"], ["deepseek/deepseek-v4-pro"])
+
+    def test_model_tuner_choice_menu_does_not_render_static_snapshot(self):
+        from lucode.shell.slash_commands import _handle_model_tuner_session
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"models_tuner_no_snapshot_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"models_tuner_no_snapshot_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        class FakeConsole:
+            interactive = True
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                return "q"
+
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        with patch("lucode.shell.slash_commands.render_model_tuner_snapshot", return_value="STATIC MODEL PANEL") as snapshot:
+            with contextlib.redirect_stdout(io.StringIO()):
+                asyncio.run(
+                    _handle_model_tuner_session(
+                        console=FakeConsole(),
+                        runtime_settings=RuntimeSettings(),
+                        workspace_context=context,
+                        use_color=False,
+                        show_logo=False,
+                    )
+                )
+
+        self.assertEqual(snapshot.call_count, 0)
 
     def test_chat_loop_connect_opens_isolated_wizard_without_kernel_facade(self):
         import lucode.shell.chat_loop as chat_loop_module
@@ -6556,6 +7284,44 @@ class WelcomeRefreshC5Tests(unittest.TestCase):
         self.assertEqual(config["model"]["primary"], "deepseek/deepseek-chat")
         self.assertEqual(settings.executor_model_priority, ["deepseek_chat_model"])
         self.assertEqual(auth["providers"]["deepseek"]["api_key"], "sk-chat-connect-wizard-secret")
+
+    def test_connect_choice_menu_does_not_render_static_snapshot(self):
+        from lucode.shell.slash_commands import _handle_connect_wizard_session
+        from runtime.config.settings import RuntimeSettings
+        from runtime.config.workspace import WorkspaceContext
+
+        workspace = TEMP_ROOT / f"connect_no_snapshot_{uuid.uuid4().hex}"
+        user_home = TEMP_ROOT / f"connect_no_snapshot_user_{uuid.uuid4().hex}"
+        (workspace / ".lucode").mkdir(parents=True)
+        user_home.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        self.addCleanup(lambda: _safe_rmtree(user_home))
+
+        class FakeConsole:
+            interactive = True
+
+            async def read_choice_line(self, prompt, choices, **kwargs):
+                return "q"
+
+        context = WorkspaceContext(
+            app_home=PROJECT_ROOT,
+            user_home=user_home,
+            workspace_root=workspace,
+            project_config_dir=workspace / ".lucode",
+            has_project_config=True,
+        )
+
+        with patch("lucode.shell.slash_commands.render_connect_wizard_snapshot", return_value="STATIC CONNECT PANEL") as snapshot:
+            with contextlib.redirect_stdout(io.StringIO()):
+                asyncio.run(
+                    _handle_connect_wizard_session(
+                        console=FakeConsole(),
+                        workspace_context=context,
+                        runtime_settings=RuntimeSettings(),
+                    )
+                )
+
+        self.assertEqual(snapshot.call_count, 0)
 
     def test_connect_fullscreen_form_saves_custom_provider(self):
         from lucode.shell.input_adapter import ConsoleFormResult
@@ -7865,16 +8631,321 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("暂无事件", empty)
 
         bus.emit("PlanningStarted", "开始规划", mode="serial")
-        bus.emit("FastPathUsed", "命中只读快速路径", task_id="inspect", payload={"tool": "git", "action": "diff"})
+        bus.emit("FastPathUsed", "命中只读快速路径", mode="full", task_id="inspect", payload={"tool": "git", "action": "diff"})
         bus.emit("TaskFailed", "任务失败", task_id="edit", status="failed", payload={"reason": "blocked"})
         rendered = render_execution_events(bus.snapshot(), limit=2)
 
         self.assertIn("执行事件", rendered)
         self.assertIn("FastPathUsed", rendered)
         self.assertIn("git diff", rendered)
+        self.assertIn("模式 full", rendered)
         self.assertIn("TaskFailed", rendered)
         self.assertIn("blocked", rendered)
         self.assertNotIn("PlanningStarted", rendered)
+
+    def test_execution_event_summary_groups_tools_workers_lead_and_supervisor(self):
+        from runtime.events import ExecutionEventBus
+        from runtime.ui.event_render import render_execution_event_summary
+
+        bus = ExecutionEventBus()
+        bus.emit("TaskStarted", "Inspect project", task_id="inspect", status="running")
+        bus.emit(
+            "ToolInvoked",
+            "write file",
+            task_id="inspect",
+            status="completed",
+            payload={
+                "tool": "workspace_edit.write_file",
+                "action": "write_file",
+                "outcome": "success",
+                "files_touched": [{"path": "src/app.py", "access": "write"}],
+            },
+        )
+        bus.emit("FastPathUsed", "git diff", task_id="inspect", status="completed", payload={"tool": "git", "action": "diff"})
+        bus.emit("TaskCompleted", "Inspect done", task_id="inspect", status="completed")
+        bus.emit("TaskStarted", "Edit project", task_id="edit", status="running")
+        bus.emit("TaskFailed", "tool timeout", task_id="edit", status="failed", payload={"reason": "tool timeout"})
+        bus.emit(
+            "LeadReviewFinding",
+            "unauthorized write",
+            task_id="edit",
+            status="error",
+            payload={"kind": "unauthorized_write", "severity": "error", "evidence": "src/secret.py"},
+        )
+        bus.emit(
+            "LeadReviewCompleted",
+            "review complete",
+            agent="supervisor",
+            status="warning",
+            payload={"finding_count": 1, "error_count": 1, "warning_count": 0},
+        )
+        bus.emit("SupervisorObservation", "detected conflict", agent="supervisor", status="warning")
+        bus.emit(
+            "ToolApproved",
+            "supervisor auto approved",
+            agent="supervisor",
+            task_id="inspect",
+            status="auto_approved",
+            payload={"tool": "workspace_edit.write_file", "decision": "auto_approved"},
+        )
+
+        rendered = render_execution_event_summary(bus.snapshot(), limit=20)
+
+        self.assertIn("执行摘要", rendered)
+        self.assertIn("工具摘要", rendered)
+        self.assertIn("workspace_edit.write_file x1", rendered)
+        self.assertIn("git.diff x1", rendered)
+        self.assertIn("src/app.py", rendered)
+        self.assertIn("Worker 分组", rendered)
+        self.assertIn("inspect: completed", rendered)
+        self.assertIn("edit: failed", rendered)
+        self.assertIn("LeadReview", rendered)
+        self.assertIn("error=1", rendered)
+        self.assertIn("unauthorized_write", rendered)
+        self.assertIn("Supervisor", rendered)
+        self.assertIn("主管审批", rendered)
+
+    def test_execution_event_summary_empty_events_stays_quiet(self):
+        from runtime.ui.event_render import render_execution_event_summary
+
+        self.assertEqual(render_execution_event_summary([]), "")
+
+    def test_collapse_text_block_folds_long_diff_but_not_short_text(self):
+        from runtime.ui.collapse import collapse_text_block
+
+        long_diff = "\n".join(f"+ line {index}" for index in range(40))
+        folded = collapse_text_block(long_diff, kind="diff", title="git diff", max_lines=12, max_chars=2000)
+        short = collapse_text_block("short output", kind="tool", title="stdout", max_lines=12, max_chars=2000)
+
+        self.assertTrue(folded.collapsed)
+        self.assertEqual(folded.kind, "diff")
+        self.assertIn("/expand", folded.preview)
+        self.assertEqual(folded.full_text, long_diff)
+        self.assertFalse(short.collapsed)
+        self.assertEqual(short.preview, "short output")
+
+    def test_expand_store_writes_redacted_blocks_and_renders_listing(self):
+        from runtime.history.expand_store import ExpandBlockStore
+        from runtime.ui.collapse import collapse_text_block
+
+        workspace = TEMP_ROOT / f"expand_store_{uuid.uuid4().hex}"
+        block = collapse_text_block(
+            "api_key=sk-test-secret-value-1234567890\n" + "\n".join(f"line {i}" for i in range(30)),
+            kind="tool",
+            title="tool stdout",
+            max_lines=8,
+            max_chars=100,
+        )
+        store = ExpandBlockStore(workspace, session_id="session-1")
+        saved = store.save(block)
+
+        listing = store.render_list()
+        loaded = store.read(saved.block_id)
+        saved_again = store.save(block)
+        index_lines = store.index_path.read_text(encoding="utf-8").splitlines()
+
+        self.assertIn(saved.block_id, listing)
+        self.assertIn("tool stdout", listing)
+        self.assertEqual(saved_again.block_id, saved.block_id)
+        self.assertEqual(len(index_lines), 1)
+        self.assertIn("[redacted]", loaded or "")
+        self.assertNotIn("sk-test-secret-value", loaded or "")
+
+    def test_expand_readonly_command_lists_and_reads_blocks(self):
+        from runtime.config.cli import render_readonly_command
+        from runtime.config.settings import RuntimeSettings
+        from runtime.history.expand_store import ExpandBlockStore
+        from runtime.ui.collapse import collapse_text_block
+
+        workspace = TEMP_ROOT / f"expand_command_{uuid.uuid4().hex}"
+
+        class Context:
+            workspace_root = workspace
+            app_home = workspace
+            user_home = workspace
+
+        store = ExpandBlockStore(workspace, session_id="default")
+        saved = store.save(
+            collapse_text_block(
+                "\n".join(f"expanded line {i}" for i in range(30)),
+                kind="worker",
+                title="worker detail",
+                max_lines=6,
+                max_chars=100,
+            )
+        )
+
+        listing = render_readonly_command("/expand", RuntimeSettings(), Context())
+        detail = render_readonly_command(f"/expand {saved.block_id}", RuntimeSettings(), Context())
+
+        self.assertIn(saved.block_id, listing)
+        self.assertIn("worker detail", listing)
+        self.assertIn("expanded line 29", detail)
+
+    def test_named_expand_store_record_supports_plan_last(self):
+        from runtime.history.expand_store import ExpandBlockStore
+
+        workspace = TEMP_ROOT / f"expand_named_plan_{uuid.uuid4().hex}"
+        store = ExpandBlockStore(workspace, session_id="default")
+
+        saved = store.save_text("plan-last", "full plan detail", kind="plan", title="上一轮完整规划")
+        saved_again = store.save_text("plan-last", "new plan detail", kind="plan", title="上一轮完整规划")
+
+        self.assertEqual(saved.block_id, "plan-last")
+        self.assertEqual(saved_again.block_id, "plan-last")
+        self.assertEqual(store.read("plan-last"), "new plan detail")
+        self.assertIn("plan-last", store.render_list())
+        self.assertEqual(len(store.index_path.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_compact_plan_summary_hides_full_plan_details_by_default(self):
+        from planning.plan_reviewer import PlanReview
+        from planning.plan_validator import PlanValidation
+        from planning.planner_schema import PlannedTask, PlannerResult, RefinedRequest
+        from runtime.execution.pipeline import GateDecision
+        from runtime.ui.plan_display import render_compact_plan_summary
+
+        refined = RefinedRequest(
+            raw_user_input="检查 runtime 和 tests",
+            refined_request="用 full 模式只读检查 runtime 和 tests 目录，输出工具执行摘要。",
+        )
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="只读分析任务，一个 project_explorer 即可完成。",
+            refined_request=refined.refined_request,
+            tasks=[
+                PlannedTask(
+                    id="inspect_dirs",
+                    title="探索 runtime 和 tests 目录结构",
+                    instruction="只读检查 runtime 和 tests 目录结构，输出摘要。",
+                    skill_id="project_explorer",
+                    model="deepseek_v4_pro_model",
+                    mcp=["project_filesystem_readonly", "code_locator"],
+                    read_set=["runtime", "tests"],
+                    acceptance_criteria=["输出目录结构、工具摘要、Worker 状态，不修改文件"],
+                )
+            ],
+        )
+        gate = GateDecision(
+            needs_code_pipeline=False,
+            edit_intent=False,
+            test_intent=False,
+            should_verify=False,
+            risk_level="low",
+            reason="无需代码流水线。",
+        )
+
+        rendered = render_compact_plan_summary(
+            refined,
+            plan,
+            PlanValidation(valid=True),
+            PlanReview(approved=True),
+            gate,
+            mode="full",
+            detail_selector="plan-last",
+        )
+
+        self.assertIn("Plan ready", rendered)
+        self.assertIn("full / single_agent / readonly / 1 task", rendered)
+        self.assertIn("project_explorer", rendered)
+        self.assertIn("/expand plan-last", rendered)
+        self.assertNotIn("========== 本轮规划 ==========", rendered)
+        self.assertNotIn("优化问题：", rendered)
+        self.assertNotIn("验收：", rendered)
+        self.assertNotIn("输出目录结构、工具摘要、Worker 状态", rendered)
+
+    def test_planning_status_print_is_safe_for_gbk_console(self):
+        from runtime.execution.dynamic import _safe_print
+        from runtime.ui.plan_display import render_planning_status
+
+        class GbkStdout(io.StringIO):
+            encoding = "gbk"
+
+            def write(self, value):
+                str(value).encode(self.encoding)
+                return super().write(value)
+
+        stream = GbkStdout()
+        with patch("sys.stdout", stream):
+            _safe_print(render_planning_status("检查 runtime 和 tests", mode="full", stage="planning"))
+
+        self.assertEqual(stream.getvalue().strip(), "Planning")
+        self.assertNotIn("?", stream.getvalue())
+
+    def test_planning_status_context_respects_dynamic_ui_off(self):
+        from runtime.ui.plan_display import planning_status
+
+        buffer = io.StringIO()
+        with patch.dict(os.environ, {"AGENTS_DYNAMIC_UI": "off"}, clear=False), contextlib.redirect_stdout(buffer):
+            with planning_status("检查 runtime 和 tests", mode="full", enabled=True):
+                print("inside")
+
+        self.assertEqual(buffer.getvalue().strip(), "inside")
+
+    def test_dynamic_status_context_respects_dynamic_ui_off(self):
+        from runtime.ui.live_status import dynamic_status
+
+        buffer = io.StringIO()
+        with patch.dict(os.environ, {"AGENTS_DYNAMIC_UI": "off"}, clear=False), contextlib.redirect_stdout(buffer):
+            with dynamic_status("Inspect runtime and tests", mode="full", stage="worker", enabled=True):
+                print("inside")
+
+        self.assertEqual(buffer.getvalue().strip(), "inside")
+
+    def test_execution_event_summary_collapses_long_tool_payload(self):
+        from runtime.events import ExecutionEventBus
+        from runtime.history.expand_store import ExpandBlockStore
+        from runtime.ui.event_render import render_execution_event_summary
+
+        workspace = TEMP_ROOT / f"event_expand_{uuid.uuid4().hex}"
+        store = ExpandBlockStore(workspace, session_id="default")
+        bus = ExecutionEventBus()
+        bus.emit(
+            "ToolInvoked",
+            "long output",
+            task_id="inspect",
+            status="completed",
+            payload={
+                "tool": "command_runner.run_command",
+                "action": "run_command",
+                "outcome": "success",
+                "arguments_summary": {
+                    "command": "python test.py",
+                    "stdout": "\n".join(f"stdout line {index}" for index in range(60)),
+                },
+            },
+        )
+
+        rendered = render_execution_event_summary(bus.snapshot(), limit=10, expand_store=store)
+
+        self.assertIn("/expand", rendered)
+        self.assertIn("command_runner.run_command", rendered)
+        self.assertTrue(store.list_blocks())
+
+    def test_execution_event_summary_tolerates_malformed_lead_review_counts(self):
+        from runtime.events import ExecutionEventBus
+        from runtime.ui.event_render import render_execution_event_summary
+
+        bus = ExecutionEventBus()
+        bus.emit(
+            "LeadReviewFinding",
+            "missing evidence",
+            task_id="inspect",
+            status="warning",
+            payload={"kind": "missing_evidence", "severity": "warning"},
+        )
+        bus.emit(
+            "LeadReviewCompleted",
+            "review complete",
+            agent="supervisor",
+            status="warning",
+            payload={"error_count": "not-a-number", "warning_count": ""},
+        )
+
+        rendered = render_execution_event_summary(bus.snapshot())
+
+        self.assertIn("LeadReview", rendered)
+        self.assertIn("error=0", rendered)
+        self.assertIn("warning=1", rendered)
 
     def test_progress_snapshot_can_include_execution_events(self):
         from planning.planner_schema import PlannedTask, PlannerResult
@@ -7902,10 +8973,48 @@ class PipelineTests(unittest.TestCase):
 
         rendered = render_task_status_board(state, mode="serial", attempt=1, include_events=True)
 
-        self.assertIn("执行事件", rendered)
-        self.assertIn("PlanningStarted", rendered)
-        self.assertIn("TaskStarted", rendered)
+        self.assertIn("执行摘要", rendered)
+        self.assertIn("Worker 分组", rendered)
+        self.assertIn("inspect: running", rendered)
         _assert_box_lines_aligned(self, rendered, label="progress with events")
+
+    def test_progress_event_summary_persists_expand_blocks_for_long_tool_output(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.history.expand_store import ExpandBlockStore
+        from runtime.ui.progress import render_task_status_board
+
+        workspace = TEMP_ROOT / f"progress_expand_{uuid.uuid4().hex}"
+        task = PlannedTask(
+            id="inspect",
+            title="检查输出",
+            instruction="run command",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=[],
+        )
+        state = PipelineRunState.create(
+            "检查输出",
+            PlannerResult(route_type="single_agent", reason="test", refined_request="检查输出", tasks=[task]),
+            project_root=workspace,
+        )
+        state.event_bus.emit(
+            "ToolInvoked",
+            "long stdout",
+            task_id="inspect",
+            status="completed",
+            payload={
+                "tool": "command_runner.run_command",
+                "action": "run_command",
+                "arguments_summary": {"stdout": "\n".join(f"line {index}" for index in range(60))},
+            },
+        )
+
+        rendered = render_task_status_board(state, mode="serial", attempt=1, include_events=True)
+        blocks = ExpandBlockStore(workspace).list_blocks()
+
+        self.assertIn("/expand", rendered)
+        self.assertEqual(len(blocks), 1)
 
     def test_pipeline_state_records_fast_path_event(self):
         from planning.planner_schema import PlannedTask, PlannerResult
@@ -8130,6 +9239,137 @@ class PipelineTests(unittest.TestCase):
 
         self.assertIn("[?]", stream.getvalue())
 
+    def test_dynamic_ui_off_uses_plain_text_progress(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.progress import _render_progress_snapshot
+
+        task = PlannedTask(
+            id="inspect",
+            title="扫描相关文件",
+            instruction="扫描。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["code_locator"],
+        )
+        state = PipelineRunState.create(
+            "验证状态输出",
+            PlannerResult(route_type="single_agent", reason="test", refined_request="验证状态输出", tasks=[task]),
+            project_root=TEMP_ROOT,
+        )
+        state.record_task_started(task)
+
+        with patch.dict(os.environ, {"AGENTS_DYNAMIC_UI": "off"}, clear=False):
+            rendered = _render_progress_snapshot(state, mode="full", attempt=1, active="扫描相关文件")
+
+        self.assertIn("任务状态", rendered)
+        self.assertIn("状态 | 模式 full", rendered)
+        self.assertNotIn("● Supervisor", rendered)
+
+    def test_dynamic_ui_auto_falls_back_when_stdout_is_not_tty(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.progress import _render_progress_snapshot
+
+        class NonTtyStdout(io.StringIO):
+            encoding = "utf-8"
+
+            def isatty(self):
+                return False
+
+        task = PlannedTask(
+            id="inspect",
+            title="扫描相关文件",
+            instruction="扫描。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["code_locator"],
+        )
+        state = PipelineRunState.create(
+            "验证状态输出",
+            PlannerResult(route_type="single_agent", reason="test", refined_request="验证状态输出", tasks=[task]),
+            project_root=TEMP_ROOT,
+        )
+        state.record_task_started(task)
+
+        with patch.dict(os.environ, {"AGENTS_DYNAMIC_UI": "auto"}, clear=False), patch("sys.stdout", NonTtyStdout()):
+            rendered = _render_progress_snapshot(state, mode="full", attempt=1, active="扫描相关文件")
+
+        self.assertIn("任务状态", rendered)
+        self.assertIn("状态 | 模式 full", rendered)
+        self.assertNotIn("● Supervisor", rendered)
+
+    def test_dynamic_ui_on_uses_rich_preview_when_capability_allows(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.progress import _render_progress_snapshot
+
+        task = PlannedTask(
+            id="inspect",
+            title="扫描相关文件",
+            instruction="扫描。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["code_locator"],
+        )
+        state = PipelineRunState.create(
+            "验证状态输出",
+            PlannerResult(route_type="single_agent", reason="test", refined_request="验证状态输出", tasks=[task]),
+            project_root=TEMP_ROOT,
+        )
+        state.record_task_started(task)
+        state.event_bus.emit(
+            "ToolInvoked",
+            "read file",
+            task_id="inspect",
+            status="completed",
+            payload={"tool": "project_filesystem_readonly.read_file", "action": "read_file"},
+        )
+
+        with patch.dict(os.environ, {"AGENTS_DYNAMIC_UI": "on"}, clear=False), patch(
+            "runtime.execution.progress.detect_dynamic_ui_capability"
+        ) as detect:
+            detect.return_value.enabled = True
+            detect.return_value.reason = ""
+            rendered = _render_progress_snapshot(state, mode="full", attempt=1, active="扫描相关文件")
+
+        self.assertIn("Plan", rendered)
+        self.assertIn("\u2726 Supervisor", rendered)
+        self.assertIn("\u2726 Worker 1", rendered)
+        self.assertIn("└", rendered)
+        self.assertNotIn("Tools", rendered)
+
+    def test_dynamic_ui_on_attempts_rich_preview_even_when_capability_denies(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.progress import _render_progress_snapshot
+
+        task = PlannedTask(
+            id="inspect",
+            title="扫描相关文件",
+            instruction="扫描。",
+            skill_id="project_explorer",
+            model="local_model",
+            mcp=["code_locator"],
+        )
+        state = PipelineRunState.create(
+            "验证状态输出",
+            PlannerResult(route_type="single_agent", reason="test", refined_request="验证状态输出", tasks=[task]),
+            project_root=TEMP_ROOT,
+        )
+        state.record_task_started(task)
+
+        with patch.dict(os.environ, {"AGENTS_DYNAMIC_UI": "on"}, clear=False), patch(
+            "runtime.execution.progress.detect_dynamic_ui_capability"
+        ) as detect:
+            detect.return_value.enabled = False
+            detect.return_value.reason = "not_tty"
+            rendered = _render_progress_snapshot(state, mode="full", attempt=1, active="扫描相关文件")
+
+        self.assertIn("Plan", rendered)
+        self.assertIn("\u2726 Supervisor", rendered)
+        self.assertIn("\u2726 Worker 1", rendered)
+
     def test_c5_task_status_board_shows_failed_state_and_error(self):
         from planning.planner_schema import PlannedTask, PlannerResult
         from runtime.execution.pipeline import PipelineRunState
@@ -8273,6 +9513,37 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("README.md", rendered)
         self.assertIn("README 项目说明", rendered)
         self.assertIn("inspect", rendered)
+
+    def test_run_context_store_records_context_pack_once_for_multiple_workers(self):
+        from runtime.agent.supervisor import ContextPack
+        from runtime.execution.run_context import RunContextStore
+
+        workspace = TEMP_ROOT / f"run_context_pack_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+        pack = ContextPack(
+            pack_id="supervisor_context_pack",
+            summary="Shared scout result for full workers.",
+            shared_files=[
+                {"path": "README.md", "summary": "Project overview.", "owner_task_id": "read_a"},
+                {"path": "pyproject.toml", "summary": "Project metadata.", "owner_task_id": "read_b"},
+            ],
+            source_task_ids=["read_a", "read_b"],
+        )
+        store = RunContextStore(workspace)
+
+        first = store.record_context_pack(pack, task_id="supervisor")
+        second = store.record_context_pack(pack, task_id="read_a")
+        rendered_a = store.render_for_task("read_a")
+        rendered_b = store.render_for_task("read_b")
+
+        self.assertEqual(first.artifact_id, second.artifact_id)
+        self.assertEqual(len(store.context_packs), 1)
+        self.assertIn("ContextPack", rendered_a)
+        self.assertIn("supervisor_context_pack", rendered_a)
+        self.assertIn("README.md", rendered_a)
+        self.assertIn("pyproject.toml", rendered_b)
+        self.assertEqual(rendered_a.count("supervisor_context_pack"), 1)
 
     def test_dynamic_execution_result_preserves_string_behavior(self):
         from runtime.execution.dynamic import DynamicExecutionResult
@@ -8907,6 +10178,88 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("ui/app.py", output)
         self.assertIn("api/server.py", output)
 
+    def test_full_runtime_parallel_batch_uses_one_dynamic_batch_status(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.multi_agent_runner import _run_multi_agent
+
+        captured = []
+
+        @contextlib.contextmanager
+        def fake_status(message, **kwargs):
+            captured.append((message, kwargs))
+            yield
+
+        class FakeFactory:
+            async def create_task_agent(self, task, execution_mode=""):
+                return f"agent:{task.id}"
+
+            def create_synthesizer_agent(self, model_id, run_workspace_server):
+                return "synthesizer"
+
+        class FakeResult:
+            def __init__(self, final_output):
+                self.final_output = final_output
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20):
+            return FakeResult(f"done:{agent}")
+
+        plan = PlannerResult(
+            route_type="multi_agent",
+            reason="safe parallel",
+            refined_request="parallel test",
+            tasks=[
+                PlannedTask(
+                    id="frontend",
+                    title="Frontend task",
+                    instruction="Modify ui/app.py.",
+                    skill_id="jpc_now_skill",
+                    model="local_model",
+                    mcp=["workspace_edit"],
+                    write_intent=["ui/app.py"],
+                ),
+                PlannedTask(
+                    id="backend",
+                    title="Backend task",
+                    instruction="Modify api/server.py.",
+                    skill_id="jpc_now_skill",
+                    model="local_model",
+                    mcp=["workspace_edit"],
+                    write_intent=["api/server.py"],
+                ),
+            ],
+            needs_synthesis=False,
+            synthesis_instruction="",
+        )
+        state = PipelineRunState.create("parallel test", plan, project_root=PROJECT_ROOT)
+
+        with patch("runtime.execution.multi_agent_runner.dynamic_status", fake_status), patch(
+            "runtime.execution.task_runner.dynamic_status",
+            fake_status,
+        ), contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(
+                _run_multi_agent(
+                    "parallel test",
+                    plan,
+                    PROJECT_ROOT,
+                    "local_model",
+                    FakeFactory(),
+                    hooks=None,
+                    run_agent=fake_run_agent,
+                    run_state=state,
+                    execution_mode="full",
+                    show_progress=True,
+                )
+            )
+
+        batch_statuses = [(message, kwargs) for message, kwargs in captured if kwargs.get("stage") == "batch"]
+        worker_statuses = [item for item in captured if item[1].get("stage") == "worker"]
+
+        self.assertEqual(len(batch_statuses), 1)
+        self.assertIn("frontend", batch_statuses[0][0])
+        self.assertIn("backend", batch_statuses[0][0])
+        self.assertEqual(worker_statuses, [])
+
     def test_full_runtime_keeps_safe_parallel_batches_but_serializes_conflicts(self):
         from planning.planner_schema import PlannedTask
         from runtime.execution.dynamic import _execution_batches_for_mode
@@ -9224,7 +10577,14 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("command_runner", plan.tasks[0].mcp)
         self.assertIn("workspace_edit", plan.tasks[1].mcp)
         self.assertIn("command_runner", plan.tasks[1].mcp)
-        self.assertTrue(validate_plan(plan).valid)
+        fake_catalog = {
+            "models": [
+                {"id": "deepseek_v4_flash_model", "configured": True, "backend_type": "openai_compatible"},
+                {"id": "mimo_v25_pro_model", "configured": True, "backend_type": "openai_compatible"},
+            ]
+        }
+        with patch("planning.plan_validator.load_model_catalog", return_value=fake_catalog):
+            self.assertTrue(validate_plan(plan).valid)
 
     def test_dependency_context_is_added_to_later_task_prompt(self):
         from planning.planner_schema import PlannedTask
@@ -9506,6 +10866,9 @@ class AgentFactorySoloTests(unittest.TestCase):
         self.assertIn("读取计划", instructions)
         self.assertIn("主管扩容", instructions)
         self.assertIn("共享给后续 Agent", instructions)
+        self.assertIn("## WorkerReport", instructions)
+        self.assertIn("验证结果", instructions)
+        self.assertIn("风险/未完成", instructions)
 
 
 class ModelRoleConfigTests(unittest.TestCase):
@@ -10723,12 +12086,48 @@ class CatalogRefreshTests(unittest.TestCase):
         from skills.registry import SKILLS
 
         self.assertIn("task_router", SKILLS)
-        self.assertTrue((PROJECT_ROOT / "skills" / "task-router" / "SKILL.md").exists())
+        skill_file = PROJECT_ROOT / "skills" / "task-router" / "SKILL.md"
+        self.assertTrue(skill_file.exists())
+        self.assertIn("deprecated: true", skill_file.read_text(encoding="utf-8-sig"))
 
         catalog = build_skill_catalog(PROJECT_ROOT, include_dynamic=False, use_cache=False)
         ids = {item["id"] for item in catalog["skills"]}
 
         self.assertNotIn("task_router", ids)
+
+    def test_skill_policy_constants_are_shared_across_catalog_and_runtime(self):
+        from runtime.config.skill_policy import (
+            BORROWABLE_SKILL_SOURCES,
+            INTERNAL_SKILLS,
+            PROTECTED_SYSTEM_SKILLS,
+            RULE_ONLY_SKILLS,
+        )
+
+        self.assertEqual(PROTECTED_SYSTEM_SKILLS, INTERNAL_SKILLS)
+        self.assertIn("sample", BORROWABLE_SKILL_SOURCES)
+        self.assertIn("user", BORROWABLE_SKILL_SOURCES)
+        self.assertIn("workspace", BORROWABLE_SKILL_SOURCES)
+        self.assertIn("cli_command_safety", RULE_ONLY_SKILLS)
+        self.assertIn("lucode_native_capability", INTERNAL_SKILLS)
+
+    def test_solo_skill_matcher_resolves_catalog_relative_paths_from_any_cwd(self):
+        from runtime.config.extensions import ExtensionRoots
+        from runtime.execution.skill_matcher import _skill_body_excerpt
+        from runtime.execution.skill_matcher import render_matching_user_skill_context
+
+        previous_cwd = Path.cwd()
+        temp_cwd = TEMP_ROOT / f"skill_matcher_cwd_{uuid.uuid4().hex}" / "nested"
+        temp_cwd.mkdir(parents=True)
+        self.addCleanup(lambda: os.chdir(previous_cwd))
+        self.addCleanup(lambda: _safe_rmtree(temp_cwd.parent))
+        os.chdir(temp_cwd)
+
+        context = ExtensionRoots(app_home=PROJECT_ROOT, user_home=temp_cwd / "user_home", workspace_root=temp_cwd)
+        prompt = render_matching_user_skill_context("请用 project_explorer 分析项目结构。", workspace_context=context)
+
+        self.assertIn("project_explorer", prompt)
+        self.assertIn("项目", prompt)
+        self.assertIn("Project Explorer", _skill_body_excerpt("skills/project-explorer"))
 
     def test_mcp_catalog_builder_keeps_hosted_remote_mcp_entries(self):
         from catalog_system.refresher import build_mcp_catalog, build_skill_catalog
@@ -11802,47 +13201,59 @@ class RuntimeSettingsTests(unittest.TestCase):
 
 
 class ModelBackendPrivacyTests(unittest.TestCase):
+    ENV_KEYS = [
+        "AGENTS_PRIVACY_MODE",
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_MODEL",
+        "DEEPSEEK_pro_API_KEY",
+        "DEEPSEEK_BASE_pro_URL",
+        "DEEPSEEK_pro_MODEL",
+        "MODEL_DEEPSEEK_API_KEY",
+        "MODEL_DEEPSEEK_BASE_URL",
+        "MODEL_DEEPSEEK_MODELS",
+        "MODEL_DEEPSEEK_BACKEND",
+        "MODEL_LOCAL_API_KEY",
+        "MODEL_LOCAL_BASE_URL",
+        "MODEL_LOCAL_MODEL",
+        "MODEL_LOCAL_BACKEND",
+        "MODEL_LOCAL_DISPLAY_NAME",
+        "MODEL_LOCAL_PROVIDER",
+        "MODEL_CLOUD_API_KEY",
+        "MODEL_CLOUD_BASE_URL",
+        "MODEL_CLOUD_MODEL",
+        "MODEL_CLOUD_BACKEND",
+        "MODEL_CLOUD_PROVIDER",
+        "MODEL_CLOUD_DISPLAY_NAME",
+        "MODEL_SILICONFLOW_API_KEY",
+        "MODEL_SILICONFLOW_BASE_URL",
+        "MODEL_SILICONFLOW_MODELS",
+        "MODEL_SILICONFLOW_BACKEND",
+        "MODEL_SILICONFLOW_PROVIDER",
+        "MODEL_SILICONFLOW_DISPLAY_PREFIX",
+        "MODEL_SILICONFLOW_STRENGTHS",
+        "MODEL_SILICONFLOW_BEST_FOR_SKILLS",
+        "MODEL_SILICONFLOW_COST_LEVEL",
+        "MODEL_SILICONFLOW_REASONING_LEVEL",
+        "MODEL_SILICONFLOW_SUPPORTS_TOOLS",
+        "MIMO_API_KEY",
+        "MIMO_API_BASE_URL",
+        "MIMO_API_MODEL",
+        "MIMO_API_MODELS",
+        "MIMO_API_DISPLAY_PREFIX",
+        "AGENTS_OFFLINE_NETWORK_MCP_POLICY",
+    ]
+
+    def setUp(self):
+        from dotenv import load_dotenv
+        from catalog_system.model_catalog import clear_model_catalog_cache
+
+        load_dotenv(PROJECT_ROOT / ".env")
+        clear_model_catalog_cache()
+        self._env_snapshot = _snapshot_env(self.ENV_KEYS)
+
     def tearDown(self):
-        for key in [
-            "AGENTS_PRIVACY_MODE",
-            "DEEPSEEK_API_KEY",
-            "DEEPSEEK_BASE_URL",
-            "DEEPSEEK_MODEL",
-            "DEEPSEEK_pro_API_KEY",
-            "DEEPSEEK_BASE_pro_URL",
-            "DEEPSEEK_pro_MODEL",
-            "MODEL_DEEPSEEK_API_KEY",
-            "MODEL_DEEPSEEK_BASE_URL",
-            "MODEL_DEEPSEEK_MODELS",
-            "MODEL_DEEPSEEK_BACKEND",
-            "MODEL_LOCAL_API_KEY",
-            "MODEL_LOCAL_BASE_URL",
-            "MODEL_LOCAL_MODEL",
-            "MODEL_LOCAL_BACKEND",
-            "MODEL_LOCAL_DISPLAY_NAME",
-            "MODEL_LOCAL_PROVIDER",
-            "MODEL_CLOUD_API_KEY",
-            "MODEL_CLOUD_BASE_URL",
-            "MODEL_CLOUD_MODEL",
-            "MODEL_CLOUD_BACKEND",
-            "MODEL_CLOUD_PROVIDER",
-            "MODEL_CLOUD_DISPLAY_NAME",
-            "MODEL_SILICONFLOW_API_KEY",
-            "MODEL_SILICONFLOW_BASE_URL",
-            "MODEL_SILICONFLOW_MODELS",
-            "MODEL_SILICONFLOW_BACKEND",
-            "MODEL_SILICONFLOW_PROVIDER",
-            "MODEL_SILICONFLOW_DISPLAY_PREFIX",
-            "MODEL_SILICONFLOW_STRENGTHS",
-            "MODEL_SILICONFLOW_BEST_FOR_SKILLS",
-            "MODEL_SILICONFLOW_COST_LEVEL",
-            "MODEL_SILICONFLOW_REASONING_LEVEL",
-            "MODEL_SILICONFLOW_SUPPORTS_TOOLS",
-            "MIMO_API_MODELS",
-            "MIMO_API_DISPLAY_PREFIX",
-            "AGENTS_OFFLINE_NETWORK_MCP_POLICY",
-        ]:
-            os.environ.pop(key, None)
+        _restore_env_snapshot(self._env_snapshot)
         from catalog_system.model_catalog import clear_model_catalog_cache
         clear_model_catalog_cache()
 
@@ -12871,6 +14282,7 @@ class ReadonlyCliConfigTests(unittest.TestCase):
         self.assertIn("当前隐私模式：本地优先", model)
         self.assertIn("本地 Qwen3（local_model）", model)
         self.assertNotIn("当前优先级里的模型都没有在 .env 注册", model)
+        self.assertNotIn("当前优先级里的模型都没有在有效配置中注册", model)
         self.assertNotIn("前置优化脑：", model)
         self.assertNotIn(" → ", model)
 
@@ -13025,6 +14437,7 @@ class ReadonlyCliConfigTests(unittest.TestCase):
         self.assertIn("DeepSeek deepseek_v4_flash（deepseek_v4_flash_model）", output)
         self.assertIn("MiMo mimo_v25_pro（mimo_v25_pro_model）", output)
         self.assertNotIn("当前优先级里的模型都没有在 .env 注册", output)
+        self.assertNotIn("当前优先级里的模型都没有在有效配置中注册", output)
         self.assertNotIn("deepseek_V4_flash_model", output)
         self.assertNotIn("mimo_model", output)
 
@@ -13309,7 +14722,7 @@ class ReadonlyCliConfigTests(unittest.TestCase):
 
         self.assertIn("只读查看", privacy)
         self.assertIn("主脑规划脑", model)
-        self.assertIn("当前版本不会直接改写 .env", switch_hint)
+        self.assertIn("不会直接改写配置", switch_hint)
 
     def test_mode_command_shows_execution_mode_readonly(self):
         from runtime.config.cli import render_readonly_command
@@ -13727,7 +15140,7 @@ class LocalModelPlannerCompatibilityTests(unittest.TestCase):
     def test_orchestrator_planner_borrows_cli_command_safety_rules(self):
         from planning.planner import build_orchestrator_planner
 
-        planner = build_orchestrator_planner(model=object())
+        planner = build_orchestrator_planner(model=None)
 
         self.assertIn("CLI Command Safety", planner.instructions)
         self.assertIn("CommandAnalyzer v2", planner.instructions)
@@ -14146,6 +15559,208 @@ class DynamicExecutionModelTests(unittest.TestCase):
         self.assertIn("PlanningFailed", output.run_context_summary)
         self.assertIn("planner_model", output.run_context_summary)
 
+    def test_show_plan_prints_compact_summary_and_stores_full_plan(self):
+        from planning.planner_schema import PlannedTask, PlannerResult, RefinedRequest
+        from runtime.config.settings import RuntimeSettings
+        from runtime.execution import dynamic as dynamic_module
+        from runtime.execution.dynamic import _execute_dynamic_attempt
+        from runtime.history.expand_store import ExpandBlockStore
+        from runtime.safety.privacy import PrivacyPolicy
+
+        workspace = TEMP_ROOT / f"compact_plan_run_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        class FakeRegistry:
+            def first_configured(self, priority):
+                return list(priority or ["planner_model"])[0]
+
+            def get_model(self, model_id):
+                return f"model:{model_id}"
+
+            def get_model_info(self, model_id):
+                return {"id": model_id, "configured": True, "supports_tools": True}
+
+        class FakeFlywheel:
+            def record_pipeline_state(self, state):
+                pass
+
+        refined = RefinedRequest(
+            raw_user_input="检查 runtime 和 tests",
+            refined_request="用 full 模式只读检查 runtime 和 tests 目录，输出工具执行摘要。",
+        )
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="只读分析任务，一个 project_explorer 即可完成。",
+            refined_request=refined.refined_request,
+            tasks=[
+                PlannedTask(
+                    id="inspect_dirs",
+                    title="探索 runtime 和 tests 目录结构",
+                    instruction="只读检查 runtime 和 tests 目录结构，输出摘要。",
+                    skill_id="project_explorer",
+                    model="planner_model",
+                    mcp=["project_filesystem_readonly", "code_locator"],
+                    read_set=["runtime", "tests"],
+                    acceptance_criteria=["输出目录结构、工具摘要、Worker 状态，不修改文件"],
+                )
+            ],
+        )
+
+        async def fake_preview_plan(*args, **kwargs):
+            return refined, plan
+
+        async def fake_single_agent(*args, **kwargs):
+            return "已完成只读检查。", object()
+
+        buffer = io.StringIO()
+        with patch.object(dynamic_module, "preview_plan", fake_preview_plan), patch(
+            "planning.plan_validator.load_skill_catalog",
+            return_value={"skills": [{"id": "project_explorer", "assignable": True, "allowed_mcp": ["project_filesystem_readonly", "code_locator"]}]},
+        ), patch(
+            "planning.plan_validator.load_mcp_catalog",
+            return_value={
+                "mcp_servers": [
+                    {"id": "project_filesystem_readonly", "implemented": True, "allowed_for_skills": ["project_explorer"]},
+                    {"id": "code_locator", "implemented": True, "allowed_for_skills": ["project_explorer"]},
+                ]
+            },
+        ), patch(
+            "planning.plan_validator.load_model_catalog",
+            return_value={"models": [{"id": "planner_model", "configured": True, "supports_tools": True}]},
+        ), patch.object(
+            dynamic_module,
+            "_run_single_agent",
+            fake_single_agent,
+        ), contextlib.redirect_stdout(buffer):
+            output, audit = asyncio.run(
+                _execute_dynamic_attempt(
+                    "检查 runtime 和 tests",
+                    workspace,
+                    FakeRegistry(),
+                    mcp_manager=object(),
+                    hooks=object(),
+                    run_agent=object(),
+                    show_plan=True,
+                    settings=RuntimeSettings(
+                        execution_mode="full",
+                        query_refiner_enabled=False,
+                        orchestrator_model_priority=["planner_model"],
+                        executor_model_priority=["planner_model"],
+                        final_synthesizer_model_priority=["planner_model"],
+                    ),
+                    privacy_policy=PrivacyPolicy("cloud_allowed"),
+                    flywheel=FakeFlywheel(),
+                    attempt=1,
+                )
+            )
+
+        printed = buffer.getvalue()
+        detail = ExpandBlockStore(workspace).read("plan-last") or ""
+
+        self.assertIsNotNone(audit)
+        self.assertIn("已完成只读检查", output)
+        self.assertIn("Plan ready", printed)
+        self.assertIn("full / single_agent / readonly / 1 task", printed)
+        self.assertIn("/expand plan-last", printed)
+        self.assertNotIn("========== 本轮规划 ==========", printed)
+        self.assertNotIn("优化问题：", printed)
+        self.assertNotIn("验收：", printed)
+        self.assertIn("输出目录结构、工具摘要、Worker 状态", detail)
+        self.assertIn("Gate", detail)
+
+    def test_planning_spinner_uses_display_input_not_history_context(self):
+        from planning.planner_schema import PlannerResult, RefinedRequest
+        from runtime.config.settings import RuntimeSettings
+        from runtime.execution import dynamic as dynamic_module
+        from runtime.execution.dynamic import _execute_dynamic_attempt
+        from runtime.safety.privacy import PrivacyPolicy
+
+        workspace = TEMP_ROOT / f"planning_display_input_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        class FakeRegistry:
+            def first_configured(self, priority):
+                return "planner_model"
+
+            def get_model(self, model_id):
+                return f"model:{model_id}"
+
+            def get_model_info(self, model_id):
+                return {"id": model_id, "configured": True, "supports_tools": True}
+
+        refined = RefinedRequest(
+            raw_user_input="[history]\n用户：上一轮内容\n用户：本轮真实输入",
+            refined_request="本轮真实输入",
+        )
+        plan = PlannerResult(
+            route_type="direct_answer",
+            reason="test",
+            refined_request=refined.refined_request,
+            direct_answer_instruction="直接回答。",
+        )
+
+        async def fake_preview_plan(*args, **kwargs):
+            return refined, plan
+
+        async def fake_run_agent(*args, **kwargs):
+            class Result:
+                final_output = "直接回答完成。"
+
+            return Result()
+
+        status_messages = []
+
+        class FakeStatus:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class FakeConsole:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def status(self, message, spinner=""):
+                status_messages.append((message, spinner))
+                return FakeStatus()
+
+        with patch.object(dynamic_module, "preview_plan", fake_preview_plan), patch.dict(
+            os.environ,
+            {"AGENTS_DYNAMIC_UI": "on"},
+            clear=False,
+        ), patch("rich.console.Console", FakeConsole), contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(
+                _execute_dynamic_attempt(
+                    "[history]\n用户：上一轮内容\n用户：本轮真实输入",
+                    workspace,
+                    FakeRegistry(),
+                    mcp_manager=object(),
+                    hooks=object(),
+                    run_agent=fake_run_agent,
+                    show_plan=True,
+                    settings=RuntimeSettings(
+                        execution_mode="full",
+                        query_refiner_enabled=False,
+                        orchestrator_model_priority=["planner_model"],
+                        executor_model_priority=["planner_model"],
+                        final_synthesizer_model_priority=["planner_model"],
+                    ),
+                    privacy_policy=PrivacyPolicy("cloud_allowed"),
+                    flywheel=object(),
+                    attempt=1,
+                    display_input="本轮真实输入",
+                )
+            )
+
+        rendered_status = "\n".join(message for message, _spinner in status_messages)
+
+        self.assertIn("本轮真实输入", rendered_status)
+        self.assertNotIn("[history]", rendered_status)
+        self.assertNotIn("上一轮内容", rendered_status)
+
     def test_invalid_task_model_is_replaced_with_executor(self):
         from planning.planner_schema import PlannerResult, PlannedTask
         from runtime.config.settings import RuntimeSettings
@@ -14357,6 +15972,644 @@ class DynamicExecutionModelTests(unittest.TestCase):
         self.assertFalse(audit.passed)
         self.assertEqual(state.tasks[0].status, "failed")
         self.assertEqual(state.event_bus.snapshot()[-1].event_type, "TaskFailed")
+
+    def test_single_agent_run_agent_uses_dynamic_execution_status_without_prompt_leak(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.single_agent_runner import _run_single_agent
+
+        captured = []
+
+        @contextlib.contextmanager
+        def fake_status(message, **kwargs):
+            captured.append((message, kwargs))
+            yield
+
+        class FakeFactory:
+            async def create_task_agent(self, task, execution_mode=""):
+                return f"agent:{task.id}"
+
+            def create_direct_answer_agent(self, model, instruction):
+                return f"direct:{model}"
+
+        class FakeResult:
+            final_output = "done"
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20, **kwargs):
+            return FakeResult()
+
+        class FakeFlywheel:
+            def record_pipeline_state(self, state):
+                pass
+
+        task = PlannedTask(
+            id="inspect_dirs",
+            title="Inspect runtime and tests",
+            instruction="Inspect runtime and tests.",
+            skill_id="project_explorer",
+            model="model",
+            mcp=["project_filesystem_readonly", "code_locator"],
+        )
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="test",
+            refined_request="actual request",
+            tasks=[task],
+        )
+        state = PipelineRunState.create("actual request", plan, project_root=TEMP_ROOT)
+
+        with patch("runtime.execution.single_agent_runner.dynamic_status", fake_status), contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(
+                _run_single_agent(
+                    "[history]\nsecret previous context\nactual request",
+                    plan,
+                    TEMP_ROOT,
+                    FakeFactory(),
+                    hooks=None,
+                    run_agent=fake_run_agent,
+                    run_state=state,
+                    flywheel=FakeFlywheel(),
+                    execution_mode="full",
+                    show_plan=True,
+                    attempt=1,
+                )
+            )
+
+        rendered = "\n".join(message for message, _kwargs in captured)
+
+        self.assertIn("Inspect runtime and tests", rendered)
+        self.assertIn("inspect_dirs", rendered)
+        self.assertNotIn("[history]", rendered)
+        self.assertNotIn("secret previous context", rendered)
+
+    def test_single_agent_disables_worker_streaming_while_dynamic_status_is_active(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.single_agent_runner import _run_single_agent
+
+        class FakeFactory:
+            async def create_task_agent(self, task, execution_mode=""):
+                return f"agent:{task.id}"
+
+            def create_direct_answer_agent(self, model, instruction):
+                return f"direct:{model}"
+
+        class FakeResult:
+            final_output = "done"
+
+        run_agent_kwargs_seen = {}
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20, **kwargs):
+            run_agent_kwargs_seen.update(kwargs)
+            return FakeResult()
+
+        class FakeFlywheel:
+            def record_pipeline_state(self, state):
+                pass
+
+        task = PlannedTask(
+            id="inspect_dirs",
+            title="Inspect runtime and tests",
+            instruction="Inspect runtime and tests.",
+            skill_id="project_explorer",
+            model="model",
+            mcp=["project_filesystem_readonly", "code_locator"],
+        )
+        plan = PlannerResult(route_type="single_agent", reason="test", refined_request="request", tasks=[task])
+        state = PipelineRunState.create("request", plan, project_root=TEMP_ROOT)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(
+                _run_single_agent(
+                    "request",
+                    plan,
+                    TEMP_ROOT,
+                    FakeFactory(),
+                    hooks=None,
+                    run_agent=fake_run_agent,
+                    run_state=state,
+                    flywheel=FakeFlywheel(),
+                    execution_mode="full",
+                    show_plan=True,
+                    attempt=1,
+                )
+            )
+
+        self.assertIs(run_agent_kwargs_seen.get("stream_output"), False)
+
+    def test_direct_answer_disables_streaming_while_dynamic_status_is_active(self):
+        from planning.planner_schema import PlannerResult
+        from runtime.execution.task_runner import _run_direct_answer
+
+        class FakeFactory:
+            def create_direct_answer_agent(self, model, instruction):
+                return f"direct:{model}"
+
+        class FakeResult:
+            final_output = "done"
+
+        run_agent_kwargs_seen = {}
+
+        async def fake_run_agent(agent, prompt, hooks, **kwargs):
+            run_agent_kwargs_seen.update(kwargs)
+            return FakeResult()
+
+        plan = PlannerResult(
+            route_type="direct_answer",
+            reason="test",
+            refined_request="request",
+            direct_answer_instruction="answer directly",
+            tasks=[],
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            output = asyncio.run(
+                _run_direct_answer(
+                    "request",
+                    plan,
+                    "model",
+                    FakeFactory(),
+                    hooks=None,
+                    run_agent=fake_run_agent,
+                )
+            )
+
+        self.assertEqual(output, "done")
+        self.assertIs(run_agent_kwargs_seen.get("stream_output"), False)
+
+    def test_planned_task_disables_worker_streaming_while_dynamic_status_is_active(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.task_runner import _run_planned_task
+
+        class FakeFactory:
+            async def create_task_agent(self, task, execution_mode=""):
+                return f"agent:{task.id}"
+
+        class FakeResult:
+            final_output = "done"
+
+        run_agent_kwargs_seen = {}
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20, **kwargs):
+            run_agent_kwargs_seen.update(kwargs)
+            return FakeResult()
+
+        task = PlannedTask(
+            id="analyze_runtime_ui",
+            title="分析 runtime ui",
+            instruction="分析 runtime ui。",
+            skill_id="project_explorer",
+            model="model",
+            mcp=["project_filesystem_readonly", "code_locator"],
+        )
+        plan = PlannerResult(route_type="multi_agent", reason="test", refined_request="request", tasks=[task])
+        state = PipelineRunState.create("request", plan, project_root=TEMP_ROOT)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(
+                _run_planned_task(
+                    "request",
+                    task,
+                    TEMP_ROOT,
+                    FakeFactory(),
+                    hooks=None,
+                    run_agent=fake_run_agent,
+                    run_state=state,
+                    execution_mode="full",
+                )
+            )
+
+        self.assertIs(run_agent_kwargs_seen.get("stream_output"), False)
+
+    def test_single_agent_sdk_tool_callback_reaches_event_bus(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.single_agent_runner import _run_single_agent
+        from runtime.ui.progress import render_task_status_board
+
+        class FakeFactory:
+            async def create_task_agent(self, task, execution_mode=""):
+                return f"agent:{task.id}"
+
+            def create_direct_answer_agent(self, model, instruction):
+                return f"direct:{model}"
+
+        class FakeTool:
+            name = "project_filesystem_readonly.read_file"
+            arguments = {"path": "runtime/execution/single_agent_runner.py"}
+
+        class FakeResult:
+            final_output = "已读取 single_agent_runner.py。"
+
+        class FakeHooks:
+            def __init__(self):
+                self.tool_end_seen = False
+
+            async def on_tool_end(self, context, agent, tool, result):
+                self.tool_end_seen = True
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20, **kwargs):
+            await hooks.on_tool_end(None, agent, FakeTool(), "ok")
+            return FakeResult()
+
+        class FakeFlywheel:
+            def record_pipeline_state(self, state):
+                pass
+
+        task = PlannedTask(
+            id="inspect_dirs",
+            title="检查 runtime 和 tests",
+            instruction="只读检查 runtime 和 tests。",
+            skill_id="project_explorer",
+            model="model",
+            mcp=["project_filesystem_readonly", "code_locator"],
+        )
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="test",
+            refined_request="检查 runtime 和 tests",
+            tasks=[task],
+        )
+        state = PipelineRunState.create("检查 runtime 和 tests", plan, project_root=TEMP_ROOT)
+        hooks = FakeHooks()
+
+        asyncio.run(
+            _run_single_agent(
+                "检查 runtime 和 tests",
+                plan,
+                TEMP_ROOT,
+                FakeFactory(),
+                hooks=hooks,
+                run_agent=fake_run_agent,
+                run_state=state,
+                flywheel=FakeFlywheel(),
+                execution_mode="full",
+                show_plan=False,
+                attempt=1,
+            )
+        )
+
+        events = state.event_bus.snapshot()
+        tool_events = [event for event in events if event.event_type == "ToolInvoked"]
+        rendered = render_task_status_board(state, mode="full", attempt=1, include_events=True)
+
+        self.assertTrue(hooks.tool_end_seen)
+        self.assertEqual(len(tool_events), 1)
+        self.assertEqual(tool_events[0].task_id, "inspect_dirs")
+        self.assertEqual(tool_events[0].payload["tool"], "project_filesystem_readonly.read_file")
+        self.assertIn("工具摘要", rendered)
+        self.assertIn("project_filesystem_readonly.read_file x1", rendered)
+
+    def test_single_agent_long_final_output_remains_visible_and_not_expand(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.single_agent_runner import _run_single_agent
+        from runtime.history.expand_store import ExpandBlockStore
+
+        workspace = TEMP_ROOT / f"single_agent_expand_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        class FakeFactory:
+            async def create_task_agent(self, task, execution_mode=""):
+                return f"agent:{task.id}"
+
+            def create_direct_answer_agent(self, model, instruction):
+                return f"direct:{model}"
+
+        long_output = "\n".join(f"worker detail line {index}" for index in range(80))
+
+        class FakeResult:
+            final_output = long_output
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20, **kwargs):
+            return FakeResult()
+
+        class FakeFlywheel:
+            def record_pipeline_state(self, state):
+                pass
+
+        task = PlannedTask(
+            id="inspect_dirs",
+            title="检查 runtime 和 tests",
+            instruction="只读检查 runtime 和 tests。",
+            skill_id="project_explorer",
+            model="model",
+            mcp=["project_filesystem_readonly", "code_locator"],
+        )
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="test",
+            refined_request="检查 runtime 和 tests",
+            tasks=[task],
+        )
+        state = PipelineRunState.create("检查 runtime 和 tests", plan, project_root=workspace)
+
+        output, audit = asyncio.run(
+            _run_single_agent(
+                "检查 runtime 和 tests",
+                plan,
+                workspace,
+                FakeFactory(),
+                hooks=None,
+                run_agent=fake_run_agent,
+                run_state=state,
+                flywheel=FakeFlywheel(),
+                execution_mode="full",
+                show_plan=False,
+                attempt=1,
+            )
+        )
+
+        blocks = ExpandBlockStore(workspace).list_blocks()
+
+        self.assertTrue(audit.passed)
+        self.assertEqual(len(blocks), 0)
+        self.assertNotIn("/expand", output)
+        self.assertIn("worker detail line 79", output)
+
+    def test_single_agent_inline_context_long_final_output_remains_visible(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.single_agent_runner import _run_single_agent
+        from runtime.history.expand_store import ExpandBlockStore
+
+        workspace = TEMP_ROOT / f"single_agent_inline_expand_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        class FakeFactory:
+            async def create_task_agent(self, task, execution_mode=""):
+                return f"agent:{task.id}"
+
+            def create_direct_answer_agent(self, model, instruction):
+                return f"direct:{model}"
+
+            def inline_direct_answer_instruction(self, task):
+                return "direct answer"
+
+        long_output = "\n".join(f"inline worker detail line {index}" for index in range(80))
+
+        class FakeResult:
+            final_output = long_output
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20, **kwargs):
+            return FakeResult()
+
+        class FakeFlywheel:
+            def record_pipeline_state(self, state):
+                pass
+
+        task = PlannedTask(
+            id="inspect_readme",
+            title="检查 README",
+            instruction="只读检查 README.md。",
+            skill_id="project_explorer",
+            model="model",
+            mcp=["project_filesystem_readonly"],
+        )
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="test",
+            refined_request="检查 README.md",
+            tasks=[task],
+        )
+        state = PipelineRunState.create("检查 README.md", plan, project_root=workspace)
+
+        with patch("runtime.execution.single_agent_runner._inline_project_file_context", return_value="### README.md\ncontent"):
+            output, audit = asyncio.run(
+                _run_single_agent(
+                    "检查 README.md",
+                    plan,
+                    workspace,
+                    FakeFactory(),
+                    hooks=None,
+                    run_agent=fake_run_agent,
+                    run_state=state,
+                    flywheel=FakeFlywheel(),
+                    execution_mode="full",
+                    show_plan=False,
+                    attempt=1,
+                )
+            )
+
+        blocks = ExpandBlockStore(workspace).list_blocks()
+
+        self.assertTrue(audit.passed)
+        self.assertEqual(len(blocks), 0)
+        self.assertNotIn("/expand", output)
+        self.assertIn("inline worker detail line 79", output)
+
+    def test_single_agent_inline_context_records_read_events_for_summary(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.single_agent_runner import _run_single_agent
+        from runtime.ui.progress import render_task_status_board
+
+        workspace = TEMP_ROOT / f"single_agent_inline_events_{uuid.uuid4().hex}"
+        (workspace / "runtime").mkdir(parents=True, exist_ok=True)
+        (workspace / "tests").mkdir(parents=True, exist_ok=True)
+        (workspace / "runtime" / "a.py").write_text("print('a')\n", encoding="utf-8")
+        (workspace / "runtime" / "b.py").write_text("print('b')\n", encoding="utf-8")
+        (workspace / "tests" / "test_a.py").write_text("def test_a(): pass\n", encoding="utf-8")
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        class FakeFactory:
+            async def create_task_agent(self, task, execution_mode=""):
+                return f"agent:{task.id}"
+
+            def create_direct_answer_agent(self, model, instruction):
+                return f"direct:{model}"
+
+            def inline_direct_answer_instruction(self, task):
+                return "direct answer"
+
+        class FakeResult:
+            final_output = "已完成只读检查。"
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20, **kwargs):
+            return FakeResult()
+
+        class FakeFlywheel:
+            def record_pipeline_state(self, state):
+                pass
+
+        task = PlannedTask(
+            id="inspect_dirs",
+            title="检查 runtime 和 tests",
+            instruction="只读分析 runtime 目录和 tests 目录。",
+            skill_id="project_explorer",
+            model="model",
+            mcp=["project_filesystem_readonly", "code_locator"],
+            read_set=["runtime", "tests"],
+        )
+        plan = PlannerResult(
+            route_type="single_agent",
+            reason="test",
+            refined_request="检查 runtime 和 tests 目录",
+            tasks=[task],
+        )
+        state = PipelineRunState.create("检查 runtime 和 tests 目录", plan, project_root=workspace)
+
+        asyncio.run(
+            _run_single_agent(
+                "检查 runtime 和 tests 目录",
+                plan,
+                workspace,
+                FakeFactory(),
+                hooks=None,
+                run_agent=fake_run_agent,
+                run_state=state,
+                flywheel=FakeFlywheel(),
+                execution_mode="full",
+                show_plan=False,
+                attempt=1,
+            )
+        )
+
+        tool_events = [event for event in state.event_bus.snapshot() if event.event_type == "ToolInvoked"]
+        rendered = render_task_status_board(state, mode="full", attempt=1, include_events=True)
+
+        self.assertGreaterEqual(len(tool_events), 3)
+        self.assertTrue(all(event.task_id == "inspect_dirs" for event in tool_events))
+        self.assertIn("工具摘要", rendered)
+        self.assertIn("project_filesystem_readonly.read_file", rendered)
+        self.assertIn("runtime/a.py", rendered)
+
+    def test_single_agent_final_markdown_over_visible_threshold_remains_visible(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.single_agent_runner import _run_single_agent
+        from runtime.history.expand_store import ExpandBlockStore
+
+        workspace = TEMP_ROOT / f"single_agent_visible_expand_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        class FakeFactory:
+            async def create_task_agent(self, task, execution_mode=""):
+                return f"agent:{task.id}"
+
+            def create_direct_answer_agent(self, model, instruction):
+                return f"direct:{model}"
+
+        class FakeResult:
+            final_output = "\n".join(f"- visible markdown line {index}" for index in range(30))
+
+        run_agent_kwargs_seen = {}
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20, **kwargs):
+            run_agent_kwargs_seen.update(kwargs)
+            return FakeResult()
+
+        class FakeFlywheel:
+            def record_pipeline_state(self, state):
+                pass
+
+        task = PlannedTask(
+            id="inspect_dirs",
+            title="检查 runtime 和 tests",
+            instruction="只读检查目录。",
+            skill_id="project_explorer",
+            model="model",
+            mcp=["project_filesystem_readonly", "code_locator"],
+        )
+        plan = PlannerResult(route_type="single_agent", reason="test", refined_request="检查目录", tasks=[task])
+        state = PipelineRunState.create("检查目录", plan, project_root=workspace)
+
+        output, audit = asyncio.run(
+            _run_single_agent(
+                "检查目录",
+                plan,
+                workspace,
+                FakeFactory(),
+                hooks=None,
+                run_agent=fake_run_agent,
+                run_state=state,
+                flywheel=FakeFlywheel(),
+                execution_mode="full",
+                show_plan=False,
+                attempt=1,
+            )
+        )
+
+        blocks = ExpandBlockStore(workspace).list_blocks()
+
+        self.assertTrue(audit.passed)
+        self.assertNotIn("stream_output", run_agent_kwargs_seen)
+        self.assertEqual(len(blocks), 0)
+        self.assertNotIn("/expand", output)
+        self.assertIn("visible markdown line 29", output)
+
+    def test_full_single_agent_final_prose_over_char_threshold_remains_visible(self):
+        from planning.planner_schema import PlannedTask, PlannerResult
+        from runtime.execution.pipeline import PipelineRunState
+        from runtime.execution.single_agent_runner import _run_single_agent
+        from runtime.history.expand_store import ExpandBlockStore
+
+        workspace = TEMP_ROOT / f"single_agent_prose_expand_{uuid.uuid4().hex}"
+        workspace.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: _safe_rmtree(workspace))
+
+        class FakeFactory:
+            async def create_task_agent(self, task, execution_mode=""):
+                return f"agent:{task.id}"
+
+            def create_direct_answer_agent(self, model, instruction):
+                return f"direct:{model}"
+
+        class FakeResult:
+            final_output = "\n".join(
+                [
+                    "工具执行摘要：本轮仅使用只读工具检查 runtime 和 tests 目录。",
+                    "runtime 目录包含执行、审批、事件、配置、历史和 UI 等运行时模块。" * 12,
+                    "tests 目录集中放置回归测试，覆盖只读文件、代码定位、git、workspace edit 和 pipeline。" * 12,
+                    "本轮没有修改文件，也没有执行写入类工具。",
+                ]
+            )
+
+        async def fake_run_agent(agent, prompt, hooks, max_turns=20, **kwargs):
+            return FakeResult()
+
+        class FakeFlywheel:
+            def record_pipeline_state(self, state):
+                pass
+
+        task = PlannedTask(
+            id="inspect_dirs",
+            title="检查 runtime 和 tests",
+            instruction="只读检查目录。",
+            skill_id="project_explorer",
+            model="model",
+            mcp=["project_filesystem_readonly", "code_locator"],
+        )
+        plan = PlannerResult(route_type="single_agent", reason="test", refined_request="检查目录", tasks=[task])
+        state = PipelineRunState.create("检查目录", plan, project_root=workspace)
+
+        output, audit = asyncio.run(
+            _run_single_agent(
+                "检查目录",
+                plan,
+                workspace,
+                FakeFactory(),
+                hooks=None,
+                run_agent=fake_run_agent,
+                run_state=state,
+                flywheel=FakeFlywheel(),
+                execution_mode="full",
+                show_plan=False,
+                attempt=1,
+            )
+        )
+
+        blocks = ExpandBlockStore(workspace).list_blocks()
+
+        self.assertTrue(audit.passed)
+        self.assertEqual(len(blocks), 0)
+        self.assertNotIn("/expand", output)
+        self.assertGreaterEqual(output.count("workspace edit"), 3)
+        self.assertIn("pipeline", output)
 
 
 if __name__ == "__main__":

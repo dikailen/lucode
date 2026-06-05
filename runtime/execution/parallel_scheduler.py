@@ -1,4 +1,5 @@
 from runtime.config.execution_mode import normalize_execution_mode
+from runtime.execution.supervisor_scheduler import supervisor_execution_batches_for_full
 
 
 def _can_run_group_in_parallel(tasks: list) -> bool:
@@ -22,7 +23,7 @@ def _format_parallel_batch_audit(group_id: int, batch: list) -> str:
 def _execution_batches_for_mode(tasks: list, execution_mode: str) -> list[list]:
     mode = normalize_execution_mode(execution_mode)
     if mode == "full":
-        return _execution_batches_for_group(tasks)
+        return supervisor_execution_batches_for_full(tasks)
     return [[task] for task in tasks]
 
 

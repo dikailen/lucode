@@ -12,6 +12,7 @@ from runtime.agent.approval import run_with_approval
 from runtime.config.settings import RuntimeSettings
 from runtime.kernel.session import create_token_logger_hooks
 from runtime.kernel.strategies import ExecutionContext, create_execution_strategy
+from runtime.ui.output_controller import OutputController
 from runtime.ui.output_visibility import should_suppress_final_output
 
 
@@ -56,6 +57,7 @@ class KernelFacade:
         hooks=None,
         routing_input: str | None = None,
         verbose_runtime: bool = False,
+        output_controller=None,
     ) -> KernelResponse:
         user_input = str(prompt or "").strip()
         if not user_input:
@@ -71,17 +73,21 @@ class KernelFacade:
         )
         hooks = hooks or create_token_logger_hooks()
         model_registry = model_registry or ModelRegistry()
+        output_controller = output_controller or OutputController(mode=settings.execution_mode)
+        if hasattr(output_controller, "configure"):
+            output_controller.configure(mode=settings.execution_mode)
         quarantine_dir = request.workspace_root / ".agent_quarantine"
         stopped = False
 
         async with MCPServerManager(request.workspace_root, quarantine_dir, verbose=verbose_runtime) as mcp_manager:
-            run_agent = lambda agent, turn_input, turn_hooks, max_turns=20, approval_policy=None: run_with_approval(
+            run_agent = lambda agent, turn_input, turn_hooks, max_turns=20, approval_policy=None, stream_output=None: run_with_approval(
                 agent,
                 turn_input,
                 turn_hooks,
                 session=approval_session,
                 max_turns=max_turns,
                 approval_policy=approval_policy,
+                stream_output=stream_output,
             )
             strategy = create_execution_strategy(
                 routing_input=request.routing_input or request.user_input,
@@ -94,11 +100,14 @@ class KernelFacade:
                 hooks=hooks,
                 run_agent=run_agent,
                 settings=settings,
+                output_controller=output_controller,
             )
             timeout_seconds = _turn_timeout_seconds()
             try:
                 output = await _execute_with_turn_guard(strategy, context, timeout_seconds=timeout_seconds)
             except asyncio.TimeoutError:
+                if hasattr(output_controller, "enter_failed"):
+                    output_controller.enter_failed("turn timeout")
                 output = _format_turn_timeout_message(timeout_seconds)
                 stopped = True
             started_mcp_ids = list(mcp_manager.started_ids)

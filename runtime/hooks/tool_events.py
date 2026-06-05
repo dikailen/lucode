@@ -178,9 +178,11 @@ def _parse_arguments(arguments: str | None) -> Any:
 def _summarize_arguments(parsed: Any, raw_arguments: str | None) -> dict[str, Any]:
     if isinstance(parsed, dict):
         summary: dict[str, Any] = {"keys": sorted(str(key) for key in parsed.keys())}
-        for key in ("path", "target", "file_path", "command", "message", "reason"):
+        for key in ("path", "target", "target_path", "file_path", "command", "message", "reason"):
             if key in parsed:
                 summary[key] = _redact_text(_truncate(parsed.get(key)))
+        if "patch" in parsed:
+            summary["patch_paths"] = _patch_paths(str(parsed.get("patch") or ""))
         for key in ("content", "patch", "old_text", "new_text"):
             if key in parsed:
                 summary[f"{key}_length"] = len(str(parsed.get(key) or ""))
@@ -239,6 +241,33 @@ def _redact_text(value: Any) -> str:
             else:
                 start = text.find(prefix, end)
     return text
+
+
+def _patch_paths(patch: str) -> list[str]:
+    paths: list[str] = []
+    for line in str(patch or "").splitlines():
+        if not (line.startswith("+++ ") or line.startswith("--- ")):
+            continue
+        raw = line[4:].strip()
+        if raw == "/dev/null":
+            continue
+        if raw.startswith(("a/", "b/")):
+            raw = raw[2:]
+        clean = _normalize_path(raw)
+        if clean and clean not in paths:
+            paths.append(clean)
+    return paths
+
+
+def _normalize_path(value: Any) -> str:
+    clean = str(value or "").strip().strip("`'\"()[]{}<>")
+    if not clean or "://" in clean:
+        return ""
+    clean = clean.replace("\\", "/").lstrip("./")
+    parts = [part for part in clean.split("/") if part and part != "."]
+    if any(part == ".." for part in parts):
+        return ""
+    return "/".join(parts)
 
 
 def _redact_payload(value: Any) -> Any:

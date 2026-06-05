@@ -19,15 +19,18 @@ from runtime.execution.progress import _print_progress_snapshot
 from runtime.execution.task_runner import (
     _friendly_task_error,
     _max_turns_for_task,
-    _readonly_fast_path_output,
+    _readonly_fast_path_result,
     _record_declared_read_set_context,
     _run_agent_kwargs,
     _task_prompt,
     _task_failure_output,
+    _task_scoped_hooks,
+    _task_status_label,
     _with_verification_report,
 )
 from runtime.memory.flywheel import FlywheelStore
 from runtime.safety.auditor import audit_execution, format_final_report
+from runtime.ui.live_status import dynamic_status
 
 
 async def _run_single_agent(
@@ -79,9 +82,10 @@ async def _run_single_agent(
         audit = audit_execution(plan, run_state, output)
         return format_final_report(output, audit), audit
 
-    fast_path_output = _readonly_fast_path_output(project_root, task, run_context=getattr(run_state, "run_context", None))
-    if fast_path_output is not None:
-        output = _with_verification_report(project_root, task, fast_path_output, run_state)
+    fast_path = _readonly_fast_path_result(project_root, task, run_context=getattr(run_state, "run_context", None))
+    if fast_path is not None:
+        output = _with_verification_report(project_root, task, fast_path.output, run_state)
+        run_state.record_fast_path_used(task, tool=fast_path.tool, action=fast_path.action)
         run_state.record_task_result(task, output)
         if show_plan:
             _print_progress_snapshot(run_state, mode=execution_mode, attempt=attempt, active="已完成")
@@ -90,12 +94,15 @@ async def _run_single_agent(
         return format_final_report(output, audit), audit
 
     workspace_context = _latest_workspace_context(project_root, task)
+    run_context = getattr(run_state, "run_context", None)
+    inline_snapshot_ids_before = _file_snapshot_ids(run_context)
     inline_context = _inline_project_file_context(
         project_root,
         task,
         refined_request,
-        run_context=getattr(run_state, "run_context", None),
+        run_context=run_context,
     )
+    _emit_new_inline_read_events(run_state, task, inline_snapshot_ids_before)
     shared_context = _single_shared_context(run_state, task)
     if inline_context:
         agent = factory.create_direct_answer_agent(
@@ -103,17 +110,29 @@ async def _run_single_agent(
             factory.inline_direct_answer_instruction(task),
         )
         try:
-            run_agent_kwargs = _run_agent_kwargs(run_agent, max_turns=4, approval_policy=approval_policy)
-            result = await run_agent(
-                agent,
-                _task_prompt(
-                    refined_request,
-                    task.instruction,
-                    workspace_context=f"{shared_context}\n\n{workspace_context}\n\n{inline_context}",
-                ),
-                hooks,
-                **run_agent_kwargs,
+            run_agent_kwargs = _run_agent_kwargs(
+                run_agent,
+                max_turns=4,
+                approval_policy=approval_policy,
+                stream_output=False if show_plan else None,
             )
+            scoped_hooks = _task_scoped_hooks(hooks, run_state, task)
+            with dynamic_status(
+                _task_status_label(task),
+                mode=execution_mode,
+                stage="worker",
+                enabled=show_plan,
+            ):
+                result = await run_agent(
+                    agent,
+                    _task_prompt(
+                        refined_request,
+                        task.instruction,
+                        workspace_context=f"{shared_context}\n\n{workspace_context}\n\n{inline_context}",
+                    ),
+                    scoped_hooks,
+                    **run_agent_kwargs,
+                )
         except Exception as exc:
             message = _friendly_task_error(exc)
             run_state.record_task_error(task, message)
@@ -146,18 +165,26 @@ async def _run_single_agent(
             run_agent,
             max_turns=_max_turns_for_task(task),
             approval_policy=approval_policy,
+            stream_output=False if show_plan else None,
         )
-        result = await run_agent(
-            agent,
-            _task_prompt(
-                refined_request,
-                task.instruction,
-                workspace_context=workspace_context,
-                shared_context=shared_context,
-            ),
-            hooks,
-            **run_agent_kwargs,
-        )
+        scoped_hooks = _task_scoped_hooks(hooks, run_state, task)
+        with dynamic_status(
+            _task_status_label(task),
+            mode=execution_mode,
+            stage="worker",
+            enabled=show_plan,
+        ):
+            result = await run_agent(
+                agent,
+                _task_prompt(
+                    refined_request,
+                    task.instruction,
+                    workspace_context=workspace_context,
+                    shared_context=shared_context,
+                ),
+                scoped_hooks,
+                **run_agent_kwargs,
+            )
     except Exception as exc:
         message = _friendly_task_error(exc)
         run_state.record_task_error(task, message)
@@ -191,6 +218,7 @@ def _single_agent_failure_result(plan, run_state: PipelineRunState, task, messag
     return format_final_report(output, audit), audit
 
 
+
 def _record_single_fast_path_context(run_state, tool: str, action: str, output: str, task) -> None:
     run_context = getattr(run_state, "run_context", None)
     if run_context is None or not hasattr(run_context, "record_tool_output"):
@@ -204,6 +232,49 @@ def _record_single_fast_path_context(run_state, tool: str, action: str, output: 
         )
     except Exception:
         return
+
+
+def _file_snapshot_ids(run_context) -> set[str]:
+    snapshots = getattr(run_context, "file_snapshots", None)
+    if not isinstance(snapshots, dict):
+        return set()
+    return set(str(key) for key in snapshots.keys())
+
+
+def _emit_new_inline_read_events(run_state: PipelineRunState, task, before_ids: set[str]) -> None:
+    run_context = getattr(run_state, "run_context", None)
+    snapshots = getattr(run_context, "file_snapshots", None)
+    event_bus = getattr(run_state, "event_bus", None)
+    if not isinstance(snapshots, dict) or event_bus is None or not hasattr(event_bus, "emit"):
+        return
+    for artifact_id, artifact in snapshots.items():
+        if str(artifact_id) in before_ids:
+            continue
+        path = str(getattr(artifact, "path", "") or "").replace("\\", "/")
+        if not path:
+            continue
+        try:
+            event_bus.emit(
+                "ToolInvoked",
+                f"inline readonly read: {path}",
+                agent="runtime",
+                task_id=str(getattr(task, "id", "") or ""),
+                status="completed",
+                payload={
+                    "tool": "project_filesystem_readonly.read_file",
+                    "tool_name": "project_filesystem_readonly.read_file",
+                    "action": "read_file",
+                    "outcome": "completed",
+                    "reason": "inline_context",
+                    "arguments_summary": {
+                        "path": path,
+                        "sha256": str(getattr(artifact, "sha256", "") or "")[:12],
+                    },
+                    "files_touched": [{"path": path, "access": "read"}],
+                },
+            )
+        except Exception:
+            continue
 
 
 def _single_shared_context(run_state, task) -> str:

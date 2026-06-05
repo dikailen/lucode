@@ -13,19 +13,8 @@ from runtime.config.skill_frontmatter import (
     frontmatter_text,
     read_skill_frontmatter,
 )
+from runtime.config.skill_policy import PROTECTED_SYSTEM_SKILLS, RULE_ONLY_SKILLS
 from skills.registry import SKILLS
-
-
-PROTECTED_SYSTEM_SKILLS = {
-    "lucode_native_capability",
-    "task_router",
-    "query_refiner",
-    "orchestrator_planner",
-    "final_synthesizer",
-}
-RULE_ONLY_SKILLS = {
-    "cli_command_safety",
-}
 
 
 @dataclass(frozen=True)

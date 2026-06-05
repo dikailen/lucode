@@ -28,6 +28,7 @@ class CommandSpec:
 
 
 COMMAND_SPECS: tuple[CommandSpec, ...] = (
+    CommandSpec("/expand", "查看本轮被折叠的长工具输出、diff 或 worker 细节", "会话", argument_hint="[id|clear]"),
     CommandSpec("/skill", "查看某个 Skill 的来源、触发词和建议工具", "扩展", argument_hint="<name>"),
     CommandSpec("/help", "查看命令菜单和常用操作", "基础", aliases=("/", "/?")),
     CommandSpec("/status", "查看当前运行状态、MCP、Git 和回滚点", "基础"),
@@ -36,6 +37,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("/privacy", "查看隐私模式", "配置"),
     CommandSpec("/mode", "查看或切换 solo / serial / full", "配置", argument_hint="<solo|serial|full>", writable=True),
     CommandSpec("/refiner", "开启或关闭前置优化副脑", "配置", argument_hint="<on|off>", writable=True),
+    CommandSpec("/theme", "查看、预览或切换终端 UI 主题", "配置", argument_hint="[list|preview <name>|<name>]", writable=True),
     CommandSpec("/model", "查看详细模型优先级和能力状态", "模型"),
     CommandSpec("/model available", "查看当前可运行模型", "模型", aliases=("/models available",)),
     CommandSpec("/models", "查看多脑模型调音台和 Provider 模型", "模型"),

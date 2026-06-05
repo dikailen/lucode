@@ -106,6 +106,19 @@ def _can_fast_path_config_summary(task) -> bool:
     return any(marker in text for marker in ["config", "配置", "读取", "read", "summary", "summarize", "结构"])
 
 
+def _can_fast_path_directory_summary(project_root: Path, task) -> bool:
+    if getattr(task, "write_intent", None):
+        return False
+    mcp = set(getattr(task, "mcp", []) or [])
+    if "project_filesystem_readonly" not in mcp:
+        return False
+    directories = _directory_summary_paths(project_root, task)
+    if not directories:
+        return False
+    text = _task_text(task)
+    return any(marker in text for marker in ["目录", "directory", "folder", "结构", "摘要", "summary", "检查"])
+
+
 def _task_text(task) -> str:
     read_set = " ".join(str(item) for item in (getattr(task, "read_set", []) or []))
     return f"{task.title}\n{task.instruction}\n{read_set}".lower()
@@ -160,6 +173,30 @@ def _run_config_summary_fast_path(project_root: Path, task) -> str:
     return output
 
 
+def _run_directory_summary_fast_path(project_root: Path, task) -> str:
+    directories = _directory_summary_paths(project_root, task)
+    sections = ["目录结构摘要（只读 fast path）"]
+    for directory in directories:
+        sections.extend(["", _summarize_directory(project_root, directory)])
+    if not directories:
+        sections.append("- 未找到可读取的目录。")
+
+    output = "\n".join(sections)
+    _log_runtime_fast_path(
+        project_root,
+        tool="project_filesystem_readonly",
+        action="directory_summary",
+        task=task,
+        params={
+            "task_id": getattr(task, "id", ""),
+            "directories": [_relative_path(project_root, path) for path in directories],
+        },
+        status="success",
+        result_summary=output,
+    )
+    return output
+
+
 def _run_mcp_catalog_count_fast_path(project_root: Path, task) -> str:
     catalog_path = project_root / "mcp_catalog.json"
     if not catalog_path.exists():
@@ -180,6 +217,121 @@ def _run_mcp_catalog_count_fast_path(project_root: Path, task) -> str:
         result_summary=output,
     )
     return output
+
+
+def _directory_summary_paths(project_root: Path, task) -> list[Path]:
+    paths: list[Path] = []
+    for raw in list(getattr(task, "read_set", []) or []):
+        path = _resolve_readonly_directory(project_root, str(raw))
+        if path and path not in paths:
+            paths.append(path)
+    if paths:
+        return paths[:4]
+
+    text = _task_text(task)
+    candidates = []
+    for match in re_find_directory_like_paths(text):
+        path = _resolve_readonly_directory(project_root, match)
+        if path and path not in candidates:
+            candidates.append(path)
+    return candidates[:4]
+
+
+def re_find_directory_like_paths(text: str) -> list[str]:
+    import re
+
+    values = []
+    for match in re.findall(r"[\w.-]+(?:/[\w.-]+)+|[\w.-]+", str(text or "")):
+        if match in {"and", "or", "summary", "directory", "folder"}:
+            continue
+        values.append(match)
+    return values
+
+
+def _resolve_readonly_directory(project_root: Path, raw_path: str) -> Path | None:
+    value = raw_path.strip().strip("`\"'“”‘’（）()[]<>，,。；;：:")
+    if not value or "://" in value:
+        return None
+    value = value.replace("\\", "/")
+    while value.startswith("./"):
+        value = value[2:]
+    if not value or any(part == ".." for part in value.split("/")):
+        return None
+    root = project_root.resolve()
+    path = (root / value).resolve()
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None
+    if any(part.lower() in {".git", ".venv", "__pycache__", "node_modules", ".agent_quarantine"} for part in relative.parts):
+        return None
+    return path if path.is_dir() else None
+
+
+def _summarize_directory(project_root: Path, directory: Path) -> str:
+    relative = _relative_path(project_root, directory)
+    children = []
+    try:
+        for child in sorted(directory.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+            if _skip_directory_summary_child(child):
+                continue
+            children.append(child)
+    except OSError as exc:
+        return f"{relative}\n- 读取失败: {exc}"
+
+    files = [child for child in children if child.is_file()]
+    dirs = [child for child in children if child.is_dir()]
+    lines = [
+        relative,
+        f"- 子目录: {len(dirs)} 个；文件: {len(files)} 个",
+    ]
+    if dirs:
+        lines.append("- 子目录列表: " + ", ".join(child.name for child in dirs[:12]))
+    if files:
+        lines.append("- 主要文件:")
+        for file_path in files[:16]:
+            lines.append(f"  - {_relative_path(project_root, file_path)}：{_summarize_source_file(file_path)}")
+        if len(files) > 16:
+            lines.append(f"  - 其余 {len(files) - 16} 个文件已省略。")
+    return "\n".join(lines)
+
+
+def _skip_directory_summary_child(path: Path) -> bool:
+    name = path.name.lower()
+    return name in {".git", ".venv", "__pycache__", "node_modules", ".pytest_cache"} or any(
+        marker in name for marker in ["secret", "token", "apikey", "api_key"]
+    )
+
+
+def _summarize_source_file(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"读取失败: {exc}"
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#") or stripped.startswith("//"):
+            return stripped.strip("#/ ").strip()[:120] or "源码/文本文件"
+        if stripped.startswith('"""') or stripped.startswith("'''"):
+            clean = stripped.strip("\"' ").strip()
+            if clean:
+                return clean[:120]
+            continue
+        if stripped.startswith(("class ", "def ", "async def ")):
+            return f"定义 {stripped[:100]}"
+        if stripped.startswith("from ") or stripped.startswith("import "):
+            return "Python 模块，包含导入和运行逻辑"
+        return stripped[:120]
+    return "空文件或无可摘要内容"
+
+
+def _relative_path(project_root: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        return path.name
 
 
 def _run_readme_mcp_count_fast_path(project_root: Path, task) -> str:

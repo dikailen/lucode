@@ -44,6 +44,7 @@ from runtime.config.extensions import (
 from runtime.safety.permissions import render_permission_policy
 from runtime.safety.privacy import PrivacyPolicy
 from runtime.hooks import render_tool_event_audit
+from runtime.history.expand_store import store_for_workspace
 from runtime.config.settings import RuntimeSettings
 from runtime.commands.registry import known_command_prefixes
 from runtime.tools.registry import render_tool_registry
@@ -68,6 +69,8 @@ def render_readonly_command(command: str, settings: RuntimeSettings, workspace_c
         return render_command_palette(normalized.split(maxsplit=1)[1], workspace_context=workspace_context)
     if lower in {"/api", "/refiner"}:
         return render_command_palette(normalized, workspace_context=workspace_context)
+    if lower == "/expand" or lower.startswith("/expand "):
+        return _render_expand_command(normalized, workspace_context)
     if lower.startswith("/") and len(lower) > 1 and not lower.startswith(("/plan", "/diff", "/rollback", "/new", "/stop", "/exit")):
         menu = render_command_palette(normalized, workspace_context=workspace_context)
         if "没有匹配命令" not in menu and lower.split()[0] not in _KNOWN_COMMAND_PREFIXES:
@@ -435,8 +438,8 @@ def render_diff_command(project_root: Path, max_chars: int = 4000) -> str:
     lines = ["Diff 摘要"]
     if stat_result.returncode != 0:
         return "\n".join(lines + [f"git diff 不可用：{_stderr_or_stdout(stat_result)}"])
-    stat = stat_result.stdout.strip()
-    names = [line.strip() for line in name_result.stdout.splitlines() if line.strip()] if name_result.returncode == 0 else []
+    stat = _redact_cli_output(stat_result.stdout.strip())
+    names = [_redact_cli_output(line.strip()) for line in name_result.stdout.splitlines() if line.strip()] if name_result.returncode == 0 else []
     if not stat and not names:
         lines.append("当前没有未暂存 diff。")
         return "\n".join(lines)
@@ -450,12 +453,24 @@ def render_diff_command(project_root: Path, max_chars: int = 4000) -> str:
         lines.append("")
         lines.append("统计：")
         lines.append(stat)
-    diff_text = diff_result.stdout if diff_result.returncode == 0 else ""
+    diff_text = _redact_cli_output(diff_result.stdout) if diff_result.returncode == 0 else ""
     if diff_text:
         lines.append("")
         lines.append("预览：")
         lines.append(_truncate(diff_text, limit))
-    return "\n".join(lines)
+    return _redact_cli_output("\n".join(lines))
+
+
+def _render_expand_command(command: str, workspace_context=None) -> str:
+    store = store_for_workspace(workspace_context)
+    parts = str(command or "").split(maxsplit=1)
+    selector = parts[1].strip() if len(parts) > 1 else ""
+    if not selector:
+        return store.render_list()
+    if selector.lower() in {"clear", "clean", "reset"}:
+        count = store.clear()
+        return f"已清理当前会话展开块：{count} 个"
+    return store.render_detail(selector)
 
 
 def _render_config(settings: RuntimeSettings) -> str:
@@ -808,7 +823,7 @@ def _render_mode(settings: RuntimeSettings) -> str:
             "serial：显式多 Agent 串行工程模式，由主脑规划，多专家按顺序处理。",
             "full：显式高级并行多 Agent，只有通过安全门的批次才允许并行。",
             "",
-            "说明：输入 /mode solo、/mode serial 或 /mode full 可立即切换并写入 .env。",
+            "说明：输入 /mode solo、/mode serial 或 /mode full 可立即切换；当前仍写入 .env 兼容设置。",
         ],
     )
 
@@ -905,8 +920,8 @@ def _render_readonly_switch_hint(command_name: str, value: str) -> str:
     return "\n".join(
         [
             f"{command_name} 切换请求：{value}",
-            "当前版本不会直接改写 .env，这里只做只读提示。",
-            "如果你要真正切换，请手动修改 .env 后重新启动程序。",
+            "当前这里只做只读提示，不会直接改写配置。",
+            "如果你要真正切换，请执行对应写入命令；Provider 优先写入 .lucode/config.toml，密钥写入用户级 auth.json。",
         ]
     )
 
@@ -984,6 +999,18 @@ def _truncate(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[:limit] + f"\n...[已截断 {len(value) - limit} 字符]"
+
+
+def _redact_cli_output(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"sk-[A-Za-z0-9._-]+", "[REDACTED_SECRET]", text)
+    text = re.sub(r"sk_[A-Za-z0-9._-]+", "[REDACTED_SECRET]", text)
+    text = re.sub(
+        r"(?i)(api[_-]?key|token|secret|authorization|password)(\s*[:=]\s*)([^\s,\]\}\"']+)",
+        r"\1\2[REDACTED_SECRET]",
+        text,
+    )
+    return text
 
 
 def _parse_model_select_value(value: str) -> tuple[str, list[str]]:
@@ -1319,7 +1346,7 @@ def _render_model_priority_block(model_ids: list[str], model_infos: dict[str, di
                 f"{_format_privacy_level(info.get('privacy_level'))}"
             )
             visible_index += 1
-    return lines or ["- 当前优先级里的模型都没有在 .env 注册"]
+    return lines or ["- 当前优先级里的模型都没有在有效配置中注册"]
 
 
 def _render_priority_candidate_block(models: list[dict], settings: RuntimeSettings) -> list[str]:
@@ -1379,7 +1406,7 @@ def _render_unavailable_model_block(models: list[dict], settings: RuntimeSetting
 
 def _unavailable_reason(model_info: dict, settings: RuntimeSettings) -> str:
     if not model_info.get("configured"):
-        return "补全 .env 中的地址、模型名和 API key 后再使用"
+        return "补全 Provider 地址、模型名和 API key 后再使用；优先用 /connect 写入 .lucode/config.toml 和用户级 auth.json"
     if not PrivacyPolicy(settings.privacy_mode).model_allowed(model_info):
         return "当前隐私模式不允许使用该模型"
     if _availability_blocks_runtime(model_info):

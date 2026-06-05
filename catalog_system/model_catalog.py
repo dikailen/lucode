@@ -3,7 +3,12 @@ import os
 import re
 from pathlib import Path
 
-from dotenv import dotenv_values, load_dotenv
+from dotenv import dotenv_values
+from catalog_system.model_sources_env import (
+    discover_env_model_definitions,
+    env_model_signature,
+    resolve_env_value,
+)
 from catalog_system.model_probe import cached_probe_for_model, model_fingerprint
 from runtime.agents.model_capability import strategy_for_model_info
 from runtime.providers.registry import ProviderRegistry, normalize_sdk_type
@@ -17,7 +22,6 @@ from runtime.config.model_config import configured_provider_model_definitions, l
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
 _MODEL_CATALOG_CACHE: dict[str, object] = {"signature": None, "catalog": None}
 
 
@@ -144,7 +148,7 @@ def _model_groups_from_env() -> set[str]:
     return groups
 
 
-def discover_model_definitions() -> list[dict]:
+def _legacy_discover_env_model_definitions() -> list[dict]:
     """Discover known models plus generic MODEL_<ID>_* entries from .env."""
 
     definitions = []
@@ -347,8 +351,24 @@ def _supports_tools_from_env_or_guess(value: str | None, model_name: str, backen
     return True
 
 
+def discover_model_definitions() -> list[dict]:
+    """Discover Lucode config models first, then legacy .env compatibility models."""
+
+    definitions = []
+    known_ids = set()
+    for item in configured_provider_model_definitions():
+        if item["id"] not in known_ids:
+            definitions.append(item)
+            known_ids.add(item["id"])
+    for item in discover_env_model_definitions(BASE_DIR):
+        if item["id"] not in known_ids:
+            definitions.append(item)
+            known_ids.add(item["id"])
+    return definitions
+
+
 def load_model_catalog(force_reload: bool = False) -> dict:
-    """Build a model catalog from models actually configured in .env/environment."""
+    """Build a model catalog from Lucode config plus legacy .env compatibility."""
 
     signature = _model_catalog_signature()
     if not force_reload and _MODEL_CATALOG_CACHE.get("signature") == signature:
@@ -372,7 +392,7 @@ def _build_model_catalog() -> dict:
     for item in discover_model_definitions():
         api_key = item.get("api_key_value") or _env_first(item.get("api_key_env"), item.get("shared_api_key_env"))
         base_url = item.get("base_url_value") or _env_first(item.get("base_url_env"), item.get("shared_base_url_env"))
-        model_name = item.get("model_name_value") or os.getenv(item.get("model_env") or "") or item.get("default_model_name")
+        model_name = item.get("model_name_value") or _env_first(item.get("model_env")) or item.get("default_model_name")
         backend_type = infer_backend_type(
             base_url or "",
             item.get("provider") or "",
@@ -380,13 +400,7 @@ def _build_model_catalog() -> dict:
         )
         is_local = is_local_backend(backend_type)
         configured = bool(base_url and model_name and (api_key or is_local))
-        supports_tools = _supports_tools_from_env_or_guess(
-            os.getenv(item.get("supports_tools_env", "")),
-            model_name or "",
-            backend_type,
-        )
-        if "supports_tools" in item:
-            supports_tools = bool(item.get("supports_tools"))
+        supports_tools = bool(item.get("supports_tools", True))
         strategy = strategy_for_model_info(
             {
                 "id": item["id"],
@@ -452,26 +466,11 @@ def _build_model_catalog() -> dict:
 
 
 def _model_catalog_signature() -> tuple:
-    env_file = BASE_DIR / ".env"
     probe_file = BASE_DIR / ".agent_cache" / "model_capabilities.json"
-    env_values = dotenv_values(env_file)
-    relevant_keys = {
-        key
-        for key in set(os.environ) | set(env_values)
-        if key
-        and (
-            key.startswith("MODEL_")
-            or key.startswith("DEEPSEEK")
-            or key.startswith("MIMO")
-            or key.startswith("AGENTS_")
-        )
-    }
-    env_snapshot = tuple(sorted((key, os.environ.get(key, env_values.get(key, "") or "")) for key in relevant_keys))
     return (
-        _file_signature(env_file),
         _file_signature(probe_file),
         lucode_config_signature(),
-        env_snapshot,
+        env_model_signature(BASE_DIR),
     )
 
 
@@ -505,7 +504,7 @@ def compact_model_catalog_for_prompt() -> str:
 
 
 class ModelRegistry:
-    """Create model objects by id using the current .env configuration."""
+    """Create model objects by id using Lucode config plus legacy .env compatibility."""
 
     def __init__(self):
         self.definitions = self._load_definitions()
@@ -530,7 +529,7 @@ class ModelRegistry:
         item = self.definitions[model_id]
         api_key = item.get("api_key_value") or _env_first(item.get("api_key_env"), item.get("shared_api_key_env"))
         base_url = item.get("base_url_value") or _env_first(item.get("base_url_env"), item.get("shared_base_url_env"))
-        model_name = item.get("model_name_value") or os.getenv(item.get("model_env") or "") or item.get("default_model_name")
+        model_name = item.get("model_name_value") or _env_first(item.get("model_env")) or item.get("default_model_name")
         backend_type = infer_backend_type(
             base_url or "",
             item.get("provider") or "",
@@ -620,9 +619,4 @@ def _merge_probe(project_root: Path, model_info: dict) -> dict:
 
 
 def _env_first(*names: str | None) -> str:
-    for name in names:
-        if name:
-            value = os.getenv(name)
-            if value:
-                return value
-    return ""
+    return resolve_env_value(BASE_DIR, *names)

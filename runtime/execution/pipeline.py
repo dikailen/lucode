@@ -17,6 +17,7 @@ from runtime.safety.verification_commands import (
     extract_explicit_verification_commands,
     format_verification_command_lock,
 )
+from runtime.ui.output_controller import OutputController
 
 
 CODE_MARKERS = {
@@ -128,9 +129,20 @@ class PipelineRunState:
     errors: list[str] = field(default_factory=list)
     run_context: RunContextStore | None = None
     event_bus: ExecutionEventBus = field(default_factory=ExecutionEventBus)
+    output_controller: OutputController = field(default_factory=OutputController)
+    model_labels: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def create(cls, user_request: str, plan: PlannerResult, project_root: Path | None = None) -> "PipelineRunState":
+    def create(
+        cls,
+        user_request: str,
+        plan: PlannerResult,
+        project_root: Path | None = None,
+        mode: str = "",
+        output_controller: OutputController | None = None,
+    ) -> "PipelineRunState":
+        controller = output_controller or OutputController(mode=mode, route=plan.route_type)
+        controller.configure(mode=mode, route=plan.route_type)
         return cls(
             user_request=user_request,
             route_type=plan.route_type,
@@ -151,6 +163,7 @@ class PipelineRunState:
                 for task in plan.tasks
             ],
             run_context=RunContextStore(project_root) if project_root else None,
+            output_controller=controller,
         )
 
     def record_gate(self, decision: GateDecision) -> None:
@@ -163,6 +176,10 @@ class PipelineRunState:
         record = self._find_task(task.id)
         if record:
             record.status = "running"
+        self.output_controller.enter_running(
+            task_id=str(getattr(task, "id", "") or ""),
+            reason=str(getattr(task, "title", "") or ""),
+        )
         self.emit_event(
             "TaskStarted",
             str(getattr(task, "title", "") or getattr(task, "id", "") or "任务开始"),
@@ -176,6 +193,11 @@ class PipelineRunState:
             return
         record.status = "completed"
         record.output_preview = _preview(output)
+        if self._all_tasks_terminal():
+            if self.errors or any(str(getattr(item, "status", "")) == "failed" for item in self.tasks):
+                self.output_controller.enter_failed("task failed")
+            else:
+                self.output_controller.enter_completed("tasks completed")
         self.emit_event(
             "TaskCompleted",
             str(getattr(task, "title", "") or getattr(task, "id", "") or "任务完成"),
@@ -190,6 +212,7 @@ class PipelineRunState:
             record.status = "failed"
             record.error = message
         self.errors.append(f"{task.id}: {message}")
+        self.output_controller.enter_failed(message)
         self.emit_event(
             "TaskFailed",
             message,
@@ -223,6 +246,7 @@ class PipelineRunState:
             "errors": list(self.errors),
             "run_context": self.run_context.render_for_task() if self.run_context else "",
             "events": [event.to_dict() for event in self.event_bus.snapshot()],
+            "output": self.output_controller.snapshot().to_dict(),
         }
 
     def _find_task(self, task_id: str) -> TaskRunRecord | None:
@@ -230,6 +254,11 @@ class PipelineRunState:
             if record.id == task_id:
                 return record
         return None
+
+    def _all_tasks_terminal(self) -> bool:
+        if not self.tasks:
+            return False
+        return all(str(getattr(record, "status", "")) in {"completed", "failed"} for record in self.tasks)
 
     def emit_event(self, event_type: str, message: str = "", **kwargs: Any):
         try:
@@ -256,7 +285,8 @@ def apply_pipeline_gate(plan: PlannerResult, refined_request: str) -> GateDecisi
     code_tasks = [task for task in plan.tasks if _is_code_task(task)]
     is_code = bool(code_tasks) or _contains_any(text, CODE_MARKERS)
     code_text = "\n".join([refined_request, *(_task_text(task) for task in code_tasks)]).lower()
-    edit_intent = bool(code_tasks) and _contains_any(code_text, EDIT_MARKERS)
+    declared_write_intent = any(getattr(task, "write_intent", []) for task in code_tasks)
+    edit_intent = bool(code_tasks) and (_contains_any(code_text, EDIT_MARKERS) or declared_write_intent)
     test_intent = bool(code_tasks) and _contains_any(code_text, TEST_MARKERS)
     needs_code_pipeline = plan.route_type in {"single_agent", "multi_agent"} and is_code
     should_verify = needs_code_pipeline and (edit_intent or test_intent)

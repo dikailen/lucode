@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 from catalog_system.model_catalog import ModelRegistry
 from planning.plan_reviewer import format_plan_review, review_plan
@@ -60,7 +61,7 @@ from runtime.execution.parallel_scheduler import (
     _write_paths_conflict,
     _write_sets_conflict,
 )
-from runtime.execution.progress import _print_progress_snapshot
+from runtime.execution.progress import _print_progress_snapshot, _safe_print
 from runtime.execution.single_agent_runner import _run_single_agent
 from runtime.execution.task_runner import (
     _dependency_context_for_task,
@@ -76,6 +77,7 @@ from runtime.safety.privacy import PrivacyPolicy
 from runtime.safety.repair_loop import build_repair_request, should_retry
 from runtime.config.settings import RuntimeSettings
 from runtime.events import ExecutionEventBus
+from runtime.ui.plan_display import planning_status, render_compact_plan_summary
 
 
 class DynamicExecutionResult(str):
@@ -96,6 +98,8 @@ async def execute_dynamic_request(
     run_agent,
     show_plan: bool = False,
     settings: RuntimeSettings | None = None,
+    display_input: str | None = None,
+    output_controller=None,
 ) -> str:
     """Plan and execute a request using dynamic Agents."""
 
@@ -121,6 +125,8 @@ async def execute_dynamic_request(
             privacy_policy=privacy_policy,
             flywheel=flywheel,
             attempt=attempt,
+            display_input=display_input,
+            output_controller=output_controller,
         )
         last_output = output
         last_audit = audit
@@ -160,7 +166,10 @@ async def _execute_dynamic_attempt(
     privacy_policy: PrivacyPolicy,
     flywheel: FlywheelStore,
     attempt: int,
+    display_input: str | None = None,
+    output_controller=None,
 ) -> tuple[str, object | None]:
+    visible_input = str(display_input or raw_user_input or "").strip()
     refiner_model_id = (
         settings.select_model_id(model_registry, "query_refiner") if settings.query_refiner_enabled else None
     )
@@ -174,15 +183,15 @@ async def _execute_dynamic_attempt(
         agent="orchestrator",
         payload={"planner_model_id": planner_model_id},
     )
-
     try:
-        refined, plan = await preview_plan(
-            raw_user_input,
-            refiner_model=model_registry.get_model(refiner_model_id) if refiner_model_id else None,
-            planner_model=model_registry.get_model(planner_model_id),
-            hooks=hooks,
-            refiner_enabled=settings.query_refiner_enabled,
-        )
+        with planning_status(visible_input, mode=settings.execution_mode, enabled=show_plan):
+            refined, plan = await preview_plan(
+                raw_user_input,
+                refiner_model=model_registry.get_model(refiner_model_id) if refiner_model_id else None,
+                planner_model=model_registry.get_model(planner_model_id),
+                hooks=hooks,
+                refiner_enabled=settings.query_refiner_enabled,
+            )
     except Exception as exc:
         event_bus.emit(
             "PlanningFailed",
@@ -203,8 +212,19 @@ async def _execute_dynamic_attempt(
         mode=settings.execution_mode,
     )
     gate_decision = apply_pipeline_gate(plan, refined.refined_request)
-    run_state = PipelineRunState.create(refined.refined_request, plan, project_root=project_root)
+    run_state = PipelineRunState.create(
+        refined.refined_request,
+        plan,
+        project_root=project_root,
+        mode=settings.execution_mode,
+        output_controller=output_controller,
+    )
     run_state.event_bus = event_bus
+    run_state.model_labels = _model_label_map(
+        model_registry,
+        [planner_model_id, synthesizer_model_id, *(getattr(task, "model", "") for task in plan.tasks)],
+    )
+    run_state.output_controller.enter_planning("planning completed")
     run_state.emit_event(
         "ExecutionContractApplied",
         "执行契约已收口",
@@ -225,14 +245,30 @@ async def _execute_dynamic_attempt(
     validation = validate_plan(plan, privacy_policy=privacy_policy)
     review = review_plan(plan)
     if show_plan:
-        _print_progress_snapshot(run_state, mode=settings.execution_mode, attempt=attempt, active="规划完成")
         if attempt > 1:
             print(f"========== 第 {attempt} 轮重规划 ==========")
-        print(format_execution_plan(refined, plan, validation))
-        print(format_plan_review(review))
-        print(format_gate_decision(gate_decision))
+        detail_selector = _save_plan_detail(
+            project_root,
+            refined,
+            plan,
+            validation,
+            review,
+            gate_decision,
+        )
+        _safe_print(
+            render_compact_plan_summary(
+                refined,
+                plan,
+                validation,
+                review,
+                gate_decision,
+                mode=settings.execution_mode,
+                detail_selector=detail_selector,
+            )
+        )
 
     if not validation.valid:
+        run_state.output_controller.enter_failed("plan validation failed")
         return (
             _dynamic_result(
             "主脑规划未通过校验，已停止执行。\n\n"
@@ -244,6 +280,7 @@ async def _execute_dynamic_attempt(
         )
 
     if not review.approved:
+        run_state.output_controller.enter_failed("plan review failed")
         message = (
             "计划审查未通过，已停止执行，避免按不安全或不完整的计划修改项目。\n\n"
             f"{format_plan_review(review)}\n\n"
@@ -254,6 +291,7 @@ async def _execute_dynamic_attempt(
     factory = AgentFactory(model_registry, mcp_manager)
 
     if plan.route_type == "direct_answer":
+        run_state.output_controller.enter_running(reason="direct answer")
         direct_input = _direct_answer_input_with_inline_context(
             raw_user_input,
             refined.refined_request,
@@ -261,13 +299,24 @@ async def _execute_dynamic_attempt(
             planner_model_id,
             run_state,
         )
-        output = await _run_direct_answer(direct_input, plan, planner_model_id, factory, hooks, run_agent)
+        output = await _run_direct_answer(
+            direct_input,
+            plan,
+            planner_model_id,
+            factory,
+            hooks,
+            run_agent,
+            execution_mode=settings.execution_mode,
+        )
+        run_state.output_controller.enter_completed("direct answer completed")
         return _dynamic_result(output, run_state), None
 
     if plan.route_type == "clarify":
+        run_state.output_controller.enter_completed("clarification requested")
         return _dynamic_result(plan.clarifying_question or "这个问题还需要你补充一点信息。", run_state), None
 
     if plan.route_type == "single_agent":
+        run_state.output_controller.enter_running(reason="single agent")
         output, audit = await _run_single_agent(
             refined.refined_request,
             plan,
@@ -281,9 +330,14 @@ async def _execute_dynamic_attempt(
             show_plan=show_plan,
             attempt=attempt,
         )
+        if getattr(audit, "passed", True):
+            run_state.output_controller.enter_completed("single agent completed")
+        else:
+            run_state.output_controller.enter_failed("single agent audit failed")
         return _dynamic_result(output, run_state), audit
 
     if plan.route_type == "multi_agent":
+        run_state.output_controller.enter_running(reason="multi agent")
         try:
             output = await _run_multi_agent(
                 refined.refined_request,
@@ -302,8 +356,13 @@ async def _execute_dynamic_attempt(
         finally:
             _record_flywheel_safely(flywheel, run_state)
         audit = audit_execution(plan, run_state, output)
+        if getattr(audit, "passed", True):
+            run_state.output_controller.enter_completed("multi agent completed")
+        else:
+            run_state.output_controller.enter_failed("multi agent audit failed")
         return _dynamic_result(format_final_report(output, audit), run_state), audit
 
+    run_state.output_controller.enter_failed("unknown route")
     return _dynamic_result("主脑没有给出可执行路线。", run_state), None
 
 
@@ -319,6 +378,37 @@ def _dynamic_result(output: str, run_state: PipelineRunState | None) -> DynamicE
     if event_summary:
         summary = "\n\n".join(part for part in [summary, event_summary] if part)
     return DynamicExecutionResult(str(output or ""), run_context_summary=summary)
+
+
+def _save_plan_detail(
+    project_root: Path,
+    refined,
+    plan,
+    validation,
+    review,
+    gate_decision,
+) -> str:
+    selector = "plan-last"
+    try:
+        from runtime.history.expand_store import ExpandBlockStore
+
+        detail = "\n".join(
+            [
+                format_execution_plan(refined, plan, validation),
+                format_plan_review(review),
+                format_gate_decision(gate_decision),
+            ]
+        )
+        ExpandBlockStore(project_root).save_text(
+            selector,
+            detail,
+            kind="plan",
+            title="上一轮完整规划",
+            preview=f"{getattr(plan, 'route_type', '')} · {len(getattr(plan, 'tasks', []) or [])} task(s)",
+        )
+    except Exception:
+        return ""
+    return selector
 
 
 def _full_mode_approval_policy_factory(execution_mode: str):
@@ -400,6 +490,77 @@ def _apply_executor_model_defaults(plan, settings, model_registry) -> None:
             task.model = executor_model_id
             if not needs_tools or executor_supports_tools:
                 continue
+
+
+def _model_label_map(model_registry, model_ids) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for model_id in model_ids:
+        clean_id = str(model_id or "").strip()
+        if not clean_id or clean_id in labels:
+            continue
+        labels[clean_id] = _friendly_model_label(model_registry, clean_id)
+    return labels
+
+
+def _friendly_model_label(model_registry, model_id: str) -> str:
+    try:
+        info = model_registry.get_model_info(model_id)
+    except Exception:
+        info = {}
+    for key in ("display_name_zh", "display_name", "model_name", "provider_ref"):
+        value = str((info or {}).get(key) or "").strip()
+        if value:
+            return _prettify_model_label(value, info or {})
+    return model_id
+
+
+def _prettify_model_label(value: str, info: dict) -> str:
+    text = str(value or "").strip()
+    provider = str((info or {}).get("provider") or "").strip()
+    model_name = str((info or {}).get("model_name") or "").strip()
+    if provider and model_name and text.lower() == f"{provider} {model_name}".lower():
+        return _provider_model_label(provider, model_name)
+    if provider and model_name and text.lower() == f"{provider} {model_name.replace('-', '_')}".lower():
+        return _provider_model_label(provider, model_name)
+    return _title_model_token(text) if _looks_like_model_slug(text) else text
+
+
+def _looks_like_model_slug(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_.:/ -]+", str(value or "").strip())) and any(
+        marker in str(value or "") for marker in ("_", "-", "/")
+    )
+
+
+def _title_model_token(value: str) -> str:
+    text = str(value or "").strip()
+    if "/" in text:
+        text = text.split("/")[-1]
+    parts = [part for part in re.split(r"[_\-\s]+", text) if part]
+    if not parts:
+        return text
+    return " ".join(_title_model_part(part) for part in parts)
+
+
+def _provider_model_label(provider: str, model_name: str) -> str:
+    provider_label = _title_model_part(provider)
+    model_label = _title_model_token(model_name)
+    provider_prefix = _title_model_token(provider)
+    if model_label.lower().startswith(provider_prefix.lower() + " "):
+        return model_label
+    return f"{provider_label} {model_label}"
+
+
+def _title_model_part(part: str) -> str:
+    upper_values = {"v1", "v2", "v3", "v4", "k2", "r1", "gpt", "api"}
+    text = str(part or "")
+    special = {"deepseek": "DeepSeek", "openai": "OpenAI", "qwen": "Qwen", "kimi": "Kimi"}
+    if text.lower() in special:
+        return special[text.lower()]
+    if text.lower() in upper_values:
+        return text.upper()
+    if text.isupper():
+        return text
+    return text[:1].upper() + text[1:]
 
 
 def _task_model_is_usable(model_registry, model_id: str) -> bool:

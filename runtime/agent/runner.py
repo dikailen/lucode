@@ -5,11 +5,11 @@ import os
 from runtime.agents.sdk import runner_class
 
 
-async def run_agent_once(agent, run_input, hooks, max_turns=20):
+async def run_agent_once(agent, run_input, hooks, max_turns=20, stream_output: bool | None = None):
     """Run one SDK segment; stream visible answer deltas when the provider supports it."""
 
     Runner = runner_class()
-    if not streaming_enabled():
+    if stream_output is False or not streaming_enabled():
         return await Runner.run(agent, run_input, hooks=hooks, max_turns=max_turns)
 
     result = Runner.run_streamed(agent, run_input, hooks=hooks, max_turns=max_turns)

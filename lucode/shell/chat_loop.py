@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from pathlib import Path
 
 from lucode.shell.input_adapter import RuntimeCommandSession
@@ -12,11 +13,15 @@ from lucode.shell.turn_display import (
 )
 from runtime.common.conversation import append_recent_turn, compose_recent_context
 from runtime.common.text_utils import sanitize_text
+from runtime.config.execution_mode import explicit_execution_mode_for_input
 from runtime.config.workspace import discover_workspace_context
 from runtime.history import HistoryStore
 from runtime.kernel import KernelFacade
 from runtime.kernel.session import create_token_logger_hooks
 from runtime.safety.session_checkpoint import SessionCheckpointManager
+from runtime.ui.capabilities import detect_dynamic_ui_capability
+from runtime.ui.final_answer_renderer import print_final_answer
+from runtime.ui.output_controller import OutputController
 from runtime.ui.progress import render_runtime_statusline
 
 
@@ -49,6 +54,11 @@ async def chat_loop(
     resumed_session_summary = ""
     started_mcp_ids: list[str] = []
     last_run_context_summary = ""
+    output_controller = getattr(console, "output_controller", None) or OutputController(
+        mode=runtime_settings.execution_mode
+    )
+    if hasattr(console, "output_controller"):
+        console.output_controller = output_controller
 
     while True:
         try:
@@ -94,13 +104,20 @@ async def chat_loop(
 
         # 每一轮都新建 hooks，这样本轮 token 用量会单独统计。
         hooks = create_token_logger_hooks()
+        turn_settings = _settings_for_turn(runtime_settings, user_input)
+        turn_mode = turn_settings.execution_mode
 
         run_input = compose_recent_context(recent_turns, user_input, session_summary=resumed_session_summary)
         checkpoint_manager.begin_turn()
         turn_stopped = False
         kernel_response = None
         try:
-            session = RuntimeCommandSession(console, timeout_seconds=turn_timeout_seconds())
+            output_controller.configure(mode=turn_mode)
+            session = RuntimeCommandSession(
+                console,
+                timeout_seconds=turn_timeout_seconds(),
+                output_controller=output_controller,
+            )
             verbose_runtime = runtime_verbose_enabled()
 
             async def _kernel_work():
@@ -109,11 +126,12 @@ async def chat_loop(
                     run_input,
                     show_plan=True,
                     approval_session=session,
-                    settings=runtime_settings,
+                    settings=turn_settings,
                     model_registry=model_registry,
                     hooks=hooks,
                     routing_input=user_input,
                     verbose_runtime=verbose_runtime,
+                    output_controller=output_controller,
                 )
                 return kernel_response.final_output
 
@@ -137,11 +155,14 @@ async def chat_loop(
 
         # 正常流式回答已经逐字显示过，不再把同一份 final_output 复读一遍。
         if should_print_final_output(hooks, final_output):
-            print("\n========== Final output ==========")
-            print(final_output)
+            print()
+            print_final_answer(
+                final_output,
+                use_rich=detect_dynamic_ui_capability().enabled,
+            )
         print(
             render_runtime_statusline(
-                runtime_settings.execution_mode,
+                turn_mode,
                 started_mcp_ids=started_mcp_ids,
                 active=turn_status_label(final_output, stopped=turn_stopped),
             )
@@ -157,7 +178,7 @@ async def chat_loop(
             current_session_id,
             user_input,
             str(final_output),
-            execution_mode=runtime_settings.execution_mode,
+            execution_mode=turn_mode,
             stopped=turn_stopped,
             started_mcp_ids=started_mcp_ids,
             run_context_summary=last_run_context_summary,
@@ -169,6 +190,15 @@ async def chat_loop(
 
 def _is_max_turns_exceeded(exc: Exception) -> bool:
     return exc.__class__.__name__ == "MaxTurnsExceeded"
+
+
+def _settings_for_turn(runtime_settings, user_input: str):
+    explicit_mode = explicit_execution_mode_for_input(user_input)
+    if not explicit_mode or explicit_mode == getattr(runtime_settings, "execution_mode", ""):
+        return runtime_settings
+    turn_settings = copy(runtime_settings)
+    turn_settings.execution_mode = explicit_mode
+    return turn_settings
 
 
 def _record_session_turn(

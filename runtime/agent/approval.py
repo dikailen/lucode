@@ -16,13 +16,21 @@ class ApprovalTerminalResult:
     interruptions: list = field(default_factory=list)
 
 
-async def run_with_approval(agent, run_input, hooks, session=None, max_turns=20, approval_policy=None):
+async def run_with_approval(
+    agent,
+    run_input,
+    hooks,
+    session=None,
+    max_turns=20,
+    approval_policy=None,
+    stream_output: bool | None = None,
+):
     """Run an agent and ask the user before executing approval-required tools."""
 
     once_approved_signatures = set()
     approved_tools_for_session = set()
     approved_tool_rules = set()
-    result = await run_agent_once(agent, run_input, hooks, max_turns=max_turns)
+    result = await run_agent_once(agent, run_input, hooks, max_turns=max_turns, stream_output=stream_output)
 
     while result.interruptions:
         state = result.to_state()
@@ -185,7 +193,7 @@ async def run_with_approval(agent, run_input, hooks, session=None, max_turns=20,
                     reason="user_denied_or_noninteractive",
                 )
 
-        result = await run_agent_once(agent, state, hooks, max_turns=max_turns)
+        result = await run_agent_once(agent, state, hooks, max_turns=max_turns, stream_output=stream_output)
 
     return result
 
