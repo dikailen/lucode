@@ -36,4 +36,14 @@ catalogs = ["*.json", "*.md"]
 skills = ["**/*"]
 
 [tool.setuptools.exclude-package-data]
-"*" = ["__pycache__/*", "*.pyc", "*.pyo"]
+"*" = [
+  "__pycache__/*",
+  "*.pyc",
+  "*.pyo",
+  "jpc_now_skill/*",
+  "jpc_now_skill/**/*",
+  "Humanizer-zh-main/*",
+  "Humanizer-zh-main/**/*",
+  "task-router/*",
+  "task-router/**/*",
+]
