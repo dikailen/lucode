@@ -33,17 +33,17 @@ include = [
 
 [tool.setuptools.package-data]
 catalogs = ["*.json", "*.md"]
-skills = ["**/*"]
+skills = [
+  "cli-command-safety/**/*",
+  "code-engineer/**/*",
+  "final-synthesizer/**/*",
+  "full-worker-contract/**/*",
+  "orchestrator-planner/**/*",
+  "project-explorer/**/*",
+  "query-refiner/**/*",
+  "serial-executor-contract/**/*",
+  "skill-creator/**/*",
+]
 
 [tool.setuptools.exclude-package-data]
-"*" = [
-  "__pycache__/*",
-  "*.pyc",
-  "*.pyo",
-  "jpc_now_skill/*",
-  "jpc_now_skill/**/*",
-  "Humanizer-zh-main/*",
-  "Humanizer-zh-main/**/*",
-  "task-router/*",
-  "task-router/**/*",
-]
+"*" = ["__pycache__/*", "*.pyc", "*.pyo"]
