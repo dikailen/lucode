@@ -2,7 +2,6 @@ import sys
 import asyncio
 import os
 from pathlib import Path
-from dotenv import load_dotenv
 from catalog_system.refresher import refresh_catalogs
 from catalog_system.model_catalog import ModelRegistry
 from lucode.shell.input_adapter import RuntimeCommandSession, StdinConsoleAdapter
@@ -21,14 +20,11 @@ from lucode.shell.turn_display import (
 )
 from runtime.config.workspace import discover_workspace_context
 from runtime.config.settings import RuntimeSettings
+from runtime.config.app_home import get_app_home
 from runtime.ui.welcome import render_welcome_dashboard
 
 # 当前 main.py 所在目录，也就是项目根目录。
-BASE_DIR = Path(__file__).resolve().parent
-
-# 读取当前项目目录下的 .env 文件。
-# 你的 API Key、base_url、模型名都放在 .env 里，代码通过 os.getenv(...) 读取。
-load_dotenv(BASE_DIR / ".env")
+BASE_DIR = get_app_home()
 
 # Windows PowerShell 有时默认使用 GBK 编码。
 # 这里把 Python 标准输出改成 UTF-8，避免中文、特殊符号打印时报编码错误。

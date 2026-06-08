@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from runtime.common.text_utils import sanitize_text
+from runtime.ui.output_visibility import streamed_output_is_sufficient
 
 
 def should_print_final_output(hooks, final_output) -> bool:
-    if not getattr(hooks, "streamed_output_seen", False):
+    if not streamed_output_is_sufficient(hooks):
         return True
     text = str(final_output or "")
     important_prefixes = (
@@ -86,12 +87,9 @@ def friendly_error_hint(message: str) -> str:
             "原因：当前是隐私模式 offline，但没有可用的本地模型配置。\n"
             "offline 模式会禁止 DeepSeek、SiliconFlow、MiMo 等云端模型，也会禁止联网搜索。\n"
             "解决办法：\n"
-            "1. 如果你要严格本地运行，请在 .env 里配置本地 Ollama 模型，例如 "
-            "`MODEL_LOCAL_BACKEND=ollama`、`MODEL_LOCAL_BASE_URL=http://localhost:11434`、"
-            "`MODEL_LOCAL_MODEL=qwen3:8b`。\n"
-            "2. 如果你想继续使用 DeepSeek/MiMo 这类云端 API，请把 `.env` 里的 "
-            "`AGENTS_PRIVACY_MODE=offline` 改成 `AGENTS_PRIVACY_MODE=local_first` "
-            "或 `AGENTS_PRIVACY_MODE=cloud_allowed`。"
+            "1. 如果你要严格本地运行，请用 /connect 配置本地 Ollama Provider，或在 .lucode/config.toml 中配置本地模型。\n"
+            "2. 如果你想继续使用 DeepSeek/MiMo 这类云端 API，请把隐私模式切到 local_first 或 cloud_allowed；"
+            "Provider 配置写入 .lucode/config.toml，密钥写入用户级 auth.json。"
         )
     return ""
 

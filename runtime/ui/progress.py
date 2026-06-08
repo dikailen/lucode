@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import unicodedata
 
+from runtime.history.expand_store import ExpandBlockStore
+from runtime.ui.event_render import render_execution_event_summary
+
 
 BOX_TOP_LEFT = "\u256d"
 BOX_TOP_RIGHT = "\u256e"
@@ -18,7 +21,13 @@ STATUS_SYMBOLS = {
 }
 
 
-def render_task_status_board(run_state, mode: str = "serial", attempt: int = 1, title: str = "任务状态") -> str:
+def render_task_status_board(
+    run_state,
+    mode: str = "serial",
+    attempt: int = 1,
+    title: str = "任务状态",
+    include_events: bool = False,
+) -> str:
     """Render a compact C5 task progress board for serial/full execution."""
 
     route = getattr(run_state, "route_type", "unknown")
@@ -26,6 +35,8 @@ def render_task_status_board(run_state, mode: str = "serial", attempt: int = 1, 
     tasks = list(getattr(run_state, "tasks", []) or [])
     if not tasks:
         lines.append("[ ] 暂无可执行任务")
+        if include_events:
+            lines.extend(_event_lines(run_state))
         return _box(lines)
 
     for record in tasks:
@@ -33,6 +44,8 @@ def render_task_status_board(run_state, mode: str = "serial", attempt: int = 1, 
         detail = _task_detail_line(record)
         if detail:
             lines.append(detail)
+    if include_events:
+        lines.extend(_event_lines(run_state))
     return _box(lines)
 
 
@@ -65,6 +78,24 @@ def _task_detail_line(record) -> str:
     if error:
         parts.append(f"错误 {error[:80]}")
     return "    " + " · ".join(parts) if parts else ""
+
+
+def _event_lines(run_state) -> list[str]:
+    event_bus = getattr(run_state, "event_bus", None)
+    snapshot = event_bus.snapshot() if event_bus is not None and hasattr(event_bus, "snapshot") else []
+    summary = render_execution_event_summary(snapshot, limit=8, expand_store=_expand_store_for_run_state(run_state))
+    return ["", *summary.splitlines()] if summary else []
+
+
+def _expand_store_for_run_state(run_state):
+    run_context = getattr(run_state, "run_context", None)
+    project_root = getattr(run_context, "project_root", None)
+    if project_root is None:
+        return None
+    try:
+        return ExpandBlockStore(project_root)
+    except Exception:
+        return None
 
 
 def _box(lines: list[str]) -> str:

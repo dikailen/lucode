@@ -11,7 +11,13 @@ from typing import Any
 from catalog_system.model_catalog import load_model_catalog
 from planning.planner_schema import PlannedTask, PlannerResult
 from runtime.agents.model_capability import ModelExecutionStrategy, strategy_for_model_info
+from runtime.events import ExecutionEventBus
 from runtime.execution.run_context import RunContextStore
+from runtime.safety.verification_commands import (
+    extract_explicit_verification_commands,
+    format_verification_command_lock,
+)
+from runtime.ui.output_controller import OutputController
 
 
 CODE_MARKERS = {
@@ -59,7 +65,23 @@ EDIT_MARKERS = {
     "write",
     "edit",
 }
-TEST_MARKERS = {"测试", "验证", "运行", "test", "verify", "run"}
+TEST_MARKERS = {
+    "测试",
+    "验证",
+    "运行测试",
+    "执行测试",
+    "运行验证",
+    "执行验证",
+    "node --check",
+    "pytest",
+    "unittest",
+    "npm test",
+    "pnpm test",
+    "yarn test",
+    "bun test",
+    "test",
+    "verify",
+}
 
 
 @dataclass
@@ -106,9 +128,21 @@ class PipelineRunState:
     gate: GateDecision | None = None
     errors: list[str] = field(default_factory=list)
     run_context: RunContextStore | None = None
+    event_bus: ExecutionEventBus = field(default_factory=ExecutionEventBus)
+    output_controller: OutputController = field(default_factory=OutputController)
+    model_labels: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def create(cls, user_request: str, plan: PlannerResult, project_root: Path | None = None) -> "PipelineRunState":
+    def create(
+        cls,
+        user_request: str,
+        plan: PlannerResult,
+        project_root: Path | None = None,
+        mode: str = "",
+        output_controller: OutputController | None = None,
+    ) -> "PipelineRunState":
+        controller = output_controller or OutputController(mode=mode, route=plan.route_type)
+        controller.configure(mode=mode, route=plan.route_type)
         return cls(
             user_request=user_request,
             route_type=plan.route_type,
@@ -129,6 +163,7 @@ class PipelineRunState:
                 for task in plan.tasks
             ],
             run_context=RunContextStore(project_root) if project_root else None,
+            output_controller=controller,
         )
 
     def record_gate(self, decision: GateDecision) -> None:
@@ -141,6 +176,16 @@ class PipelineRunState:
         record = self._find_task(task.id)
         if record:
             record.status = "running"
+        self.output_controller.enter_running(
+            task_id=str(getattr(task, "id", "") or ""),
+            reason=str(getattr(task, "title", "") or ""),
+        )
+        self.emit_event(
+            "TaskStarted",
+            str(getattr(task, "title", "") or getattr(task, "id", "") or "任务开始"),
+            task_id=str(getattr(task, "id", "") or ""),
+            status="running",
+        )
 
     def record_task_result(self, task: PlannedTask, output: str) -> None:
         record = self._find_task(task.id)
@@ -148,6 +193,17 @@ class PipelineRunState:
             return
         record.status = "completed"
         record.output_preview = _preview(output)
+        if self._all_tasks_terminal():
+            if self.errors or any(str(getattr(item, "status", "")) == "failed" for item in self.tasks):
+                self.output_controller.enter_failed("task failed")
+            else:
+                self.output_controller.enter_completed("tasks completed")
+        self.emit_event(
+            "TaskCompleted",
+            str(getattr(task, "title", "") or getattr(task, "id", "") or "任务完成"),
+            task_id=str(getattr(task, "id", "") or ""),
+            status="completed",
+        )
 
     def record_task_error(self, task: PlannedTask, error: Exception | str) -> None:
         record = self._find_task(task.id)
@@ -156,6 +212,24 @@ class PipelineRunState:
             record.status = "failed"
             record.error = message
         self.errors.append(f"{task.id}: {message}")
+        self.output_controller.enter_failed(message)
+        self.emit_event(
+            "TaskFailed",
+            message,
+            task_id=str(getattr(task, "id", "") or ""),
+            status="failed",
+            payload={"reason": message[:200]},
+        )
+
+    def record_fast_path_used(self, task: PlannedTask, *, tool: str, action: str) -> None:
+        label = f"{tool} {action}".strip() or "只读快速路径"
+        self.emit_event(
+            "FastPathUsed",
+            f"命中只读快速路径：{label}",
+            task_id=str(getattr(task, "id", "") or ""),
+            status="completed",
+            payload={"tool": tool, "action": action},
+        )
 
     def record_verification(self, task_id: str, report: str) -> None:
         record = self._find_task(task_id)
@@ -171,6 +245,8 @@ class PipelineRunState:
             "tasks": [record.__dict__ for record in self.tasks],
             "errors": list(self.errors),
             "run_context": self.run_context.render_for_task() if self.run_context else "",
+            "events": [event.to_dict() for event in self.event_bus.snapshot()],
+            "output": self.output_controller.snapshot().to_dict(),
         }
 
     def _find_task(self, task_id: str) -> TaskRunRecord | None:
@@ -178,6 +254,17 @@ class PipelineRunState:
             if record.id == task_id:
                 return record
         return None
+
+    def _all_tasks_terminal(self) -> bool:
+        if not self.tasks:
+            return False
+        return all(str(getattr(record, "status", "")) in {"completed", "failed"} for record in self.tasks)
+
+    def emit_event(self, event_type: str, message: str = "", **kwargs: Any):
+        try:
+            return self.event_bus.emit(event_type, message, **kwargs)
+        except Exception:
+            return None
 
 
 def apply_pipeline_gate(plan: PlannerResult, refined_request: str) -> GateDecision:
@@ -198,7 +285,8 @@ def apply_pipeline_gate(plan: PlannerResult, refined_request: str) -> GateDecisi
     code_tasks = [task for task in plan.tasks if _is_code_task(task)]
     is_code = bool(code_tasks) or _contains_any(text, CODE_MARKERS)
     code_text = "\n".join([refined_request, *(_task_text(task) for task in code_tasks)]).lower()
-    edit_intent = bool(code_tasks) and _contains_any(code_text, EDIT_MARKERS)
+    declared_write_intent = any(getattr(task, "write_intent", []) for task in code_tasks)
+    edit_intent = bool(code_tasks) and (_contains_any(code_text, EDIT_MARKERS) or declared_write_intent)
     test_intent = bool(code_tasks) and _contains_any(code_text, TEST_MARKERS)
     needs_code_pipeline = plan.route_type in {"single_agent", "multi_agent"} and is_code
     should_verify = needs_code_pipeline and (edit_intent or test_intent)
@@ -215,20 +303,35 @@ def apply_pipeline_gate(plan: PlannerResult, refined_request: str) -> GateDecisi
     if not needs_code_pipeline:
         return decision
 
+    explicit_verification_commands = extract_explicit_verification_commands(text)
+
     for task in plan.tasks:
         if not _is_code_task(task):
             continue
 
         strategy = _strategy_for_task(task)
+        task_text = _task_text(task).lower()
+        task_edit_intent = bool(
+            getattr(task, "write_intent", [])
+            or (task.skill_id == "code_engineer" and _contains_any(task_text, EDIT_MARKERS))
+        )
+        task_test_intent = _contains_any(task_text, TEST_MARKERS)
         _append_unique(task.mcp, "code_locator")
         _append_unique(task.mcp, "project_filesystem_readonly")
-        if edit_intent:
+        if edit_intent and task_edit_intent:
             _append_unique(task.mcp, "workspace_edit")
 
-        if test_intent:
+        if test_intent and (task_test_intent or task_edit_intent):
             _append_unique(task.mcp, "command_runner")
 
-        task.instruction = _append_gate_instruction(task.instruction, decision, strategy)
+        task.instruction = _append_gate_instruction(
+            task.instruction,
+            decision,
+            strategy,
+            task_edit_intent=task_edit_intent,
+            task_test_intent=task_test_intent,
+            explicit_verification_commands=explicit_verification_commands,
+        )
         task.risk_notes = _append_note(
             task.risk_notes,
             "Gate 已启用代码流水线兜底：先定位，再少量读取，修改后由 Verifier 做只读核验。",
@@ -270,7 +373,7 @@ def should_verify_task(task: PlannedTask) -> bool:
     if _is_explicit_readonly_analysis(text):
         return False
     return (
-        task.skill_id == "jpc_now_skill"
+        task.skill_id == "code_engineer"
         and ("workspace_edit" in task.mcp or "command_runner" in task.mcp or _contains_any(text, EDIT_MARKERS))
     )
 
@@ -390,6 +493,10 @@ def _append_gate_instruction(
     instruction: str,
     decision: GateDecision,
     strategy: ModelExecutionStrategy | None = None,
+    *,
+    task_edit_intent: bool = False,
+    task_test_intent: bool = False,
+    explicit_verification_commands: list[str] | None = None,
 ) -> str:
     addition = (
         "\n\n## Gate 兜底要求\n"
@@ -407,8 +514,13 @@ def _append_gate_instruction(
         )
         if strategy.force_plan_before_edit:
             addition += "\n- 该模型需要先列出简短修改计划，再执行文件修改。"
-    if decision.test_intent:
+    if decision.edit_intent and not task_edit_intent:
+        addition += "\n- 本任务未声明写入意图：保持只读定位，不要申请写入工具。"
+    if decision.test_intent and (task_test_intent or task_edit_intent):
         addition += "\n- 用户表达了测试/验证意图，可在获得审批后运行必要测试命令。"
+        command_lock = format_verification_command_lock(explicit_verification_commands or [])
+        if command_lock:
+            addition += f"\n- {command_lock}"
     if "## Gate 兜底要求" in instruction:
         return instruction
     return instruction + addition
@@ -426,12 +538,12 @@ def _strategy_for_task(task: PlannedTask) -> ModelExecutionStrategy:
 def _combined_plan_text(plan: PlannerResult, refined_request: str) -> str:
     parts = [refined_request, plan.refined_request, plan.reason]
     for task in plan.tasks:
-        parts.extend([task.title, task.instruction, task.skill_id, " ".join(task.mcp)])
+        parts.extend([task.title, task.instruction])
     return "\n".join(str(item).lower() for item in parts if item)
 
 
 def _is_code_task(task: PlannedTask) -> bool:
-    if task.skill_id == "jpc_now_skill":
+    if task.skill_id == "code_engineer":
         return True
     return "code_locator" in task.mcp or "workspace_edit" in task.mcp or "command_runner" in task.mcp
 
@@ -448,9 +560,9 @@ def _task_text(task: PlannedTask) -> str:
         [
             task.title,
             task.instruction,
-            task.skill_id,
-            " ".join(task.mcp),
             " ".join(task.write_intent),
+            " ".join(getattr(task, "acceptance_criteria", []) or []),
+            " ".join(getattr(task, "expected_outputs", []) or []),
         ]
     )
 
@@ -490,11 +602,18 @@ def _is_explicit_readonly_analysis(text: str) -> bool:
     edit_markers = [
         "需要修改",
         "请修改",
+        "请修复",
+        "可以修改",
+        "允许修改",
+        "需要修复",
         "实际修改",
+        "修复",
         "修复代码",
         "写入文件",
         "创建文件",
         "删除文件",
+        "fix",
+        "repair",
         "please modify",
         "please edit",
         "fix the code",

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from runtime.safety.auditor import AuditResult
+from runtime.safety.verification_commands import (
+    extract_explicit_verification_commands,
+    format_verification_command_lock,
+)
 
 
 def should_retry(attempt: int, max_attempts: int, audit: AuditResult) -> bool:
@@ -10,13 +14,16 @@ def should_retry(attempt: int, max_attempts: int, audit: AuditResult) -> bool:
 def build_repair_request(raw_user_input: str, audit: AuditResult, attempt: int) -> str:
     issues = "\n".join(f"- {item}" for item in audit.remaining_issues) or "- 无明确剩余问题，但审计未通过。"
     strategy = repair_strategy_for_audit(audit)
+    command_lock = format_verification_command_lock(extract_explicit_verification_commands(raw_user_input))
+    command_lock_block = f"\n\n验证命令约束：{command_lock}\n" if command_lock else "\n\n"
     return (
         f"这是针对同一请求的第 {attempt} 轮自动修复。\n"
         f"原始请求：{raw_user_input}\n"
         "上一轮审计发现的问题：\n"
         f"{issues}\n\n"
         f"本轮修复策略：{strategy['type']}\n"
-        f"策略说明：{strategy['instruction']}\n\n"
+        f"策略说明：{strategy['instruction']}"
+        f"{command_lock_block}"
         "请基于当前项目最新状态重新规划剩余问题，避免重复完全相同的方法；"
         "优先补齐未完成项、缺失验证和顺序不合理的步骤。"
     )

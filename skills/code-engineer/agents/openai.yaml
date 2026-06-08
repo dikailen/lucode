@@ -1,0 +1,6 @@
+interface:
+  display_name: "Code Engineer"
+  short_description: "Implement, debug, review, and verify code changes."
+  default_prompt: "Use $code-engineer to make a focused, verified code change."
+policy:
+  allow_implicit_invocation: true

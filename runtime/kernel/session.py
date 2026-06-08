@@ -29,6 +29,7 @@ def create_token_logger_hooks(verbose: bool | None = None):
             self.llm_calls_by_agent = defaultdict(int)
             self.started_agents = set()
             self.streamed_output_seen = False
+            self.streamed_output_chars = 0
             self.verbose = quiet_default
             self.tool_events = []
 

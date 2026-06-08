@@ -28,6 +28,8 @@ class CommandSpec:
 
 
 COMMAND_SPECS: tuple[CommandSpec, ...] = (
+    CommandSpec("/expand", "查看本轮被折叠的长工具输出、diff 或 worker 细节", "会话", argument_hint="[id|clear]"),
+    CommandSpec("/skill", "查看某个 Skill 的来源、触发词和建议工具", "扩展", argument_hint="<name>"),
     CommandSpec("/help", "查看命令菜单和常用操作", "基础", aliases=("/", "/?")),
     CommandSpec("/status", "查看当前运行状态、MCP、Git 和回滚点", "基础"),
     CommandSpec("/config", "查看当前模型、隐私和运行配置", "配置"),
@@ -35,6 +37,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("/privacy", "查看隐私模式", "配置"),
     CommandSpec("/mode", "查看或切换 solo / serial / full", "配置", argument_hint="<solo|serial|full>", writable=True),
     CommandSpec("/refiner", "开启或关闭前置优化副脑", "配置", argument_hint="<on|off>", writable=True),
+    CommandSpec("/theme", "查看、预览或切换终端 UI 主题", "配置", argument_hint="[list|preview <name>|<name>]", writable=True),
     CommandSpec("/model", "查看详细模型优先级和能力状态", "模型"),
     CommandSpec("/model available", "查看当前可运行模型", "模型", aliases=("/models available",)),
     CommandSpec("/models", "查看多脑模型调音台和 Provider 模型", "模型"),
@@ -45,6 +48,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         argument_hint="<provider/model> [fallback...]",
         aliases=("/model select",),
         writable=True,
+        metadata={"advanced": True},
     ),
     CommandSpec(
         "/models role",
@@ -53,6 +57,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         argument_hint="<role> <provider/model> [...]",
         aliases=("/model role",),
         writable=True,
+        metadata={"advanced": True},
     ),
     CommandSpec(
         "/models brain",
@@ -61,13 +66,26 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         argument_hint="<脑位> <provider/model> [fallback...]",
         aliases=("/model brain",),
         writable=True,
+        metadata={"advanced": True},
     ),
-    CommandSpec("/models brain reset", "重置项目多脑模型覆盖配置", "模型", aliases=("/model brain reset",), writable=True),
+    CommandSpec(
+        "/models brain reset",
+        "重置项目多脑模型覆盖配置",
+        "模型",
+        aliases=("/model brain reset",),
+        writable=True,
+        metadata={"advanced": True},
+    ),
     CommandSpec("/models probe", "主动探测已配置模型的 key、接口和能力", "模型", argument_hint="[force]", aliases=("/model probe",), writable=True),
     CommandSpec("/connect", "进入 Provider 连接向导或添加模型 Provider", "模型", argument_hint="[provider] [--api-key ...]", writable=True),
     CommandSpec("/connect remove", "删除 Provider 配置、API key 和失效模型引用", "模型", argument_hint="<provider>", aliases=("/connect delete",), writable=True),
     CommandSpec("/plan", "只生成计划，不执行任务", "执行", argument_hint="<任务>"),
-    CommandSpec("/resume", "查看或恢复最近 JSONL 会话上下文", "会话", argument_hint="[last|会话ID前缀]"),
+    CommandSpec("/context", "查看最近一轮共享上下文摘要", "会话"),
+    CommandSpec("/history", "进入会话历史面板，查看、预览和恢复历史会话", "会话", argument_hint="[last|会话ID前缀]"),
+    CommandSpec("/history search", "搜索本地历史会话内容和 Context 摘要", "会话", argument_hint="<关键词>"),
+    CommandSpec("/history export", "导出历史会话为 Markdown 文件", "会话", argument_hint="[last|会话ID前缀]"),
+    CommandSpec("/history remove", "删除不需要的历史会话，删除前会二次确认", "会话", argument_hint="<会话ID前缀>", writable=True),
+    CommandSpec("/resume", "查看或恢复最近 JSONL 会话上下文", "会话", argument_hint="[last|with-context 会话ID前缀]"),
     CommandSpec("/diff", "查看当前 Git diff 摘要", "工作区", argument_hint="[路径]"),
     CommandSpec("/rollback", "回滚最近一轮修改", "工作区", writable=True),
     CommandSpec("/skills", "查看当前项目 Skills", "扩展"),
@@ -92,9 +110,17 @@ def all_command_specs(workspace_context=None) -> tuple[CommandSpec, ...]:
     return _dedupe_command_specs((*COMMAND_SPECS, *_external_command_specs(workspace_context)))
 
 
-def search_command_specs(filter_text: str = "", workspace_context=None) -> list[CommandSpec]:
+def search_command_specs(
+    filter_text: str = "",
+    workspace_context=None,
+    *,
+    include_advanced: bool | None = None,
+) -> list[CommandSpec]:
     query = _normalize_query(filter_text)
     specs = all_command_specs(workspace_context)
+    show_advanced = _should_show_advanced(query) if include_advanced is None else bool(include_advanced)
+    if not show_advanced:
+        specs = tuple(spec for spec in specs if not spec.metadata.get("advanced"))
     if not query:
         return list(specs)
     return [spec for spec in specs if _matches(spec, query)]
@@ -147,6 +173,18 @@ def _normalize_query(value: str) -> str:
     if query.startswith("/"):
         query = query[1:]
     return query
+
+
+def _should_show_advanced(query: str) -> bool:
+    advanced_roots = (
+        "models brain",
+        "model brain",
+        "models role",
+        "model role",
+        "models select",
+        "model select",
+    )
+    return any(query == root or query.startswith(f"{root} ") for root in advanced_roots)
 
 
 def _root_command(value: str) -> str:

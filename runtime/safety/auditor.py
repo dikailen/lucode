@@ -105,7 +105,7 @@ def audit_execution(
                     final_output,
                 ):
                     message = f"任务 {task.id} 的语义验收未完全确认：{criterion}"
-                    if _should_enforce_semantic_acceptance(task):
+                    if _should_enforce_semantic_acceptance(task, record, criterion):
                         remaining_issues.append(message)
                     else:
                         _record_soft_semantic_warning(
@@ -127,7 +127,7 @@ def audit_execution(
                         )
                 elif not _criterion_looks_satisfied(expected_text, record.output_preview, final_output):
                     message = f"任务 {task.id} 的预期输出语义未完全确认：{expected_text}"
-                    if _should_enforce_semantic_acceptance(task):
+                    if _should_enforce_semantic_acceptance(task, record, expected_text):
                         remaining_issues.append(message)
                     else:
                         _record_soft_semantic_warning(
@@ -145,6 +145,8 @@ def audit_execution(
 
     if not final_output.strip():
         remaining_issues.append("最终回答为空。")
+    elif _looks_like_process_only_final_answer(final_output):
+        remaining_issues.append("最终回答只描述准备或正在执行的步骤，没有给出实际结果。")
 
     passed = not remaining_issues
     summary = "本轮执行满足计划验收要求。" if passed else "本轮执行仍有未完成问题，需要继续修复。"
@@ -195,11 +197,55 @@ def format_final_report(final_output: str, audit: AuditResult) -> str:
     return "\n".join(lines).strip()
 
 
-def _should_enforce_semantic_acceptance(task) -> bool:
+def _should_enforce_semantic_acceptance(task, record=None, criterion: str = "") -> bool:
+    if _has_successful_verification(record) and not _looks_like_hard_semantic_requirement(criterion):
+        return False
     mcp_ids = set(getattr(task, "mcp", []) or [])
     if mcp_ids.intersection({"workspace_edit", "safe_backup", "command_runner"}):
         return True
     if getattr(task, "write_intent", None):
+        return True
+    return False
+
+
+def _has_successful_verification(record) -> bool:
+    verification = str(getattr(record, "verification", "") or "").lower()
+    if not verification:
+        return False
+    failure_markers = [
+        "returncode=1",
+        "returncode=2",
+        "returncode=124",
+        "returncode=127",
+        "failed",
+        "失败",
+        "错误",
+        "timed out",
+        "timeout",
+    ]
+    if any(marker in verification for marker in failure_markers):
+        return False
+    return any(marker in verification for marker in ["returncode=0", "通过", "success", "passed", "ok"])
+
+
+def _looks_like_hard_semantic_requirement(value: str) -> bool:
+    text = _normalize_text(value)
+    if not text:
+        return False
+    hard_markers = [
+        "must_contain",
+        "必须包含",
+        "必须输出",
+        "必须返回",
+        "不得",
+        "不能",
+        "禁止",
+        "exact",
+        "required",
+    ]
+    if any(marker in text for marker in hard_markers):
+        return True
+    if re.search(r"[A-Z0-9_]{4,}", str(value or "")):
         return True
     return False
 
@@ -343,6 +389,67 @@ def _looks_like_specific_term(value: str) -> bool:
     if len(text) <= 8 and not _is_generic_semantic_term(text):
         return True
     return False
+
+
+def _looks_like_process_only_final_answer(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = _normalize_text(text)
+    process_markers = [
+        "我会先",
+        "我将先",
+        "我准备",
+        "接下来",
+        "正在",
+        "将根据需要",
+        "根据需要补充",
+        "最后输出",
+        "先列出",
+        "获取两个目录",
+        "获取目录",
+    ]
+    process_count = sum(1 for marker in process_markers if _normalize_text(marker) in normalized)
+    if process_count < 2:
+        return False
+    concrete_markers = [
+        "负责",
+        "包含",
+        "主要文件",
+        "用途",
+        "覆盖",
+        "发现",
+        "结论",
+        "摘要如下",
+        "已检查",
+        "已完成",
+        "runtime/",
+        "tests/",
+        ".py",
+        ".md",
+        ".json",
+        ".toml",
+        ".yaml",
+        ".yml",
+    ]
+    concrete_count = sum(1 for marker in concrete_markers if _normalize_text(marker) in normalized)
+    if concrete_count >= 3:
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    bullet_lines = [line for line in lines if line.startswith(("-", "*"))]
+    if bullet_lines and all(_process_only_bullet(line) for line in bullet_lines):
+        return True
+    return process_count >= 3 and concrete_count <= 1
+
+
+def _process_only_bullet(line: str) -> bool:
+    text = _normalize_text(line)
+    if not text:
+        return False
+    process_tokens = ["runtime/ui", "tests", "目录", "列表", "获取"]
+    return any(_normalize_text(token) in text for token in process_tokens) and not any(
+        token in text for token in [".py", ".md", ".json", "负责", "用途", "包含"]
+    )
 
 
 def _one_line(value: str, limit: int = 160) -> str:

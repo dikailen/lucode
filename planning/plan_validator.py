@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from catalog_system.loader import load_mcp_catalog, load_skill_catalog
 from catalog_system.model_catalog import load_model_catalog
 from planning.planner_schema import PlannerResult
+from runtime.config.model_selection import model_runtime_available
 from runtime.safety.privacy import NETWORK_MCP_IDS, PrivacyPolicy
 
 
@@ -45,9 +46,9 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
     if plan.route_type == "multi_agent":
         if len(plan.tasks) < 2:
             errors.append("multi_agent 路线至少需要 2 个任务。")
-        if not plan.needs_synthesis:
+        if not plan.needs_synthesis and not _uses_supervised_lead_finalization(plan):
             errors.append("multi_agent 路线必须启用汇总副脑。")
-        if not plan.synthesis_instruction:
+        if not plan.synthesis_instruction and not _uses_supervised_lead_finalization(plan):
             errors.append("multi_agent 路线必须提供 synthesis_instruction。")
 
     task_ids = [task.id for task in plan.tasks]
@@ -65,19 +66,30 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
             errors.append(f"未知 skill：{task.skill_id}")
             continue
 
-        if not skill.get("selectable", True):
-            errors.append(f"skill 不可由主脑动态选择：{task.skill_id}")
+        if not skill.get("assignable", skill.get("selectable", True)):
+            if skill.get("internal"):
+                errors.append(f"skill 是 Lucode 内核契约，不能作为员工任务执行：{task.skill_id}")
+            elif skill.get("borrowable"):
+                errors.append(f"skill 只能借阅，不能作为员工任务执行：{task.skill_id}")
+            else:
+                errors.append(f"skill 不可由主脑动态选择：{task.skill_id}")
 
         if task.write_intent and "workspace_edit" not in task.mcp:
             errors.append(f"任务 {task.id} 声明了 write_intent，但没有申请 workspace_edit。")
 
         model = models.get(task.model)
         if not model:
-            errors.append(f"未知模型：{task.model}")
-        elif not model.get("configured"):
-            errors.append(f"模型未在 .env 中完整配置：{task.model}")
-        elif not privacy_policy.model_allowed(model):
+            errors.append(f"模型未在当前有效配置中注册：{task.model}")
+            continue
+        if not model.get("configured"):
+            errors.append(f"模型已注册但未在当前有效配置中完整可用：{task.model}")
+            continue
+        if not privacy_policy.model_allowed(model):
             errors.append(privacy_policy.model_error(task.model, model))
+        if not model_runtime_available(model):
+            errors.append(f"模型当前不可运行：{task.model}")
+        if task.mcp and model.get("supports_tools") is False:
+            errors.append(f"模型不支持工具调用：{task.model}")
 
         allowed_mcp = set(skill.get("allowed_mcp") or [])
         for mcp_id in task.mcp:
@@ -89,12 +101,9 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
             if not mcp.get("implemented"):
                 errors.append(f"MCP 尚未实现：{mcp_id}")
 
-            if mcp_id not in allowed_mcp:
-                errors.append(f"skill {task.skill_id} 不允许使用 MCP {mcp_id}")
-
-            allowed_for_skills = set(mcp.get("allowed_for_skills") or [])
-            if task.skill_id not in allowed_for_skills:
-                errors.append(f"MCP {mcp_id} 未授权给 skill {task.skill_id}")
+            auth_error = _mcp_authorization_error(task.skill_id, skill, mcp_id, mcp)
+            if auth_error:
+                errors.append(auth_error)
 
             if mcp_id in NETWORK_MCP_IDS and privacy_policy.mode == "offline":
                 if privacy_policy.mcp_allowed(mcp_id):
@@ -103,6 +112,32 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
                     errors.append(privacy_policy.mcp_warning(mcp_id))
 
     return PlanValidation(valid=not errors, errors=errors, warnings=warnings)
+
+
+def _mcp_authorization_error(skill_id: str, skill: dict, mcp_id: str, mcp: dict) -> str | None:
+    """Return one clear MCP authorization error, or None when the task is allowed."""
+
+    allowed_mcp = set(skill.get("allowed_mcp") or [])
+    if mcp_id not in allowed_mcp:
+        return f"skill {skill_id} 不允许使用 MCP {mcp_id}"
+
+    if skill.get("source") in {"user", "workspace"}:
+        return None
+
+    allowed_for_skills = set(mcp.get("allowed_for_skills") or [])
+    if skill_id not in allowed_for_skills:
+        return f"MCP {mcp_id} 未授权给 skill {skill_id}"
+    return None
+
+
+def _uses_supervised_lead_finalization(plan: PlannerResult) -> bool:
+    contract = dict((getattr(plan, "memory_interface", {}) or {}).get("execution_contract") or {})
+    helper = dict(contract.get("summary_helper") or {})
+    return (
+        str(contract.get("supervisor_route") or "") == "team"
+        and helper.get("enabled") is False
+        and str(helper.get("reason") or "") == "lead_supervisor_final_answer"
+    )
 
 
 def format_validation(validation: PlanValidation) -> str:

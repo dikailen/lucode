@@ -16,4 +16,5 @@ class SoloStrategy:
             context.hooks,
             context.run_agent,
             settings=context.settings,
+            project_root=context.request.workspace_root,
         )

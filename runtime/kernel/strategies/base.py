@@ -12,6 +12,7 @@ class ExecutionContext:
     hooks: Any
     run_agent: Callable
     settings: Any
+    output_controller: Any = None
 
 
 class ExecutionStrategy(Protocol):

@@ -9,6 +9,7 @@ from runtime.config.model_config import (
     model_refs_from_config,
     normalize_model_role,
 )
+from runtime.config.model_selection import model_runtime_available
 from runtime.safety.privacy import normalize_privacy_mode
 
 
@@ -96,6 +97,15 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off", "disable", "disabled"}
 
 
+def _config_bool(value) -> bool | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    return text not in {"0", "false", "no", "off", "disable", "disabled"}
+
+
 def _env_list(name: str, default: list[str]) -> list[str]:
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -116,6 +126,12 @@ def _apply_lucode_config_overrides(settings: RuntimeSettings) -> RuntimeSettings
     privacy = str(config.get("privacy") or "").strip()
     if privacy and not str(os.environ.get("AGENTS_PRIVACY_MODE") or "").strip():
         settings.privacy_mode = normalize_privacy_mode(privacy)
+    query_refiner_enabled = _config_bool(config.get("query_refiner_enabled"))
+    query_refiner_section = config.get("query_refiner") if isinstance(config.get("query_refiner"), dict) else {}
+    if query_refiner_enabled is None:
+        query_refiner_enabled = _config_bool(query_refiner_section.get("enabled"))
+    if query_refiner_enabled is not None and not _env_has("AGENTS_QUERY_REFINER_ENABLED"):
+        settings.query_refiner_enabled = query_refiner_enabled
 
     available_ids = _configured_runtime_model_ids()
     default_refs = model_refs_from_config(config)
@@ -247,7 +263,7 @@ def _role_score(model_info: dict, role: str) -> int:
     score += {"large": 5, "medium": 3, "small": 1}.get(tier, 0)
 
     if role == "query_refiner":
-        if best_for.intersection({"project_explorer", "humanizer_zh"}):
+        if best_for.intersection({"project_explorer"}):
             score += 5
         score += {"low": 4, "medium": 2, "high": 0}.get(cost, 1)
     elif role == "orchestrator":
@@ -256,7 +272,7 @@ def _role_score(model_info: dict, role: str) -> int:
         if reasoning == "high":
             score += 5
     elif role == "executor":
-        if "jpc_now_skill" in best_for:
+        if "code_engineer" in best_for:
             score += 8
         if model_info.get("execution_suitable") is True:
             score += 6
@@ -278,10 +294,4 @@ def _role_score(model_info: dict, role: str) -> int:
 
 
 def _model_runtime_available(model_info: dict) -> bool:
-    probe = model_info.get("probe") or {}
-    status = str(probe.get("status") or "").strip()
-    if status in {"chat_failed", "probe_failed", "service_unavailable", "model_missing", "capability_probe_failed"}:
-        return False
-    if model_info.get("is_local") and not status:
-        return False
-    return True
+    return model_runtime_available(model_info)

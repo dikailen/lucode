@@ -371,11 +371,23 @@ def _is_limited_local_command(lowered: tuple[str, ...], executable: str) -> bool
         module_index = lowered.index("-m")
         module = lowered[module_index + 1] if module_index + 1 < len(lowered) else ""
         return module in {"pytest", "unittest", "compileall"}
+    if executable in {"node", "node.exe"} and len(lowered) >= 3:
+        return lowered[1] == "--check" and _looks_like_local_javascript_file(lowered[2])
     if executable in {"pytest", "pytest.exe"}:
         return True
     if executable in {"npm", "pnpm", "yarn", "bun"} and len(lowered) >= 2:
         return lowered[1] in {"test", "run"} and "publish" not in lowered
     return False
+
+
+def _looks_like_local_javascript_file(value: str) -> bool:
+    text = str(value or "").strip().strip('"\'')
+    if not text or text.startswith("-") or "://" in text:
+        return False
+    path = PureWindowsPath(text)
+    if ".." in path.parts or ".." in PurePosixPath(text).parts:
+        return False
+    return path.suffix.lower() in {".js", ".mjs", ".cjs"}
 
 
 def _find_interpreter_risks(executable: str, lowered: tuple[str, ...]) -> list[CommandFinding]:

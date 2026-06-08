@@ -7,15 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from runtime.config.skill_frontmatter import (
+    frontmatter_bool,
+    frontmatter_list,
+    frontmatter_text,
+    read_skill_frontmatter,
+)
+from runtime.config.skill_policy import PROTECTED_SYSTEM_SKILLS, RULE_ONLY_SKILLS
 from skills.registry import SKILLS
-
-
-PROTECTED_SYSTEM_SKILLS = {
-    "task_router",
-    "query_refiner",
-    "orchestrator_planner",
-    "final_synthesizer",
-}
 
 
 @dataclass(frozen=True)
@@ -41,7 +40,8 @@ def extension_roots(workspace_context=None) -> ExtensionRoots:
 def discover_skill_layers(workspace_context=None) -> dict[str, list[dict[str, Any]]]:
     roots = extension_roots(workspace_context)
     layers = {
-        "core": _discover_skills_in_dir(roots.app_home / "skills", "core"),
+        "core": _discover_skills_in_dir(roots.app_home / "core_skills", "core"),
+        "sample": _discover_skills_in_dir(roots.app_home / "skills", "sample"),
         "user": _discover_skills_in_dir(roots.user_home / "skills", "user"),
         "workspace": _discover_skills_in_dir(roots.workspace_root / ".lucode" / "skills", "workspace"),
     }
@@ -76,11 +76,49 @@ def render_workspace_skills(workspace_context=None) -> str:
 def render_all_skills(workspace_context=None) -> str:
     layers = discover_skill_layers(workspace_context)
     lines = ["全部 Skills"]
-    for title, key in [("内置核心", "core"), ("用户全局", "user"), ("当前项目", "workspace")]:
+    for title, key in [("内置核心", "core"), ("样例/测试", "sample"), ("用户全局", "user"), ("当前项目", "workspace")]:
         lines.append("")
         lines.append(title)
         items = layers.get(key) or []
         lines.extend(_render_skill_items(items) if items else ["- 无"])
+    return "\n".join(lines)
+
+
+def render_skill_detail(skill_name: str, workspace_context=None) -> str:
+    normalized = _normalize_id(str(skill_name or "").lstrip("/"))
+    if not normalized:
+        return "请指定 Skill 名称，例如：/skill api-reviewer"
+    layers = discover_skill_layers(workspace_context)
+    matches = [
+        item
+        for items in layers.values()
+        for item in items
+        if normalized in {_normalize_id(item.get("id") or ""), _normalize_id(item.get("folder") or "")}
+    ]
+    if not matches:
+        return f"没有找到 Skill：{skill_name}\n可用 /skills 查看当前项目，或 /skills_all 查看全部来源。"
+    item = _preferred_skill_detail_item(matches)
+    lines = [
+        "Skill 详情",
+        f"名称：{item.get('display_name_zh') or item.get('id')}",
+        f"ID：{item.get('id')}",
+        f"来源：{_source_label(item.get('source'))}",
+        f"状态：{item.get('status') or ('已阻止：核心系统 Skill 不能被覆盖' if item.get('blocked') else '可用')}",
+        f"说明：{item.get('summary_zh') or '无说明'}",
+    ]
+    allowed_tools = item.get("allowed_tools") or []
+    trigger = item.get("trigger") or []
+    if allowed_tools:
+        lines.append(f"建议工具：{_join_compact(allowed_tools, limit=160)}")
+    if trigger:
+        lines.append(f"触发词：{_join_compact(trigger, limit=160)}")
+    if item.get("argument_hint"):
+        lines.append(f"参数提示：{item.get('argument_hint')}")
+    if item.get("model"):
+        lines.append(f"建议模型：{item.get('model')}")
+    if item.get("disable_model_invocation"):
+        lines.append("模型调用：关闭（只展开命令或说明）")
+    lines.append(f"路径：{item.get('path') or '未知'}")
     return "\n".join(lines)
 
 
@@ -118,19 +156,33 @@ def _discover_skills_in_dir(root: Path, source: str) -> list[dict[str, Any]]:
         folder = skill_file.parent.name
         skill_id = folder_to_id.get(folder) or _normalize_id(folder)
         meta = _read_skill_frontmatter(skill_file)
-        display_name = meta.get("name") or folder
-        summary = meta.get("description") or ""
+        display_name = frontmatter_text(meta, "name") or folder
+        summary = frontmatter_text(meta, "description")
+        internal = skill_id in PROTECTED_SYSTEM_SKILLS or source == "core"
+        borrowable = not internal
+        assignable = borrowable and skill_id not in RULE_ONLY_SKILLS
         item = {
             "id": skill_id,
             "folder": folder,
             "display_name_zh": display_name,
             "summary_zh": summary,
+            "allowed_tools": frontmatter_list(meta, "allowed-tools", "allowed_tools"),
+            "trigger": frontmatter_list(meta, "trigger", "triggers"),
+            "argument_hint": frontmatter_text(meta, "argument-hint", "argument_hint"),
+            "model": frontmatter_text(meta, "model"),
+            "disable_model_invocation": frontmatter_bool(
+                meta,
+                "disable-model-invocation",
+                "disable_model_invocation",
+            ),
             "source": source,
             "path": str(skill_file.parent),
-            "internal": skill_id in PROTECTED_SYSTEM_SKILLS,
-            "selectable": skill_id not in PROTECTED_SYSTEM_SKILLS,
+            "internal": internal,
+            "borrowable": borrowable,
+            "assignable": assignable,
+            "selectable": assignable,
             "blocked": False,
-            "status": "可用",
+            "status": "仅规则借阅" if borrowable and not assignable else "可用",
         }
         items.append(item)
     return items
@@ -140,6 +192,8 @@ def _mark_skill_safety(item: dict[str, Any]) -> dict[str, Any]:
     marked = dict(item)
     if marked.get("id") in PROTECTED_SYSTEM_SKILLS:
         marked["blocked"] = True
+        marked["borrowable"] = False
+        marked["assignable"] = False
         marked["selectable"] = False
         marked["status"] = "已阻止：核心系统 Skill 不能被覆盖"
     return marked
@@ -259,26 +313,19 @@ def _compact_text(value, *, limit: int) -> str:
 def _source_label(source: str | None) -> str:
     return {
         "core": "内置核心",
+        "sample": "样例/测试",
         "user": "用户全局",
         "workspace": "当前项目",
     }.get(str(source or ""), str(source or "未知"))
 
 
 def _read_skill_frontmatter(skill_file: Path) -> dict[str, str]:
-    text = skill_file.read_text(encoding="utf-8-sig", errors="replace")
-    if not text.startswith("---"):
-        return {}
-    end = text.find("---", 3)
-    if end == -1:
-        return {}
-    meta: dict[str, str] = {}
-    for raw_line in text[3:end].splitlines():
-        line = raw_line.strip()
-        if not line or ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        meta[key.strip()] = value.strip().strip('"')
-    return meta
+    return read_skill_frontmatter(skill_file)
+
+
+def _preferred_skill_detail_item(items: list[dict[str, Any]]) -> dict[str, Any]:
+    order = {"workspace": 0, "user": 1, "core": 2, "sample": 3}
+    return sorted(items, key=lambda item: order.get(str(item.get("source") or ""), 9))[0]
 
 
 def _load_json_object(path: Path) -> dict[str, Any]:
