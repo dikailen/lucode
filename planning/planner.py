@@ -83,7 +83,7 @@ async def preview_plan(
         "可以使用 `project_explorer` 搭配 `project_filesystem_readonly` 读取项目文件，"
         "不要因为用户未粘贴目录树就直接 clarify。\n\n"
         "如果用户要修复、评审、重构或实现当前项目代码，"
-        "优先让 `jpc_now_skill` 搭配 `code_locator` 先定位相关文件，"
+        "优先让 `code_engineer` 搭配 `code_locator` 先定位相关文件，"
         "再少量读取目标文件；不要计划读取整个项目。\n\n"
         f"原始问题：{refined.raw_user_input}\n"
         f"优化问题：{refined.refined_request}\n"

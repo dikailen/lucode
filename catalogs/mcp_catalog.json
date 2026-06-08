@@ -17,7 +17,7 @@
       ],
       "allowed_for_skills": [
         "lucode_native_capability",
-        "jpc_now_skill",
+        "code_engineer",
         "project_explorer"
       ],
       "approval_required": false,
@@ -56,7 +56,7 @@
       ],
       "allowed_for_skills": [
         "lucode_native_capability",
-        "jpc_now_skill",
+        "code_engineer",
         "project_explorer"
       ],
       "approval_required": false,
@@ -84,7 +84,7 @@
       ],
       "allowed_for_skills": [
         "lucode_native_capability",
-        "jpc_now_skill",
+        "code_engineer",
         "project_explorer",
         "skill_creator"
       ],
@@ -106,7 +106,7 @@
       ],
       "allowed_for_skills": [
         "lucode_native_capability",
-        "jpc_now_skill",
+        "code_engineer",
         "project_explorer",
         "skill_creator"
       ],
@@ -135,7 +135,7 @@
       ],
       "allowed_for_skills": [
         "lucode_native_capability",
-        "jpc_now_skill",
+        "code_engineer",
         "skill_creator"
       ],
       "approval_required": true,
@@ -165,7 +165,7 @@
       ],
       "allowed_for_skills": [
         "lucode_native_capability",
-        "jpc_now_skill",
+        "code_engineer",
         "project_explorer",
         "skill_creator"
       ],
@@ -192,7 +192,7 @@
       ],
       "allowed_for_skills": [
         "lucode_native_capability",
-        "jpc_now_skill",
+        "code_engineer",
         "project_explorer",
         "skill_creator"
       ],
@@ -223,7 +223,7 @@
       ],
       "allowed_for_skills": [
         "lucode_native_capability",
-        "jpc_now_skill",
+        "code_engineer",
         "project_explorer",
         "skill_creator"
       ],
@@ -251,7 +251,7 @@
       ],
       "allowed_for_skills": [
         "lucode_native_capability",
-        "jpc_now_skill",
+        "code_engineer",
         "project_explorer",
         "skill_creator"
       ],

@@ -2,9 +2,10 @@ import json
 from pathlib import Path
 
 from catalog_system.refresher import build_skill_catalog
+from runtime.config.app_home import get_app_home
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = get_app_home()
 CATALOG_DIR = PROJECT_ROOT / "catalogs"
 
 

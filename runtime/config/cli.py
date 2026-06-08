@@ -32,6 +32,8 @@ from runtime.config.model_config import (
     reset_role_model_priorities,
     select_role_model_priority,
     select_model_priority,
+    set_execution_mode,
+    set_query_refiner_enabled,
 )
 from runtime.config.model_tuner import build_model_tuner_state, render_model_tuner_snapshot
 from runtime.config.extensions import (
@@ -49,6 +51,7 @@ from runtime.config.settings import RuntimeSettings
 from runtime.commands.registry import known_command_prefixes
 from runtime.tools.registry import render_tool_registry
 from runtime.ui.command_palette import render_command_palette
+from runtime.ui.theme import panel_border_text
 
 LUCODE_BLUE = "\033[94m"
 LUCODE_CYAN = "\033[96m"
@@ -187,10 +190,11 @@ def parse_writable_config_command(command: str) -> tuple[str, str] | None:
 
 def apply_writable_config_command(
     command: str,
-    env_path: Path,
+    env_path: Path | None,
     settings: RuntimeSettings,
     workspace_context=None,
 ) -> tuple[str, bool]:
+    del env_path
     parsed = parse_writable_config_command(command)
     if parsed is None:
         return (
@@ -337,22 +341,20 @@ def apply_writable_config_command(
         )
 
     if kind == "mode":
-        _set_env_value(env_path, "AGENTS_EXECUTION_MODE", value)
-        os.environ["AGENTS_EXECUTION_MODE"] = value
+        set_execution_mode(value, workspace_root=_workspace_root(workspace_context))
         settings.execution_mode = value
         return (
             f"已切换执行模式：{execution_mode_label_zh(value)}。\n"
-            "本次会话已立即生效，配置也已写入 .env。",
+            "本次会话已立即生效，配置已写入 .lucode/config.toml。",
             True,
         )
 
     enabled = value == "on"
-    _set_env_value(env_path, "AGENTS_QUERY_REFINER_ENABLED", "true" if enabled else "false")
-    os.environ["AGENTS_QUERY_REFINER_ENABLED"] = "true" if enabled else "false"
+    set_query_refiner_enabled(enabled, workspace_root=_workspace_root(workspace_context))
     settings.query_refiner_enabled = enabled
     return (
         f"前置优化副脑已{'开启' if enabled else '关闭'}。\n"
-        "本次会话已立即生效，配置也已写入 .env。",
+        "本次会话已立即生效，配置已写入 .lucode/config.toml。",
         True,
     )
 
@@ -823,7 +825,7 @@ def _render_mode(settings: RuntimeSettings) -> str:
             "serial：显式多 Agent 串行工程模式，由主脑规划，多专家按顺序处理。",
             "full：显式高级并行多 Agent，只有通过安全门的批次才允许并行。",
             "",
-            "说明：输入 /mode solo、/mode serial 或 /mode full 可立即切换；当前仍写入 .env 兼容设置。",
+            "说明：输入 /mode solo、/mode serial 或 /mode full 可立即切换并写入 .lucode/config.toml。",
         ],
     )
 
@@ -864,34 +866,76 @@ def _render_model(settings: RuntimeSettings) -> str:
 
 def _render_model_available(settings: RuntimeSettings) -> str:
     catalog = load_model_catalog()
-    available_models = [
-        item for item in catalog.get("models", []) if item.get("configured") and _is_runtime_available(item, settings)
+    configured_models = [
+        item
+        for item in catalog.get("models", [])
+        if item.get("configured") and PrivacyPolicy(settings.privacy_mode).model_allowed(item)
+    ]
+    checked_models = [
+        item
+        for item in configured_models
+        if _is_runtime_available(item, settings) and _has_probe(item)
+    ]
+    unchecked_models = [
+        item
+        for item in configured_models
+        if _is_runtime_available(item, settings) and not _has_probe(item)
+    ]
+    unavailable_models = [
+        item
+        for item in configured_models
+        if not _is_runtime_available(item, settings)
     ]
     lines = [
-        "紧凑视图",
         f"当前隐私模式：{_format_privacy_mode(settings.privacy_mode)}",
+        "说明：这里按最近检查和能力推断分组，不把未检查模型说成绝对可用。",
     ]
-    if not available_models:
+    if not checked_models and not unchecked_models and not unavailable_models:
         lines.extend(
             [
                 "",
-                "当前没有确认可用的模型。",
+                "当前没有模型通过最近检查，也没有配置完整的可尝试模型。",
                 "你可以先用 /config 或 /api show 检查模型连接状态。",
             ]
         )
-        return _render_lucode_panel("可用模型（紧凑视图）", lines)
+        return _render_lucode_panel("模型状态", lines)
 
-    for item in sorted(available_models, key=lambda model: (not model.get("is_local"), model.get("id") or "")):
-        lines.append(
-            f"- {_format_model_title(item)} | "
-            f"{_format_backend_type(item.get('backend_type'))} | "
-            f"{_format_availability(item)} | "
-            f"{_format_privacy_level(item.get('privacy_level'))} | "
-            f"{_format_model_probe_badges(item)}"
+    if not checked_models and not unchecked_models:
+        lines.extend(
+            [
+                "",
+                "当前没有模型通过最近检查，也没有配置完整的可尝试模型。",
+                "你可以先用 /config 或 /api show 检查模型连接状态。",
+            ]
         )
+
     lines.append("")
-    lines.append("说明：这里只显示当前可运行的模型。")
-    return _render_lucode_panel("可用模型（紧凑视图）", lines)
+    lines.append("最近检查通过 / 可继续尝试")
+    if checked_models:
+        for item in _sort_model_status_models(checked_models):
+            lines.extend(_render_model_status_card(item))
+    else:
+        lines.append("  无")
+
+    lines.append("")
+    lines.append("配置完整，可尝试调用（未做最近检查）")
+    if unchecked_models:
+        for item in _sort_model_status_models(unchecked_models):
+            lines.extend(_render_model_status_card(item))
+    else:
+        lines.append("  无")
+
+    lines.append("")
+    lines.append("当前不可用 / 需处理")
+    if unavailable_models:
+        for item in _sort_model_status_models(unavailable_models):
+            lines.extend(_render_model_status_card(item, settings=settings))
+    else:
+        lines.append("  无")
+
+    lines.append("")
+    lines.append("提示：需要实测时运行 /models probe force；中转和官方接口都只记录最近检查结果。")
+    return _render_lucode_panel("模型状态", lines)
 
 
 def _render_readonly_switch_hint(command_name: str, value: str) -> str:
@@ -920,34 +964,10 @@ def _render_readonly_switch_hint(command_name: str, value: str) -> str:
     return "\n".join(
         [
             f"{command_name} 切换请求：{value}",
-            "当前这里只做只读提示，不会直接改写配置。",
-            "如果你要真正切换，请执行对应写入命令；Provider 优先写入 .lucode/config.toml，密钥写入用户级 auth.json。",
+            "当前命令不支持直接切换这个配置项。",
+            "模型和 Provider 配置请使用 /connect 或 /models；配置会写入 auth.json 和 .lucode/config.toml。",
         ]
     )
-
-
-def _set_env_value(env_path: Path, key: str, value: str) -> None:
-    env_path = Path(env_path)
-    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
-    updated = False
-    new_lines: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in line:
-            new_lines.append(line)
-            continue
-        current_key = line.split("=", 1)[0].strip()
-        if current_key == key:
-            new_lines.append(f"{key}={value}")
-            updated = True
-        else:
-            new_lines.append(line)
-    if not updated:
-        if new_lines and new_lines[-1].strip():
-            new_lines.append("")
-        new_lines.append(f"{key}={value}")
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
 def _git_status_summary(project_root: Path) -> str:
@@ -1143,7 +1163,7 @@ def _render_config_model_panel_card(model_info: dict) -> list[str]:
             f"主脑 {_format_planner_suitability(model_info)} · "
             f"执行 {_format_execution_suitability(model_info)}"
         ),
-        f"    探测：{_format_probe_status(model_info)}",
+        f"    最近检查：{_format_probe_status(model_info)}",
     ]
 
 
@@ -1209,6 +1229,9 @@ def _is_section_heading(value: str) -> bool:
         "汇总脑",
         "可加入优先级的候选模型",
         "暂不可用模型",
+        "最近检查通过 / 可继续尝试",
+        "配置完整，可尝试调用（未做最近检查）",
+        "当前不可用 / 需处理",
     }
 
 
@@ -1236,9 +1259,7 @@ def _wrap_visible(value: str, width: int) -> list[str]:
 
 
 def _ansi_blue(value: str) -> str:
-    if os.environ.get("NO_COLOR"):
-        return value
-    return f"{LUCODE_BLUE}{value}{ANSI_RESET}"
+    return panel_border_text(value)
 
 
 def _render_table(headers: list[str], rows: list[list[str]], *, max_widths: list[int] | None = None) -> list[str]:
@@ -1312,7 +1333,7 @@ def _render_config_model_card(model_info: dict) -> list[str]:
             f"主脑 {_format_planner_suitability(model_info)} | "
             f"执行 {_format_execution_suitability(model_info)}"
         ),
-        f"  探测：{_format_probe_status(model_info)}",
+        f"  最近检查：{_format_probe_status(model_info)}",
     ]
 
 
@@ -1428,11 +1449,11 @@ def _suggest_priority_roles(model_info: dict) -> list[str]:
     best_for = set(model_info.get("best_for_skills") or [])
     reasoning = str(model_info.get("reasoning_level") or "").lower()
     tier = str(model_info.get("model_tier") or "").lower()
-    if best_for.intersection({"project_explorer", "humanizer_zh"}) or tier in {"small", "medium", "large"}:
+    if best_for.intersection({"project_explorer"}) or tier in {"small", "medium", "large"}:
         roles.append("前置优化脑")
     if reasoning == "high" or tier in {"large", "medium"}:
         roles.append("主脑规划脑")
-    if "jpc_now_skill" in best_for:
+    if "code_engineer" in best_for:
         roles.append("执行专家脑")
     if reasoning == "high" or tier in {"large", "medium"}:
         roles.append("汇总脑")
@@ -1462,6 +1483,24 @@ def _is_runtime_available(model_info: dict, settings: RuntimeSettings) -> bool:
     if not PrivacyPolicy(settings.privacy_mode).model_allowed(model_info):
         return False
     return not _availability_blocks_runtime(model_info)
+
+
+def _sort_model_status_models(models: list[dict]) -> list[dict]:
+    return sorted(models, key=lambda model: (model.get("is_local") is not True, model.get("id") or ""))
+
+
+def _render_model_status_card(model_info: dict, *, settings: RuntimeSettings | None = None) -> list[str]:
+    lines = [
+        f"- {_format_model_title(model_info)}",
+        f"  最近检查：{_format_probe_status(model_info)}",
+        f"  运行判断：{_format_availability(model_info)}",
+        f"  接口能力：{_format_interface_capability(model_info)}",
+        f"  模型行为：{_format_model_behavior(model_info)}",
+        f"  元数据：{_format_privacy_level(model_info.get('privacy_level'))} · {_format_model_probe_badges(model_info)}",
+    ]
+    if settings is not None and not _is_runtime_available(model_info, settings):
+        lines.append(f"  处理建议：{_unavailable_reason(model_info, settings)}")
+    return lines
 
 
 def _format_model_title(model_info: dict) -> str:
@@ -1539,7 +1578,7 @@ def _format_privacy_mode(value: str | None) -> str:
 def _format_tool_support(model_info: dict) -> str:
     value = model_info.get("supports_tools")
     if not _has_probe(model_info):
-        return _format_bool_zh(value, unknown="未知（未探测）", suffix="（保守判断）")
+        return _format_bool_zh(value, unknown="未知（未做最近检查）", suffix="（能力推断）")
     return _format_bool_zh(value)
 
 
@@ -1550,7 +1589,7 @@ def _format_planner_suitability(model_info: dict) -> str:
     if not model_info.get("configured"):
         return "否（未配置）"
     if not _has_probe(model_info):
-        return "可尝试（未探测）"
+        return "可尝试调用（未做最近检查）"
     return "未知"
 
 
@@ -1561,7 +1600,7 @@ def _format_execution_suitability(model_info: dict) -> str:
     if not model_info.get("configured"):
         return "否（未配置）"
     if not _has_probe(model_info):
-        return _format_bool_zh(model_info.get("supports_tools"), unknown="未知（未探测）", suffix="（保守判断）")
+        return _format_bool_zh(model_info.get("supports_tools"), unknown="未知（未做最近检查）", suffix="（能力推断）")
     return "未知"
 
 
@@ -1569,20 +1608,76 @@ def _format_probe_status(model_info: dict) -> str:
     probe = model_info.get("probe") or {}
     status = str(probe.get("status") or "").strip()
     if not status:
-        return "未探测（使用保守判断）"
+        return "未检查；能力为配置推断"
     status_labels = {
-        "ok": "正常",
-        "tools_unsupported": "不支持工具调用",
+        "ok": "最近检查通过",
+        "tools_unsupported": "最近检查通过；未观察到工具调用",
         "chat_failed": "基础聊天失败",
-        "probe_failed": "探测失败",
-        "capability_probe_failed": "服务在线，能力探测失败",
-        "partial": "部分探测成功",
+        "probe_failed": "最近检查失败",
+        "capability_probe_failed": "服务在线；能力检查失败",
+        "partial": "部分最近检查通过",
         "service_unavailable": "本地服务未连通",
         "model_missing": "服务在线，模型未安装",
         "config_incomplete": "配置不完整",
         "disabled": "已关闭",
     }
     return status_labels.get(status, status)
+
+
+def _format_interface_capability(model_info: dict) -> str:
+    probe = model_info.get("probe") or {}
+    parts = [_format_backend_type(model_info.get("backend_type"))]
+    if not _has_probe(model_info):
+        if model_info.get("supports_tools") is True:
+            parts.append("tools 参数按配置形态推断")
+        else:
+            parts.append("参数能力未做最近检查")
+        return " · ".join(parts)
+    if probe.get("supports_basic_chat") is True:
+        parts.append("chat 参数最近接受")
+    elif probe.get("supports_basic_chat") is False:
+        parts.append("chat 参数最近失败")
+    if probe.get("tools_api_accepted") is True:
+        parts.append("tools 参数接口接受")
+    elif probe.get("tools_api_accepted") is False:
+        parts.append("tools 参数接口拒绝")
+    if probe.get("supports_streaming") is True:
+        parts.append("stream 参数最近接受")
+    elif probe.get("supports_streaming") is False:
+        parts.append("stream 参数未确认")
+    profile = probe.get("probe_profile")
+    if profile:
+        parts.append(f"检查策略 {profile}")
+    return " · ".join(parts)
+
+
+def _format_model_behavior(model_info: dict) -> str:
+    probe = model_info.get("probe") or {}
+    if not _has_probe(model_info):
+        return "模型行为未观察到；可运行 /models probe force 做最近检查"
+    parts: list[str] = []
+    if probe.get("supports_basic_chat") is True:
+        parts.append("chat 回复已观察到")
+    elif probe.get("supports_basic_chat") is False:
+        parts.append("chat 回复未观察到")
+    if probe.get("supports_json_output") is True:
+        parts.append("JSON 输出已观察到")
+    elif probe.get("supports_json_output") is False:
+        parts.append("JSON 输出未确认")
+    tool_behaviors = []
+    if probe.get("tools_auto_call") is True:
+        tool_behaviors.append("auto tool_calls")
+    if probe.get("tools_forced_choice") is True:
+        tool_behaviors.append("forced tool_calls")
+    if probe.get("tools_result_roundtrip") is True:
+        tool_behaviors.append("工具结果回填")
+    if tool_behaviors:
+        parts.append("工具行为已观察到：" + "、".join(tool_behaviors))
+    elif probe.get("tools_api_accepted") is True:
+        parts.append("接口接受 tools 参数，尚未观察到 tool_calls")
+    elif probe.get("tools_api_accepted") is False:
+        parts.append("tools 行为未观察到")
+    return " · ".join(parts) if parts else "模型行为未观察到"
 
 
 def _format_tools_probe_summary(probe: dict) -> str:
@@ -1667,20 +1762,6 @@ def _safe_base_url(model_info: dict) -> str:
     resolved_base_url = model_info.get("base_url") or ""
     if resolved_base_url:
         return resolved_base_url
-    model_id = model_info.get("id") or ""
-    env_name = _base_url_env_name(model_id)
-    base_url = os.environ.get(env_name) or ""
-    if not base_url and backend == "llama_cpp":
+    if backend == "llama_cpp":
         return "本地原生推理预留"
-    return base_url or "未配置"
-
-
-def _base_url_env_name(model_id: str) -> str:
-    if model_id == "deepseek_V4_flash_model":
-        return "DEEPSEEK_BASE_URL"
-    if model_id == "deepseek_V4_pro_model":
-        return "DEEPSEEK_BASE_pro_URL"
-    if model_id == "mimo_model":
-        return "MIMO_API_BASE_URL"
-    prefix = model_id.removesuffix("_model").upper()
-    return f"MODEL_{prefix}_BASE_URL"
+    return "未配置"

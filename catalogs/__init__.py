@@ -1,0 +1,1 @@
+"""Bundled Lucode catalog resources."""

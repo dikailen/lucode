@@ -4,14 +4,14 @@ import argparse
 import asyncio
 import importlib.metadata
 import importlib.util
-import json
 import os
 import shutil
 import sys
 from pathlib import Path
 
+from runtime.config.app_home import get_app_home
 
-APP_HOME = Path(__file__).resolve().parents[1]
+APP_HOME = get_app_home()
 DEFAULT_VERSION = "0.1.0"
 
 
@@ -36,14 +36,10 @@ def fast_dispatch(argv: list[str]) -> int | None:
 
 
 def read_package_version() -> str:
-    package_path = APP_HOME / "package.json"
-    if not package_path.exists():
-        return DEFAULT_VERSION
     try:
-        data = json.loads(package_path.read_text(encoding="utf-8"))
-    except Exception:
+        return importlib.metadata.version("lucode")
+    except importlib.metadata.PackageNotFoundError:
         return DEFAULT_VERSION
-    return str(data.get("version") or DEFAULT_VERSION)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.set_defaults(command="init")
 
     doctor = subparsers.add_parser("doctor", help="检查 Python、Git、模型配置、MCP 和权限状态")
+    doctor.add_argument("--input", action="store_true", help="显示交互输入层诊断")
     doctor.set_defaults(command="doctor")
 
     config = subparsers.add_parser("config", help="查看当前配置")
@@ -168,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         profiler.mark("dispatch doctor")
         profiler.print()
-        return _handle_doctor(context)
+        return _handle_doctor(context, args)
     if args.command == "config":
         profiler.mark("dispatch config")
         profiler.print()
@@ -292,7 +289,7 @@ def _handle_init(context) -> int:
     return 0
 
 
-def _handle_doctor(context) -> int:
+def _handle_doctor(context, args=None) -> int:
     from catalog_system.model_catalog import load_model_catalog
     from runtime.config.model_config import auth_path, load_provider_catalog, project_config_path
     from runtime.providers.registry import ProviderRegistry
@@ -323,11 +320,48 @@ def _handle_doctor(context) -> int:
         f"项目配置：{project_config_path(context.workspace_root)}",
         f"工具注册表：{len(registry.servers)} 个 MCP 记录",
     ]
+    if bool(getattr(args, "input", False)):
+        lines.extend(_input_doctor_lines())
     print("\n".join(lines))
     return 0
 
 
+def _input_doctor_lines() -> list[str]:
+    try:
+        import importlib.util
+
+        prompt_toolkit_available = importlib.util.find_spec("prompt_toolkit") is not None
+    except Exception:
+        prompt_toolkit_available = False
+    try:
+        from lucode.shell.input_adapter import prompt_toolkit_input_diagnostics
+
+        diagnostics = prompt_toolkit_input_diagnostics(
+            prompt_toolkit_available=prompt_toolkit_available,
+        )
+        prompt_toolkit_enabled = bool(diagnostics["enabled"])
+    except Exception as exc:
+        prompt_toolkit_enabled = False
+        prompt_error = str(exc)
+        diagnostics = {}
+    else:
+        prompt_error = ""
+    return [
+        f"prompt_toolkit：{'可用' if prompt_toolkit_available else '不可用'}",
+        f"stdin TTY：{diagnostics.get('stdin_isatty', bool(getattr(sys.stdin, 'isatty', lambda: False)()))}",
+        f"stdout TTY：{diagnostics.get('stdout_isatty', bool(getattr(sys.stdout, 'isatty', lambda: False)()))}",
+        f"stdin Windows Console：{diagnostics.get('stdin_windows_console', False)}",
+        f"stdout Windows Console：{diagnostics.get('stdout_windows_console', False)}",
+        f"输入层禁用变量：{diagnostics.get('disabled_by_env', False)}",
+        f"输入层：{'prompt_toolkit' if prompt_toolkit_enabled else 'fallback'}",
+        f"输入层错误：{prompt_error}" if prompt_error else "输入层错误：无",
+    ]
+
+
 def _python_source_label() -> str:
+    source = os.environ.get("LUCODE_PYTHON_SOURCE")
+    if source:
+        return source
     configured = os.environ.get("LUCODE_PYTHON")
     if configured:
         try:

@@ -240,7 +240,7 @@ class ProviderRuntimeSpec:
             provider_id=provider_id,
             homepage=str(model_info.get("homepage") or ""),
             base_url=str(model_info.get("base_url_value") or model_info.get("base_url") or ""),
-            api_key_ref=str(model_info.get("api_key_env") or model_info.get("api_key_ref") or ""),
+            api_key_ref=str(model_info.get("api_key_ref") or ""),
             model_name=model_name,
             api_mode=str(model_info.get("api_mode") or model_info.get("backend_type") or "openai_compatible"),
             capability_fingerprint=dict(model_info.get("probe") or {}),

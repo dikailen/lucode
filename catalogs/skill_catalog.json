@@ -49,7 +49,7 @@
       "tags": [
         "code"
       ],
-      "default_model": "mimo_model",
+      "default_model": "",
       "allowed_mcp": [],
       "allowed_tools": [],
       "trigger": [],
@@ -71,6 +71,61 @@
       "path": "skills/cli-command-safety"
     },
     {
+      "id": "code_engineer",
+      "folder": "code-engineer",
+      "display_name_zh": "Code Engineer",
+      "summary_zh": "General software engineering skill for code implementation, review, debugging, refactoring, tests, and verification.",
+      "tags": [
+        "code",
+        "python",
+        "java",
+        "cpp",
+        "review",
+        "debugging",
+        "testing"
+      ],
+      "default_model": "",
+      "allowed_mcp": [
+        "project_filesystem_readonly",
+        "code_locator",
+        "workspace_edit",
+        "command_runner",
+        "git_tools",
+        "safe_backup",
+        "web_search",
+        "context7_docs",
+        "grep_code_search"
+      ],
+      "allowed_tools": [],
+      "trigger": [],
+      "argument_hint": "",
+      "model": "",
+      "disable_model_invocation": false,
+      "good_for": [
+        "code implementation",
+        "bug fixes",
+        "code review",
+        "debugging",
+        "refactoring",
+        "test writing",
+        "verification"
+      ],
+      "not_for": [
+        "general writing polish",
+        "casual chat",
+        "skill creation"
+      ],
+      "cost_level": "medium",
+      "risk_level": "medium",
+      "borrowable": true,
+      "assignable": true,
+      "selectable": true,
+      "internal": false,
+      "planner_visible": true,
+      "source": "sample",
+      "path": "skills/code-engineer"
+    },
+    {
       "id": "final_synthesizer",
       "folder": "final-synthesizer",
       "display_name_zh": "final-synthesizer",
@@ -78,7 +133,7 @@
       "tags": [
         "skill"
       ],
-      "default_model": "deepseek_V4_flash_model",
+      "default_model": "",
       "allowed_mcp": [],
       "allowed_tools": [],
       "trigger": [],
@@ -107,7 +162,7 @@
       "tags": [
         "general"
       ],
-      "default_model": "deepseek_V4_flash_model",
+      "default_model": "",
       "allowed_mcp": [],
       "allowed_tools": [],
       "trigger": [],
@@ -129,104 +184,6 @@
       "path": "skills/full-worker-contract"
     },
     {
-      "id": "humanizer_zh",
-      "folder": "Humanizer-zh-main",
-      "display_name_zh": "中文去 AI 味",
-      "summary_zh": "去除文本中的 AI 生成痕迹。适用于编辑或审阅文本，使其听起来更自然、更像人类书写。 基于维基百科的\"AI 写作特征\"综合指南。检测并修复以下模式：夸大的象征意义、 宣传性语言、以 -ing 结尾的肤浅分析、模糊的归因、破折号过度使用、三段式法则、 AI 词汇、否定式排比、过多的连接性短语。",
-      "tags": [
-        "writing",
-        "chinese",
-        "rewrite",
-        "humanize",
-        "polish"
-      ],
-      "default_model": "deepseek_V4_flash_model",
-      "allowed_mcp": [],
-      "allowed_tools": [
-        "Read",
-        "Write",
-        "Edit",
-        "AskUserQuestion"
-      ],
-      "trigger": [],
-      "argument_hint": "",
-      "model": "",
-      "disable_model_invocation": false,
-      "good_for": [
-        "中文润色",
-        "文案改写",
-        "去 AI 味",
-        "语气自然化"
-      ],
-      "not_for": [
-        "读取项目文件",
-        "代码评审",
-        "删除或备份文件"
-      ],
-      "cost_level": "low",
-      "risk_level": "low",
-      "borrowable": true,
-      "assignable": true,
-      "selectable": true,
-      "internal": false,
-      "planner_visible": true,
-      "source": "sample",
-      "path": "skills/Humanizer-zh-main"
-    },
-    {
-      "id": "jpc_now_skill",
-      "folder": "jpc_now_skill",
-      "display_name_zh": "JPC 多语言代码规范",
-      "summary_zh": "多语言开发规范技能，覆盖 Java/Python/C++ 三种语言的编码最佳实践，结合 Karpathy 行为准则。当用户编写、修改、审查 Java/Python/C++ 代码时使用此技能，确保代码风格一致、遵循业界规范、避免常见 LLM 编码错误。触发场景包括：代码开发、代码评审、接口设计、重构、新增功能、修复 bug。即使用户未明确提及\"规范\"或\"最佳实践\"，只要涉及上述语言的编码任务，都应使用此技能。",
-      "tags": [
-        "code",
-        "python",
-        "java",
-        "cpp",
-        "review",
-        "refactor",
-        "bugfix"
-      ],
-      "default_model": "mimo_model",
-      "allowed_mcp": [
-        "project_filesystem_readonly",
-        "code_locator",
-        "workspace_edit",
-        "command_runner",
-        "git_tools",
-        "safe_backup",
-        "web_search",
-        "context7_docs",
-        "grep_code_search"
-      ],
-      "allowed_tools": [],
-      "trigger": [],
-      "argument_hint": "",
-      "model": "",
-      "disable_model_invocation": false,
-      "good_for": [
-        "编写代码",
-        "修改代码",
-        "审查代码",
-        "解释代码",
-        "排查报错"
-      ],
-      "not_for": [
-        "中文文案润色",
-        "创建 skill",
-        "纯闲聊"
-      ],
-      "cost_level": "medium",
-      "risk_level": "medium",
-      "borrowable": true,
-      "assignable": true,
-      "selectable": true,
-      "internal": false,
-      "planner_visible": true,
-      "source": "sample",
-      "path": "skills/jpc_now_skill"
-    },
-    {
       "id": "orchestrator_planner",
       "folder": "orchestrator-planner",
       "display_name_zh": "orchestrator-planner",
@@ -235,7 +192,7 @@
         "skill",
         "web"
       ],
-      "default_model": "deepseek_V4_pro_model",
+      "default_model": "",
       "allowed_mcp": [],
       "allowed_tools": [],
       "trigger": [],
@@ -265,7 +222,7 @@
         "project",
         "skill"
       ],
-      "default_model": "deepseek_v4_flash_model",
+      "default_model": "",
       "allowed_mcp": [
         "project_filesystem_readonly",
         "code_locator",
@@ -303,7 +260,7 @@
       "tags": [
         "general"
       ],
-      "default_model": "deepseek_V4_pro_model",
+      "default_model": "",
       "allowed_mcp": [],
       "allowed_tools": [],
       "trigger": [],
@@ -332,7 +289,7 @@
       "tags": [
         "general"
       ],
-      "default_model": "deepseek_V4_flash_model",
+      "default_model": "",
       "allowed_mcp": [],
       "allowed_tools": [],
       "trigger": [],
@@ -365,7 +322,7 @@
         "evaluation",
         "registry"
       ],
-      "default_model": "deepseek_V4_pro_model",
+      "default_model": "",
       "allowed_mcp": [
         "skills_filesystem_readonly",
         "workspace_edit",

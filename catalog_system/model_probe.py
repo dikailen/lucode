@@ -8,12 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from dotenv import dotenv_values
-
 
 CACHE_VERSION = 5
 CACHE_RELATIVE_PATH = Path(".agent_cache") / "model_capabilities.json"
-BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 def load_probe_cache(project_root: Path) -> dict:
@@ -529,25 +526,8 @@ def _headers(model_info: dict) -> dict[str, str]:
 
 
 def _probe_input_for_model(model_info: dict) -> dict[str, Any]:
-    env = {key: value for key, value in dotenv_values(BASE_DIR / ".env").items() if key}
-    env.update({key: value for key, value in os.environ.items() if value is not None})
     model_id = str(model_info.get("id") or "")
-    api_key = ""
-    shared_group = str(model_info.get("shared_config_group") or "").strip().upper()
-    if shared_group:
-        if shared_group == "MIMO":
-            api_key = env.get("MIMO_API_KEY") or env.get("MODEL_MIMO_API_KEY") or ""
-        else:
-            api_key = env.get(f"MODEL_{shared_group}_API_KEY") or ""
-    elif model_id == "deepseek_V4_flash_model":
-        api_key = env.get("DEEPSEEK_API_KEY") or ""
-    elif model_id == "deepseek_V4_pro_model":
-        api_key = env.get("DEEPSEEK_pro_API_KEY") or ""
-    elif model_id == "mimo_model":
-        api_key = env.get("MIMO_API_KEY") or ""
-    elif model_id.endswith("_model"):
-        prefix = model_id.removesuffix("_model").upper()
-        api_key = env.get(f"MODEL_{prefix}_API_KEY") or ""
+    api_key = str(model_info.get("api_key") or model_info.get("api_key_value") or "")
     if not api_key:
         api_key = _lucode_api_key_for_model_id(model_id)
 

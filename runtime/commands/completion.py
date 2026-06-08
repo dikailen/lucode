@@ -431,6 +431,12 @@ def _model_tuner_completion_items(
         ("/models brain reset", "重置项目多脑模型覆盖配置"),
         ("/models select", "高级命令：统一默认模型"),
     )
+    if not _should_show_advanced_model_command_roots(lower):
+        fixed = tuple(
+            item
+            for item in fixed
+            if item[0] in {"/models", "/models available", "/models probe", "/models roles"}
+        )
     for text, meta in fixed:
         if _completion_matches(text, normalized):
             items.append(CommandCompletionItem(text=text, display=text, meta=meta, start_position=start_position))
@@ -466,6 +472,8 @@ def _model_tuner_completion_items(
 
 
 def _should_expand_model_command_candidates(lower_query: str) -> bool:
+    if lower_query in {"/models select", "/model select"}:
+        return True
     advanced_prefixes = (
         "/models brain ",
         "/model brain ",
@@ -473,6 +481,20 @@ def _should_expand_model_command_candidates(lower_query: str) -> bool:
         "/model select ",
     )
     return any(lower_query.startswith(prefix) for prefix in advanced_prefixes)
+
+
+def _should_show_advanced_model_command_roots(lower_query: str) -> bool:
+    advanced_roots = (
+        "/models brain",
+        "/model brain",
+        "/models select",
+        "/model select",
+        "/models list",
+        "/model list",
+        "/models probe force",
+        "/model probe force",
+    )
+    return any(lower_query == root or lower_query.startswith(f"{root} ") for root in advanced_roots)
 
 
 def clear_completion_caches() -> None:

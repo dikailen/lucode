@@ -313,7 +313,7 @@ def apply_pipeline_gate(plan: PlannerResult, refined_request: str) -> GateDecisi
         task_text = _task_text(task).lower()
         task_edit_intent = bool(
             getattr(task, "write_intent", [])
-            or (task.skill_id == "jpc_now_skill" and _contains_any(task_text, EDIT_MARKERS))
+            or (task.skill_id == "code_engineer" and _contains_any(task_text, EDIT_MARKERS))
         )
         task_test_intent = _contains_any(task_text, TEST_MARKERS)
         _append_unique(task.mcp, "code_locator")
@@ -373,7 +373,7 @@ def should_verify_task(task: PlannedTask) -> bool:
     if _is_explicit_readonly_analysis(text):
         return False
     return (
-        task.skill_id == "jpc_now_skill"
+        task.skill_id == "code_engineer"
         and ("workspace_edit" in task.mcp or "command_runner" in task.mcp or _contains_any(text, EDIT_MARKERS))
     )
 
@@ -543,7 +543,7 @@ def _combined_plan_text(plan: PlannerResult, refined_request: str) -> str:
 
 
 def _is_code_task(task: PlannedTask) -> bool:
-    if task.skill_id == "jpc_now_skill":
+    if task.skill_id == "code_engineer":
         return True
     return "code_locator" in task.mcp or "workspace_edit" in task.mcp or "command_runner" in task.mcp
 

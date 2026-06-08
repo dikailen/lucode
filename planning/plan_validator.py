@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from catalog_system.loader import load_mcp_catalog, load_skill_catalog
 from catalog_system.model_catalog import load_model_catalog
 from planning.planner_schema import PlannerResult
+from runtime.config.model_selection import model_runtime_available
 from runtime.safety.privacy import NETWORK_MCP_IDS, PrivacyPolicy
 
 
@@ -85,6 +86,10 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
             continue
         if not privacy_policy.model_allowed(model):
             errors.append(privacy_policy.model_error(task.model, model))
+        if not model_runtime_available(model):
+            errors.append(f"模型当前不可运行：{task.model}")
+        if task.mcp and model.get("supports_tools") is False:
+            errors.append(f"模型不支持工具调用：{task.model}")
 
         allowed_mcp = set(skill.get("allowed_mcp") or [])
         for mcp_id in task.mcp:

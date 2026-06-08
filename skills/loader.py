@@ -2,11 +2,12 @@ from pathlib import Path
 
 from catalog_system.refresher import build_skill_catalog
 from runtime.common.text_utils import sanitize_text
+from runtime.config.app_home import get_app_home
 from skills.registry import SKILLS
 
 
-SKILLS_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SKILLS_DIR.parent
+PROJECT_ROOT = get_app_home()
+SKILLS_DIR = PROJECT_ROOT / "skills"
 
 
 def load_skill(skill_name: str) -> str:

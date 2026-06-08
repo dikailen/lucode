@@ -19,6 +19,10 @@ from runtime.common.text_utils import sanitize_text
 from runtime.ui.theme import prompt_toolkit_prompt_style, resolve_ui_theme
 
 
+_STD_INPUT_HANDLE = -10
+_STD_OUTPUT_HANDLE = -11
+
+
 def _null_context():
     return nullcontext()
 
@@ -68,7 +72,40 @@ def should_enable_prompt_toolkit(
         return False
     stdin = sys.stdin if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
-    return _is_tty(stdin) and _is_tty(stdout)
+    return _is_interactive_terminal_stream(stdin, sys.stdin, _STD_INPUT_HANDLE) and _is_interactive_terminal_stream(
+        stdout,
+        sys.stdout,
+        _STD_OUTPUT_HANDLE,
+    )
+
+
+def prompt_toolkit_input_diagnostics(
+    stdin=None,
+    stdout=None,
+    *,
+    prompt_toolkit_available: bool | None = None,
+    env=None,
+) -> dict[str, object]:
+    env = os.environ if env is None else env
+    if prompt_toolkit_available is None:
+        prompt_toolkit_available = importlib.util.find_spec("prompt_toolkit") is not None
+    stdin = sys.stdin if stdin is None else stdin
+    stdout = sys.stdout if stdout is None else stdout
+    return {
+        "prompt_toolkit_available": bool(prompt_toolkit_available),
+        "disabled_by_env": str(env.get("LUCODE_DISABLE_PROMPT_TOOLKIT", "")).strip().lower()
+        in {"1", "true", "yes", "on"},
+        "stdin_isatty": _is_tty(stdin),
+        "stdout_isatty": _is_tty(stdout),
+        "stdin_windows_console": _windows_console_stream_available(stdin, sys.stdin, _STD_INPUT_HANDLE),
+        "stdout_windows_console": _windows_console_stream_available(stdout, sys.stdout, _STD_OUTPUT_HANDLE),
+        "enabled": should_enable_prompt_toolkit(
+            stdin,
+            stdout,
+            prompt_toolkit_available=prompt_toolkit_available,
+            env=env,
+        ),
+    }
 
 
 def prompt_mouse_support_enabled(env=None) -> bool:
@@ -942,6 +979,31 @@ def _is_tty(stream) -> bool:
         return False
     try:
         return bool(isatty())
+    except Exception:
+        return False
+
+
+def _is_interactive_terminal_stream(stream, canonical_stream, std_handle_id: int) -> bool:
+    if _is_tty(stream):
+        return True
+    return _windows_console_stream_available(stream, canonical_stream, std_handle_id)
+
+
+def _windows_console_stream_available(stream, canonical_stream, std_handle_id: int) -> bool:
+    if os.name != "nt" or stream is not canonical_stream:
+        return False
+    return _windows_console_handle_available(std_handle_id)
+
+
+def _windows_console_handle_available(std_handle_id: int) -> bool:
+    try:
+        import ctypes
+
+        handle = ctypes.windll.kernel32.GetStdHandle(std_handle_id)
+        if handle in (0, -1):
+            return False
+        mode = ctypes.c_uint()
+        return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
     except Exception:
         return False
 

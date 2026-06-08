@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
+
+ANSI_RESET = "\033[0m"
 
 
 @dataclass(frozen=True)
@@ -19,6 +22,22 @@ class UiTheme:
     success: str = "green"
     warning: str = "yellow"
     danger: str = "red"
+
+
+@dataclass(frozen=True)
+class AnsiStyle:
+    code: str
+
+
+panel_border = AnsiStyle("\033[94m")
+panel_title = AnsiStyle("\033[94m")
+section_title = AnsiStyle("\033[96m")
+muted = AnsiStyle("\033[90m")
+model_name = muted
+status_ok = AnsiStyle("\033[32m")
+status_warn = AnsiStyle("\033[33m")
+status_error = AnsiStyle("\033[31m")
+status_unknown = muted
 
 
 DEFAULT_UI_THEME = UiTheme()
@@ -98,3 +117,14 @@ def prompt_toolkit_ansi_color(theme: UiTheme | None) -> str:
 
 def prompt_toolkit_prompt_style(theme: UiTheme | None) -> str:
     return f"{prompt_toolkit_ansi_color(theme)} bold"
+
+
+def colorize(value: str, style: AnsiStyle) -> str:
+    text = str(value)
+    if os.environ.get("NO_COLOR") or not style.code:
+        return text
+    return f"{style.code}{text}{ANSI_RESET}"
+
+
+def panel_border_text(value: str) -> str:
+    return colorize(value, panel_border)

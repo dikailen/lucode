@@ -227,9 +227,9 @@ def build_fallback_planner_result(raw_user_input: str, model_output: str = "") -
         )
 
     if _looks_like_project_or_code_readonly(text):
-        skill_id = "jpc_now_skill" if _looks_like_code_edit_intent(raw, output) else "project_explorer"
+        skill_id = "code_engineer" if _looks_like_code_edit_intent(raw, output) else "project_explorer"
         mcp = ["code_locator", "project_filesystem_readonly"]
-        if skill_id == "jpc_now_skill":
+        if skill_id == "code_engineer":
             mcp.append("workspace_edit")
         model = _fallback_model_for_skill(skill_id, requires_tools=bool(mcp))
         if not model:
@@ -244,15 +244,17 @@ def build_fallback_planner_result(raw_user_input: str, model_output: str = "") -
         )
 
     if _looks_like_writing(text):
-        return _fallback_single_agent(
-            raw,
-            reason,
-            skill_id="humanizer_zh",
-            model=_fallback_model_for_skill("humanizer_zh", requires_tools=False) or _default_model_for_skill("humanizer_zh"),
-            mcp=[],
-            title="处理中文文本润色请求",
+        return PlannerResult(
+            route_type="direct_answer",
+            reason=reason,
+            refined_request=raw,
+            direct_answer_instruction=(
+                "The writing-polish skill is not included in the release package. "
+                "Answer directly in Chinese and help the user polish or rewrite the text without tools."
+            ),
+            tasks=[],
+            needs_synthesis=False,
         )
-
     return PlannerResult(
         route_type="direct_answer",
         reason=reason,
@@ -316,7 +318,7 @@ def _normalize_planner_result(result: PlannerResult, fallback_user_input: str = 
     _extract_internal_synthesizer_task(result)
 
     for task in result.tasks:
-        task.model = _normalize_model_reference(task.model, task.skill_id)
+        task.model = _normalize_model_reference(task.model, task.skill_id, requires_tools=bool(task.mcp))
 
     web_search_text = "\n".join(
         [
@@ -443,7 +445,7 @@ def _preserve_remote_lookup_constraints(result: PlannerResult, fallback_user_inp
         return
 
     for task in result.tasks:
-        if task.skill_id not in {"project_explorer", "jpc_now_skill", "skill_creator"}:
+        if task.skill_id not in {"project_explorer", "code_engineer", "skill_creator"}:
             continue
         task_text = f"{task.title}\n{task.instruction}"
         task_mcps = []
@@ -578,7 +580,7 @@ def _needs_grep_code_search(text: str) -> bool:
     )
 
 
-def _normalize_model_reference(model_id: str, skill_id: str = "") -> str:
+def _normalize_model_reference(model_id: str, skill_id: str = "", requires_tools: bool = False) -> str:
     model_id = str(model_id or "").strip()
     if not model_id:
         return model_id
@@ -595,37 +597,12 @@ def _normalize_model_reference(model_id: str, skill_id: str = "") -> str:
         return model_id
 
     models = {item.get("id"): item for item in catalog.get("models", []) if item.get("id")}
-    if model_id in models:
+    policy = PrivacyPolicy()
+    current = models.get(model_id)
+    if _model_usable_for_task(current, policy, requires_tools=requires_tools):
         return model_id
 
-    policy = PrivacyPolicy.from_env()
-    aliases = _legacy_model_alias_candidates(model_id, skill_id)
-    for candidate in policy.sort_model_ids(aliases, models):
-        info = models.get(candidate)
-        if _model_usable_for_task(info, policy, requires_tools=False):
-            return candidate
-
-    return model_id
-
-
-def _legacy_model_alias_candidates(model_id: str, skill_id: str = "") -> list[str]:
-    aliases = {
-        "mimo_model": [
-            "mimo_v25_pro_model",
-            "mimo_v25_model",
-        ],
-        "deepseek_V4_flash_model": [
-            "deepseek_v4_flash_model",
-            "deepseek_v4_pro_model",
-        ],
-        "deepseek_V4_pro_model": [
-            "deepseek_v4_pro_model",
-            "deepseek_v4_flash_model",
-        ],
-    }
-    candidates = list(aliases.get(model_id, []))
-    candidates.extend(_preferred_models_for_skill(skill_id))
-    return _dedupe(candidates)
+    return _fallback_model_for_skill(skill_id, requires_tools=requires_tools) or ""
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -704,49 +681,39 @@ def _looks_like_simple_chat(raw: str, output: str) -> bool:
 def _fallback_model_for_skill(skill_id: str, requires_tools: bool = False) -> str | None:
     try:
         from catalog_system.model_catalog import load_model_catalog
+        from runtime.config.model_selection import select_model_for_skill
         from runtime.safety.privacy import PrivacyPolicy
     except Exception:
-        return _default_model_for_skill(skill_id)
+        return None
 
-    policy = PrivacyPolicy.from_env()
+    policy = PrivacyPolicy()
     catalog = load_model_catalog()
     models = {item["id"]: item for item in catalog.get("models", [])}
-    preferred = _preferred_models_for_skill(skill_id)
-    for model_id in policy.sort_model_ids(preferred, models):
-        info = models.get(model_id)
-        if _model_usable_for_task(info, policy, requires_tools):
-            return model_id
+    selected = select_model_for_skill(
+        skill_id,
+        catalog,
+        privacy_mode=policy.mode,
+        requires_tools=requires_tools,
+    )
+    if selected:
+        return selected
     for model_id, info in sorted(models.items()):
         if _model_usable_for_task(info, policy, requires_tools):
             return model_id
-    return None if requires_tools else _default_model_for_skill(skill_id)
+    return None
 
 
 def _preferred_models_for_skill(skill_id: str) -> list[str]:
-    env_value = os.environ.get("AGENTS_FALLBACK_MODEL_PRIORITY") or ""
-    env_models = [item.strip() for item in env_value.split(",") if item.strip()]
-    if skill_id == "jpc_now_skill":
-        return env_models + ["mimo_model", "cloud_model", "deepseek_V4_pro_model", "deepseek_V4_flash_model", "local_model"]
-    if skill_id == "skill_creator":
-        return env_models + ["deepseek_V4_pro_model", "cloud_model", "mimo_model", "deepseek_V4_flash_model", "local_model"]
-    return env_models + ["cloud_model", "deepseek_V4_flash_model", "deepseek_V4_pro_model", "mimo_model", "local_model"]
+    return []
 
 
 def _model_usable_for_task(info: dict | None, policy, requires_tools: bool) -> bool:
-    if not info:
+    try:
+        from runtime.config.model_selection import model_usable_for_task
+    except Exception:
         return False
-    if not info.get("configured"):
-        return False
-    if not policy.model_allowed(info):
-        return False
-    if requires_tools and not info.get("supports_tools", True):
-        return False
-    return True
+    return model_usable_for_task(info, policy, requires_tools=requires_tools)
 
 
 def _default_model_for_skill(skill_id: str) -> str:
-    if skill_id == "jpc_now_skill":
-        return "mimo_model"
-    if skill_id == "skill_creator":
-        return "deepseek_V4_pro_model"
-    return "deepseek_V4_flash_model"
+    return ""

@@ -289,7 +289,7 @@ class AgentFactory:
             "你是动态多智能体系统的主脑。当前问题不需要创建专家 Agent。"
             "请根据用户问题直接用中文回答，简洁、自然、准确。默认不要使用 emoji。"
             "介绍自己时统一自称“动态多智能体助手”或“主脑规划器”，"
-            "不要自称 JPCoder AI、ChatGPT 或其它未由用户指定的品牌名。\n\n"
+            "不要自称 Lucode、ChatGPT 或其它未由用户指定的品牌名。\n\n"
             + self._direct_answer_mode_context(execution_mode)
             + f"回答要求：{instruction}"
         )

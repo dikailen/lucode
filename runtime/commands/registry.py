@@ -48,6 +48,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         argument_hint="<provider/model> [fallback...]",
         aliases=("/model select",),
         writable=True,
+        metadata={"advanced": True},
     ),
     CommandSpec(
         "/models role",
@@ -56,6 +57,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         argument_hint="<role> <provider/model> [...]",
         aliases=("/model role",),
         writable=True,
+        metadata={"advanced": True},
     ),
     CommandSpec(
         "/models brain",
@@ -64,8 +66,16 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         argument_hint="<脑位> <provider/model> [fallback...]",
         aliases=("/model brain",),
         writable=True,
+        metadata={"advanced": True},
     ),
-    CommandSpec("/models brain reset", "重置项目多脑模型覆盖配置", "模型", aliases=("/model brain reset",), writable=True),
+    CommandSpec(
+        "/models brain reset",
+        "重置项目多脑模型覆盖配置",
+        "模型",
+        aliases=("/model brain reset",),
+        writable=True,
+        metadata={"advanced": True},
+    ),
     CommandSpec("/models probe", "主动探测已配置模型的 key、接口和能力", "模型", argument_hint="[force]", aliases=("/model probe",), writable=True),
     CommandSpec("/connect", "进入 Provider 连接向导或添加模型 Provider", "模型", argument_hint="[provider] [--api-key ...]", writable=True),
     CommandSpec("/connect remove", "删除 Provider 配置、API key 和失效模型引用", "模型", argument_hint="<provider>", aliases=("/connect delete",), writable=True),
@@ -100,9 +110,17 @@ def all_command_specs(workspace_context=None) -> tuple[CommandSpec, ...]:
     return _dedupe_command_specs((*COMMAND_SPECS, *_external_command_specs(workspace_context)))
 
 
-def search_command_specs(filter_text: str = "", workspace_context=None) -> list[CommandSpec]:
+def search_command_specs(
+    filter_text: str = "",
+    workspace_context=None,
+    *,
+    include_advanced: bool | None = None,
+) -> list[CommandSpec]:
     query = _normalize_query(filter_text)
     specs = all_command_specs(workspace_context)
+    show_advanced = _should_show_advanced(query) if include_advanced is None else bool(include_advanced)
+    if not show_advanced:
+        specs = tuple(spec for spec in specs if not spec.metadata.get("advanced"))
     if not query:
         return list(specs)
     return [spec for spec in specs if _matches(spec, query)]
@@ -155,6 +173,18 @@ def _normalize_query(value: str) -> str:
     if query.startswith("/"):
         query = query[1:]
     return query
+
+
+def _should_show_advanced(query: str) -> bool:
+    advanced_roots = (
+        "models brain",
+        "model brain",
+        "models role",
+        "model role",
+        "models select",
+        "model select",
+    )
+    return any(query == root or query.startswith(f"{root} ") for root in advanced_roots)
 
 
 def _root_command(value: str) -> str:

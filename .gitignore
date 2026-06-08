@@ -1,4 +1,5 @@
 .env
+.env.example
 __pycache__/
 .pytest_cache/
 .lucode/
@@ -13,6 +14,16 @@ build/
 dist/
 *.pyc
 package-lock.json
+package.json
+lucode-*.tgz
+constraints-runtime.txt
+lucode/frozen_entry.py
+bin/
+scripts/
+tests/
+skills/jpc_now_skill/
+skills/Humanizer-zh-main/
+skills/task-router/
 
 # Local Chinese planning / review notes and machine-specific launcher.
 /计划文档/

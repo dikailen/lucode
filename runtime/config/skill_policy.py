@@ -14,5 +14,5 @@ INTERNAL_SKILLS = frozenset(
     }
 )
 PROTECTED_SYSTEM_SKILLS = INTERNAL_SKILLS
-DEPRECATED_SKILLS = frozenset({"task_router"})
+DEPRECATED_SKILLS = frozenset({"task_router", "jpc_now_skill", "humanizer_zh"})
 

@@ -314,6 +314,23 @@ def reset_role_model_priorities(*, workspace_root: Path | str | None = None) -> 
     return config
 
 
+def set_execution_mode(mode: str, *, workspace_root: Path | str | None = None) -> dict[str, Any]:
+    value = str(mode or "").strip().lower()
+    if value not in {"solo", "serial", "full"}:
+        raise ValueError("执行模式必须是 solo、serial 或 full。")
+    config = load_lucode_config(workspace_root=workspace_root)
+    config["mode"] = value
+    save_lucode_config(config, workspace_root=workspace_root)
+    return config
+
+
+def set_query_refiner_enabled(enabled: bool, *, workspace_root: Path | str | None = None) -> dict[str, Any]:
+    config = load_lucode_config(workspace_root=workspace_root)
+    config["query_refiner_enabled"] = bool(enabled)
+    save_lucode_config(config, workspace_root=workspace_root)
+    return config
+
+
 def prune_model_refs_from_config(
     config: dict[str, Any],
     *,
@@ -436,9 +453,6 @@ def configured_provider_model_definitions(
                 "id": model_id_for_provider_model(provider_id, model_name),
                 "display_name_zh": f"{display_name} {model_name}",
                 "provider": provider_id,
-                "api_key_env": "",
-                "base_url_env": "",
-                "model_env": "",
                 "api_key_value": api_key,
                 "base_url_value": base_url,
                 "model_name_value": model_name,

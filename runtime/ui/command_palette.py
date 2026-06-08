@@ -5,6 +5,7 @@ import shutil
 import unicodedata
 
 from runtime.commands.registry import search_command_specs
+from runtime.ui.theme import panel_border_text
 
 LUCODE_BLUE = "\033[94m"
 ANSI_RESET = "\033[0m"
@@ -81,6 +82,4 @@ def _display_width(value: str) -> int:
 
 
 def _ansi_blue(value: str) -> str:
-    if os.environ.get("NO_COLOR"):
-        return value
-    return f"{LUCODE_BLUE}{value}{ANSI_RESET}"
+    return panel_border_text(value)

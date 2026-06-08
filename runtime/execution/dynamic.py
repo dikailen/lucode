@@ -76,6 +76,7 @@ from runtime.execution.task_runner import (
 from runtime.safety.privacy import PrivacyPolicy
 from runtime.safety.repair_loop import build_repair_request, should_retry
 from runtime.config.settings import RuntimeSettings
+from runtime.config.model_selection import model_usable_for_task
 from runtime.events import ExecutionEventBus
 from runtime.ui.plan_display import planning_status, render_compact_plan_summary
 
@@ -478,18 +479,23 @@ def _apply_executor_model_defaults(plan, settings, model_registry) -> None:
     except Exception:
         executor_info = None
 
-    executor_supports_tools = executor_info.get("supports_tools", True) if executor_info else True
-
     for task in plan.tasks:
-        if not task.model or not _task_model_is_usable(model_registry, task.model):
-            needs_tools = bool(task.mcp)
-            if needs_tools and not executor_supports_tools:
-                # Executor model doesn't support tools, keep a usable explicit task model.
-                if task.model and _task_model_is_usable(model_registry, task.model):
-                    continue
-            task.model = executor_model_id
-            if not needs_tools or executor_supports_tools:
+        needs_tools = bool(task.mcp)
+        if not task.model or not _task_model_is_usable(
+            model_registry,
+            task.model,
+            privacy_mode=getattr(settings, "privacy_mode", "local_first"),
+            requires_tools=needs_tools,
+        ):
+            if executor_info and not _model_info_usable_for_task(
+                executor_info,
+                privacy_mode=getattr(settings, "privacy_mode", "local_first"),
+                requires_tools=needs_tools,
+            ):
                 continue
+            if not executor_info and needs_tools:
+                continue
+            task.model = executor_model_id
 
 
 def _model_label_map(model_registry, model_ids) -> dict[str, str]:
@@ -563,22 +569,36 @@ def _title_model_part(part: str) -> str:
     return text[:1].upper() + text[1:]
 
 
-def _task_model_is_usable(model_registry, model_id: str) -> bool:
+def _task_model_is_usable(
+    model_registry,
+    model_id: str,
+    *,
+    privacy_mode: str = "local_first",
+    requires_tools: bool = False,
+) -> bool:
     if not model_id:
         return False
     try:
         info = model_registry.get_model_info(model_id)
     except Exception:
-        definitions = getattr(model_registry, "definitions", {}) or {}
-        return model_id in definitions
-    if info.get("configured") is False:
         return False
-    probe = info.get("probe") or {}
-    status = str(probe.get("status") or "").strip()
-    return status not in {
-        "chat_failed",
-        "probe_failed",
-        "service_unavailable",
-        "model_missing",
-        "capability_probe_failed",
-    }
+    return _model_info_usable_for_task(
+        info,
+        privacy_mode=privacy_mode,
+        requires_tools=requires_tools,
+    )
+
+
+def _model_info_usable_for_task(
+    info: dict | None,
+    *,
+    privacy_mode: str = "local_first",
+    requires_tools: bool = False,
+) -> bool:
+    if not info:
+        return False
+    return model_usable_for_task(
+        info,
+        PrivacyPolicy(privacy_mode),
+        requires_tools=requires_tools,
+    )
