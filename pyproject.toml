@@ -30,6 +30,14 @@ include = [
   "runtime*",
   "skills*",
 ]
+exclude = [
+  "tests*",
+  "bin*",
+  "scripts*",
+  "skills.jpc_now_skill*",
+  "skills.Humanizer-zh-main*",
+  "skills.task-router*",
+]
 
 [tool.setuptools.package-data]
 catalogs = ["*.json", "*.md"]
