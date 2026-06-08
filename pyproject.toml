@@ -34,6 +34,7 @@ exclude = [
   "tests*",
   "bin*",
   "scripts*",
+  "lucode.frozen_entry",
   "skills.jpc_now_skill*",
   "skills.Humanizer-zh-main*",
   "skills.task-router*",
