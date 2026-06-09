@@ -13,7 +13,7 @@ def should_print_final_output(hooks, final_output) -> bool:
         "本轮任务超过",
         "主脑规划未通过校验",
         "计划审查未通过",
-        "已收到 /stop",
+        "已收到中断（Ctrl-C）",
         "已拒绝工具调用",
     )
     return text.startswith(important_prefixes)
@@ -61,10 +61,6 @@ def format_turn_error(exc: Exception) -> str:
 
 def is_exit_command(user_input: str) -> bool:
     return sanitize_text(user_input).strip().lower() == "/exit"
-
-
-def is_stop_command(user_input: str) -> bool:
-    return sanitize_text(user_input).strip().lower() == "/stop"
 
 
 def is_new_command(user_input: str) -> bool:

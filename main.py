@@ -14,7 +14,6 @@ from lucode.shell.turn_display import (
     format_turn_error as _format_turn_error,
     is_exit_command as _is_exit_command,
     is_new_command as _is_new_command,
-    is_stop_command as _is_stop_command,
     should_print_final_output as _should_print_final_output,
     turn_status_label as _turn_status_label,
 )

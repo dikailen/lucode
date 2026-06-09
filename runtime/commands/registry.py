@@ -97,7 +97,6 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("/permissions", "查看项目权限策略", "安全"),
     CommandSpec("/audit", "查看最近工具审批审计记录", "安全", aliases=("/hooks",)),
     CommandSpec("/new", "清空对话上下文并重绘欢迎界面", "会话", writable=True, interactive_only=True),
-    CommandSpec("/stop", "中止当前输入或运行中的任务", "会话", interactive_only=True),
     CommandSpec("/exit", "退出 Lucode", "会话", interactive_only=True),
 )
 

@@ -74,9 +74,9 @@ def render_readonly_command(command: str, settings: RuntimeSettings, workspace_c
         return render_command_palette(normalized, workspace_context=workspace_context)
     if lower == "/expand" or lower.startswith("/expand "):
         return _render_expand_command(normalized, workspace_context)
-    if lower.startswith("/") and len(lower) > 1 and not lower.startswith(("/plan", "/diff", "/rollback", "/new", "/stop", "/exit")):
+    if lower.startswith("/") and len(lower) > 1 and not lower.startswith(("/plan", "/diff", "/rollback", "/new", "/exit")):
         menu = render_command_palette(normalized, workspace_context=workspace_context)
-        if "没有匹配命令" not in menu and lower.split()[0] not in _KNOWN_COMMAND_PREFIXES:
+        if lower.split()[0] not in _KNOWN_COMMAND_PREFIXES:
             return menu
     if lower == "/api show":
         return _render_api_show(settings)

@@ -9,7 +9,6 @@ from lucode.shell.turn_display import (
     format_turn_error,
     is_exit_command,
     is_new_command,
-    is_stop_command,
 )
 from planning.planner import format_plan_preview, preview_plan
 from runtime.commands.invocation import resolve_mcp_prompt_invocation
@@ -79,10 +78,6 @@ async def handle_slash_command(
     if is_exit_command(user_input):
         print("已退出。")
         return SlashCommandResult(handled=True, should_exit=True)
-
-    if is_stop_command(user_input):
-        print("已停止当前输入，你可以重新输入新的问题。")
-        return SlashCommandResult(handled=True)
 
     if is_new_command(user_input):
         print("已创建新对话，历史上下文已清空。")

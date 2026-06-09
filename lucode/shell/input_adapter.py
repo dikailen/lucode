@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import os
+import signal
 import sys
 import threading
 from contextlib import nullcontext
@@ -659,7 +660,7 @@ class StdinConsoleAdapter:
 
 
 class RuntimeCommandSession:
-    """Watch stdin while a turn is running so /stop can cancel in-flight work."""
+    """Watch a running turn so Ctrl-C can cancel in-flight work without exiting."""
 
     def __init__(self, console, timeout_seconds: float | None = None, output_controller=None):
         self.console = console
@@ -692,9 +693,24 @@ class RuntimeCommandSession:
                 if not work_task.done():
                     await _cancel_task_without_blocking(work_task)
 
+        stop_task = None
+        poll_task = None
+        prev_sigint_handler = None
+        sigint_installed = False
+        if interactive:
+            loop = asyncio.get_running_loop()
+            stop_event = asyncio.Event()
+            prev_sigint_handler, sigint_installed = self._install_sigint_handler(loop, stop_event)
+            stop_task = asyncio.create_task(stop_event.wait())
+            poll_task = asyncio.create_task(asyncio.sleep(0.25))
+
         try:
             while True:
                 wait_set = {work_task}
+                if stop_task is not None:
+                    wait_set.add(stop_task)
+                if poll_task is not None:
+                    wait_set.add(poll_task)
                 if input_task is not None:
                     wait_set.add(input_task)
                 if approval_task is not None:
@@ -705,6 +721,24 @@ class RuntimeCommandSession:
                     wait_set,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+
+                if stop_task is not None and stop_task in done:
+                    if self._approval_future is not None and not self._approval_future.done():
+                        self._approval_future.set_result("")
+                        self.approval_waiting = False
+                        self._restore_approval_phase()
+                    await _cancel_task_without_blocking(work_task)
+                    self._mark_failed("stopped")
+                    return RuntimeTurnResult(
+                        final_output="已收到中断（Ctrl-C），本轮执行已停止。你可以直接重新输入新的问题。",
+                        stopped=True,
+                    )
+
+                if poll_task is not None and poll_task in done:
+                    completed_poll_task = poll_task
+                    poll_task = asyncio.create_task(asyncio.sleep(0.25))
+                    if done == {completed_poll_task}:
+                        continue
 
                 if approval_task is not None and approval_task in done:
                     if self._approval_requested is not None:
@@ -739,38 +773,29 @@ class RuntimeCommandSession:
                         stopped=True,
                     )
 
-                line = sanitize_text(await input_task).lstrip("\ufeff").strip() if input_task is not None else ""
+                if input_task is not None and input_task in done:
+                    line = sanitize_text(await input_task).lstrip("\ufeff").strip()
 
-                if self._approval_future is not None and not self._approval_future.done():
-                    if _is_stop_command(line):
-                        self._approval_future.set_result("")
+                    if self._approval_future is not None and not self._approval_future.done():
+                        self._approval_future.set_result(line)
                         self.approval_waiting = False
                         self._restore_approval_phase()
-                        await _cancel_task_without_blocking(work_task)
-                        self._mark_failed("stopped")
-                        return RuntimeTurnResult(
-                            final_output="已收到 /stop，本轮执行已中断。你可以直接重新输入新的问题。",
-                            stopped=True,
-                        )
-                    self._approval_future.set_result(line)
-                    self.approval_waiting = False
-                    self._restore_approval_phase()
-                elif _is_stop_command(line):
-                    await _cancel_task_without_blocking(work_task)
-                    self._mark_failed("stopped")
-                    return RuntimeTurnResult(
-                        final_output="已收到 /stop，本轮执行已中断。你可以直接重新输入新的问题。",
-                        stopped=True,
-                    )
-                elif self._should_drop_orphan_approval_token(line):
-                    pass
-                elif line:
-                    self.console.defer(line)
+                    elif self._should_drop_orphan_approval_token(line):
+                        pass
+                    elif line:
+                        self.console.defer(line)
 
-                if control_input_enabled and input_task is not None:
-                    input_task = asyncio.create_task(self._read_control_line())
+                    if control_input_enabled:
+                        input_task = asyncio.create_task(self._read_control_line())
         finally:
+            self._restore_sigint_handler(prev_sigint_handler, sigint_installed)
             self._restore_approval_phase()
+            if stop_task and not stop_task.done():
+                stop_task.cancel()
+                await asyncio.gather(stop_task, return_exceptions=True)
+            if poll_task and not poll_task.done():
+                poll_task.cancel()
+                await asyncio.gather(poll_task, return_exceptions=True)
             if approval_task and not approval_task.done():
                 approval_task.cancel()
                 await asyncio.gather(approval_task, return_exceptions=True)
@@ -854,13 +879,35 @@ class RuntimeCommandSession:
             except Exception:
                 pass
 
+    def _install_sigint_handler(self, loop, stop_event):
+        """During a running turn, Ctrl-C stops this turn instead of exiting Lucode."""
+
+        def _handler(signum, frame):
+            del signum, frame
+            loop.call_soon_threadsafe(stop_event.set)
+
+        try:
+            previous = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, _handler)
+            return previous, True
+        except (ValueError, OSError, RuntimeError):
+            return None, False
+
+    def _restore_sigint_handler(self, previous, installed) -> None:
+        if not installed:
+            return
+        try:
+            signal.signal(signal.SIGINT, previous if previous is not None else signal.SIG_DFL)
+        except (ValueError, OSError, RuntimeError):
+            pass
+
     async def _read_approval_line(self) -> str:
         read_choice_line = getattr(self.console, "read_choice_line", None)
         if callable(read_choice_line):
             return await read_choice_line(
                 "审批> ",
                 _approval_choices(),
-                bottom_toolbar="↑↓ 选择，Enter 确认；y/n 可直接输入；/stop 中断本轮",
+                bottom_toolbar="↑↓ 选择，Enter 确认；y/n 可直接输入；Ctrl-C 中断本轮",
                 reserve_space_for_menu=7,
             )
         return await self.console.read_runtime_line()
@@ -942,10 +989,6 @@ def _approval_choices() -> list[ConsoleChoice]:
         ConsoleChoice("rule", "本会话允许同类工具", "同类工具本轮自动批准"),
         ConsoleChoice("edit", "让模型改方案", "不执行，要求模型换更安全方案"),
     ]
-
-
-def _is_stop_command(user_input: str) -> bool:
-    return sanitize_text(user_input).strip().lower() == "/stop"
 
 
 def _is_orphan_approval_token(user_input: str) -> bool:
