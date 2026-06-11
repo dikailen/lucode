@@ -24,13 +24,21 @@ async def run_with_approval(
     max_turns=20,
     approval_policy=None,
     stream_output: bool | None = None,
+    on_delta=None,
 ):
     """Run an agent and ask the user before executing approval-required tools."""
 
     once_approved_signatures = set()
     approved_tools_for_session = set()
     approved_tool_rules = set()
-    result = await run_agent_once(agent, run_input, hooks, max_turns=max_turns, stream_output=stream_output)
+    result = await run_agent_once(
+        agent,
+        run_input,
+        hooks,
+        max_turns=max_turns,
+        stream_output=stream_output,
+        on_delta=on_delta,
+    )
 
     while result.interruptions:
         state = result.to_state()
@@ -193,7 +201,14 @@ async def run_with_approval(
                     reason="user_denied_or_noninteractive",
                 )
 
-        result = await run_agent_once(agent, state, hooks, max_turns=max_turns, stream_output=stream_output)
+        result = await run_agent_once(
+            agent,
+            state,
+            hooks,
+            max_turns=max_turns,
+            stream_output=stream_output,
+            on_delta=on_delta,
+        )
 
     return result
 

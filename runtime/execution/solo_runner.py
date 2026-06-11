@@ -159,6 +159,8 @@ async def run_solo_request(
     run_agent,
     settings: RuntimeSettings | None = None,
     project_root: Path | None = None,
+    output_controller=None,
+    event_bus=None,
 ) -> str:
     """Run one tool-capable Agent without planner/refiner/synthesizer."""
 
@@ -179,6 +181,8 @@ async def run_solo_request(
         mcp_ids=mcp_ids,
         settings=settings,
         project_root=project_root,
+        output_controller=output_controller,
+        event_bus=event_bus,
     )
     rich_started = rich_runtime is not None and rich_state is not None
     try:
@@ -192,7 +196,11 @@ async def run_solo_request(
                 agent,
                 run_input,
                 hooks,
-                **_solo_run_agent_kwargs(run_agent, rich_started=rich_started),
+                **_solo_run_agent_kwargs(
+                    run_agent,
+                    rich_started=rich_started,
+                    on_delta=_solo_delta_emitter(event_bus),
+                ),
             )
         if rich_runtime is not None and rich_state is not None and rich_task is not None:
             rich_state.record_task_result(rich_task, str(result.final_output))
@@ -291,6 +299,8 @@ def _start_solo_rich_live(
     mcp_ids: list[str],
     settings: RuntimeSettings,
     project_root: Path | None,
+    output_controller=None,
+    event_bus=None,
 ) -> tuple[RichLiveRuntime | None, PipelineRunState | None, PlannedTask | None]:
     if not _should_use_solo_rich_live():
         return None, None, None
@@ -314,6 +324,8 @@ def _start_solo_rich_live(
         plan,
         project_root=project_root,
         mode=settings.execution_mode,
+        output_controller=output_controller,
+        event_bus=event_bus,
     )
     if project_root is not None:
         setattr(run_state, "project_root", Path(project_root))
@@ -344,10 +356,12 @@ def _solo_model_label_map(model_registry, model_ids: list[str]) -> dict[str, str
         return {str(model_id): str(model_id) for model_id in model_ids if str(model_id or "").strip()}
 
 
-def _solo_run_agent_kwargs(run_agent, *, rich_started: bool) -> dict:
+def _solo_run_agent_kwargs(run_agent, *, rich_started: bool, on_delta=None) -> dict:
     kwargs = {"max_turns": 20}
     if rich_started and _run_agent_accepts_stream_output(run_agent):
         kwargs["stream_output"] = False
+    if on_delta is not None and _run_agent_accepts_on_delta(run_agent):
+        kwargs["on_delta"] = on_delta
     return kwargs
 
 
@@ -359,6 +373,38 @@ def _run_agent_accepts_stream_output(run_agent) -> bool:
     if "stream_output" in parameters:
         return True
     return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
+def _run_agent_accepts_on_delta(run_agent) -> bool:
+    try:
+        parameters = inspect.signature(run_agent).parameters
+    except (TypeError, ValueError):
+        return True
+    if "on_delta" in parameters:
+        return True
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
+def _solo_delta_emitter(event_bus):
+    if event_bus is None or not hasattr(event_bus, "emit"):
+        return None
+
+    def _emit_delta(text: str) -> None:
+        if not text:
+            return
+        try:
+            event_bus.emit(
+                "AgentMessageDelta",
+                str(text),
+                agent="solo",
+                task_id="solo_agent",
+                status="streaming",
+                payload={"text": str(text)},
+            )
+        except Exception:
+            return
+
+    return _emit_delta
 
 
 class _SoloWorkspaceContext:

@@ -13,6 +13,7 @@ class ExecutionContext:
     run_agent: Callable
     settings: Any
     output_controller: Any = None
+    event_bus: Any = None
 
 
 class ExecutionStrategy(Protocol):

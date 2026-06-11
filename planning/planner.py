@@ -26,13 +26,13 @@ def build_query_refiner(model):
     )
 
 
-def build_orchestrator_planner(model):
+def build_orchestrator_planner(model, allowed_worker_models=None):
     Agent = agent_class()
     skill_catalog = compact_skill_catalog_for_prompt()
     cli_safety_rules = compact_cli_safety_rules_for_prompt()
     mcp_catalog = compact_mcp_catalog_for_prompt()
     permission_policy = compact_permission_policy_for_prompt()
-    model_catalog = compact_model_catalog_for_prompt()
+    model_catalog = compact_model_catalog_for_prompt(allowed_ids=allowed_worker_models)
 
     instructions = (
         load_skill("orchestrator_planner")
@@ -61,6 +61,7 @@ async def preview_plan(
     planner_model,
     hooks=None,
     refiner_enabled: bool = True,
+    allowed_worker_models=None,
 ) -> tuple[object, PlannerResult]:
     """Run query refinement and planner preview without creating execution Agents."""
 
@@ -73,7 +74,7 @@ async def preview_plan(
     else:
         refined = build_refined_request_without_refiner(raw_user_input)
 
-    planner = build_orchestrator_planner(planner_model)
+    planner = build_orchestrator_planner(planner_model, allowed_worker_models=allowed_worker_models)
     planner_input = sanitize_text(
         "请根据以下优化后的用户请求输出调度计划。\n\n"
         "运行上下文：当前程序运行在本地项目根目录中。"

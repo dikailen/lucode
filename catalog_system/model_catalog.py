@@ -174,10 +174,17 @@ def _file_signature(path: Path) -> tuple[str, int, int]:
     return (str(path), int(stat.st_mtime_ns), int(stat.st_size))
 
 
-def compact_model_catalog_for_prompt() -> str:
+def compact_model_catalog_for_prompt(allowed_ids=None) -> str:
     catalog = load_model_catalog()
+    allowed = {str(item or "").strip() for item in (allowed_ids or []) if str(item or "").strip()}
     lines = ["Model catalog (select configured=true models only):"]
+    if allowed:
+        lines.append(
+            "注意：用户已设定员工可用模型池，只能从下列 id 中为 task.model 选择，不得使用池外模型。"
+        )
     for item in catalog.get("models", []):
+        if allowed and str(item.get("id") or "") not in allowed:
+            continue
         lines.append(
             "- "
             f"{item['id']} | "

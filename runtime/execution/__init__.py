@@ -19,6 +19,7 @@ async def execute_dynamic_request(
     settings: "RuntimeSettings | None" = None,
     display_input: str | None = None,
     output_controller: Any = None,
+    event_bus: Any = None,
 ) -> str:
     from runtime.execution.dynamic import execute_dynamic_request as _execute_dynamic_request
 
@@ -33,6 +34,7 @@ async def execute_dynamic_request(
         settings=settings,
         display_input=display_input,
         output_controller=output_controller,
+        event_bus=event_bus,
     )
 
 

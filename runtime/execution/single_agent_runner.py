@@ -115,6 +115,7 @@ async def _run_single_agent(
                 max_turns=4,
                 approval_policy=approval_policy,
                 stream_output=False if show_plan else None,
+                on_delta=_single_task_delta_emitter(run_state, task),
             )
             scoped_hooks = _task_scoped_hooks(hooks, run_state, task)
             with dynamic_status(
@@ -166,6 +167,7 @@ async def _run_single_agent(
             max_turns=_max_turns_for_task(task),
             approval_policy=approval_policy,
             stream_output=False if show_plan else None,
+            on_delta=_single_task_delta_emitter(run_state, task),
         )
         scoped_hooks = _task_scoped_hooks(hooks, run_state, task)
         with dynamic_status(
@@ -232,6 +234,29 @@ def _record_single_fast_path_context(run_state, tool: str, action: str, output: 
         )
     except Exception:
         return
+
+
+def _single_task_delta_emitter(run_state: PipelineRunState, task):
+    event_bus = getattr(run_state, "event_bus", None)
+    if event_bus is None or not hasattr(event_bus, "emit"):
+        return None
+
+    def _emit_delta(text: str) -> None:
+        if not text:
+            return
+        try:
+            event_bus.emit(
+                "AgentMessageDelta",
+                str(text),
+                agent=str(getattr(task, "id", "") or "worker"),
+                task_id=str(getattr(task, "id", "") or ""),
+                status="streaming",
+                payload={"text": str(text)},
+            )
+        except Exception:
+            return
+
+    return _emit_delta
 
 
 def _file_snapshot_ids(run_context) -> set[str]:

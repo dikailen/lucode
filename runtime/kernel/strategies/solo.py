@@ -17,4 +17,6 @@ class SoloStrategy:
             context.run_agent,
             settings=context.settings,
             project_root=context.request.workspace_root,
+            output_controller=context.output_controller,
+            event_bus=context.event_bus,
         )

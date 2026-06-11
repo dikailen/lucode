@@ -157,6 +157,7 @@ async def _run_planned_task(
             max_turns=_max_turns_for_task(task),
             approval_policy=approval_policy,
             stream_output=False,
+            on_delta=_task_delta_emitter(run_state, task),
         )
         scoped_hooks = _task_scoped_hooks(hooks, run_state, task)
         status_context = (
@@ -415,12 +416,14 @@ def _dependency_context_for_task(task, outputs: dict[str, str]) -> str:
     return "\n\n".join(parts)
 
 
-def _run_agent_kwargs(run_agent, *, max_turns: int, approval_policy=None, stream_output=None) -> dict:
+def _run_agent_kwargs(run_agent, *, max_turns: int, approval_policy=None, stream_output=None, on_delta=None) -> dict:
     kwargs = {"max_turns": max_turns}
     if approval_policy is not None and _run_agent_accepts_approval_policy(run_agent):
         kwargs["approval_policy"] = approval_policy
     if stream_output is not None and _run_agent_accepts_stream_output(run_agent):
         kwargs["stream_output"] = stream_output
+    if on_delta is not None and _run_agent_accepts_on_delta(run_agent):
+        kwargs["on_delta"] = on_delta
     return kwargs
 
 
@@ -442,6 +445,39 @@ def _run_agent_accepts_stream_output(run_agent) -> bool:
     if "stream_output" in parameters:
         return True
     return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
+def _run_agent_accepts_on_delta(run_agent) -> bool:
+    try:
+        parameters = inspect.signature(run_agent).parameters
+    except (TypeError, ValueError):
+        return True
+    if "on_delta" in parameters:
+        return True
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
+def _task_delta_emitter(run_state: PipelineRunState | None, task):
+    event_bus = getattr(run_state, "event_bus", None)
+    if event_bus is None or not hasattr(event_bus, "emit"):
+        return None
+
+    def _emit_delta(text: str) -> None:
+        if not text:
+            return
+        try:
+            event_bus.emit(
+                "AgentMessageDelta",
+                str(text),
+                agent=str(getattr(task, "id", "") or "worker"),
+                task_id=str(getattr(task, "id", "") or ""),
+                status="streaming",
+                payload={"text": str(text)},
+            )
+        except Exception:
+            return
+
+    return _emit_delta
 
 
 async def _create_task_agent(factory, task, *, execution_mode: str = ""):

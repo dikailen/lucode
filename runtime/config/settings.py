@@ -29,8 +29,18 @@ class RuntimeSettings:
     final_synthesizer_model_priority: list[str] = field(
         default_factory=lambda: list(DEFAULT_FINAL_SYNTHESIZER_MODELS)
     )
+    allowed_worker_models: list[str] = field(default_factory=list)
     privacy_mode: str = "local_first"
     execution_mode: str = "solo"
+
+    def worker_model_pool(self, model_registry=None) -> list[str]:
+        """Whitelist of models the supervisor may assign to workers.
+
+        Empty means no restriction (legacy behavior). When non-empty, only these
+        model ids may be used to create worker agents in full team mode.
+        """
+        pool = [str(item or "").strip() for item in self.allowed_worker_models or []]
+        return [item for item in pool if item]
 
     @classmethod
     def from_env(cls) -> "RuntimeSettings":

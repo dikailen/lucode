@@ -17,6 +17,8 @@ class FullStrategy:
         }
         if getattr(context, "output_controller", None) is not None:
             kwargs["output_controller"] = context.output_controller
+        if getattr(context, "event_bus", None) is not None:
+            kwargs["event_bus"] = context.event_bus
         return await execute_dynamic_request(
             context.request.user_input,
             context.request.workspace_root,

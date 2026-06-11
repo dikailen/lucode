@@ -16,6 +16,9 @@ dependencies = [
 ]
 license = { text = "UNLICENSED" }
 
+[project.optional-dependencies]
+gui = ["PySide6>=6.6", "qasync>=0.27"]
+
 [project.scripts]
 lucode = "lucode.entry:main"
 

@@ -5,7 +5,7 @@ import os
 from runtime.agents.sdk import runner_class
 
 
-async def run_agent_once(agent, run_input, hooks, max_turns=20, stream_output: bool | None = None):
+async def run_agent_once(agent, run_input, hooks, max_turns=20, stream_output: bool | None = None, on_delta=None):
     """Run one SDK segment; stream visible answer deltas when the provider supports it."""
 
     Runner = runner_class()
@@ -24,6 +24,11 @@ async def run_agent_once(agent, run_input, hooks, max_turns=20, stream_output: b
                 printed_any = True
                 setattr(hooks, "streamed_output_seen", True)
             setattr(hooks, "streamed_output_chars", int(getattr(hooks, "streamed_output_chars", 0) or 0) + len(delta))
+            if on_delta is not None:
+                try:
+                    on_delta(delta)
+                except Exception:
+                    pass
             print(delta, end="", flush=True)
     except Exception as exc:
         if not (printed_any and _is_recoverable_stream_tail_error(exc)):

@@ -10,6 +10,7 @@ from catalog_system.model_catalog import ModelRegistry
 from mcp_servers import MCPServerManager
 from runtime.agent.approval import run_with_approval
 from runtime.config.settings import RuntimeSettings
+from runtime.events import ExecutionEventBus
 from runtime.kernel.session import create_token_logger_hooks
 from runtime.kernel.strategies import ExecutionContext, create_execution_strategy
 from runtime.ui.output_controller import OutputController
@@ -58,6 +59,7 @@ class KernelFacade:
         routing_input: str | None = None,
         verbose_runtime: bool = False,
         output_controller=None,
+        event_bus=None,
     ) -> KernelResponse:
         user_input = str(prompt or "").strip()
         if not user_input:
@@ -74,44 +76,97 @@ class KernelFacade:
         hooks = hooks or create_token_logger_hooks()
         model_registry = model_registry or ModelRegistry()
         output_controller = output_controller or OutputController(mode=settings.execution_mode)
+        event_bus = event_bus or ExecutionEventBus()
         if hasattr(output_controller, "configure"):
             output_controller.configure(mode=settings.execution_mode)
         quarantine_dir = request.workspace_root / ".agent_quarantine"
         stopped = False
+        turn_status = "completed"
+        output = ""
+        started_mcp_ids: list[str] = []
+        run_context_summary = ""
 
-        async with MCPServerManager(request.workspace_root, quarantine_dir, verbose=verbose_runtime) as mcp_manager:
-            run_agent = lambda agent, turn_input, turn_hooks, max_turns=20, approval_policy=None, stream_output=None: run_with_approval(
-                agent,
-                turn_input,
-                turn_hooks,
-                session=approval_session,
-                max_turns=max_turns,
-                approval_policy=approval_policy,
-                stream_output=stream_output,
+        _emit_kernel_event(
+            event_bus,
+            "TurnStarted",
+            "turn started",
+            mode=settings.execution_mode,
+            agent="kernel",
+            status="running",
+            payload={
+                "mode": settings.execution_mode,
+                "workspace_root": str(request.workspace_root),
+            },
+        )
+
+        try:
+            async with MCPServerManager(request.workspace_root, quarantine_dir, verbose=verbose_runtime) as mcp_manager:
+                def run_agent(
+                    agent,
+                    turn_input,
+                    turn_hooks,
+                    max_turns=20,
+                    approval_policy=None,
+                    stream_output=None,
+                    on_delta=None,
+                ):
+                    return run_with_approval(
+                        agent,
+                        turn_input,
+                        turn_hooks,
+                        session=approval_session,
+                        max_turns=max_turns,
+                        approval_policy=approval_policy,
+                        stream_output=stream_output,
+                        on_delta=on_delta or _agent_delta_emitter(event_bus, agent=getattr(agent, "name", "") or ""),
+                    )
+
+                strategy = create_execution_strategy(
+                    routing_input=request.routing_input or request.user_input,
+                    execution_mode=settings.execution_mode,
+                )
+                context = ExecutionContext(
+                    request=request,
+                    model_registry=model_registry,
+                    mcp_manager=mcp_manager,
+                    hooks=hooks,
+                    run_agent=run_agent,
+                    settings=settings,
+                    output_controller=output_controller,
+                    event_bus=event_bus,
+                )
+                timeout_seconds = _turn_timeout_seconds()
+                try:
+                    output = await _execute_with_turn_guard(strategy, context, timeout_seconds=timeout_seconds)
+                except asyncio.TimeoutError:
+                    if hasattr(output_controller, "enter_failed"):
+                        output_controller.enter_failed("turn timeout")
+                    output = _format_turn_timeout_message(timeout_seconds)
+                    stopped = True
+                    turn_status = "timeout"
+                started_mcp_ids = list(mcp_manager.started_ids)
+                run_context_summary = str(getattr(output, "run_context_summary", "") or "")
+        except Exception:
+            _emit_kernel_event(
+                event_bus,
+                "TurnEnded",
+                "turn failed",
+                mode=settings.execution_mode,
+                agent="kernel",
+                status="failed",
+                payload={"status": "failed", "stopped": stopped},
             )
-            strategy = create_execution_strategy(
-                routing_input=request.routing_input or request.user_input,
-                execution_mode=settings.execution_mode,
-            )
-            context = ExecutionContext(
-                request=request,
-                model_registry=model_registry,
-                mcp_manager=mcp_manager,
-                hooks=hooks,
-                run_agent=run_agent,
-                settings=settings,
-                output_controller=output_controller,
-            )
-            timeout_seconds = _turn_timeout_seconds()
-            try:
-                output = await _execute_with_turn_guard(strategy, context, timeout_seconds=timeout_seconds)
-            except asyncio.TimeoutError:
-                if hasattr(output_controller, "enter_failed"):
-                    output_controller.enter_failed("turn timeout")
-                output = _format_turn_timeout_message(timeout_seconds)
-                stopped = True
-            started_mcp_ids = list(mcp_manager.started_ids)
-            run_context_summary = str(getattr(output, "run_context_summary", "") or "")
+            raise
+
+        _emit_kernel_event(
+            event_bus,
+            "TurnEnded",
+            "turn ended",
+            mode=settings.execution_mode,
+            agent="kernel",
+            status="stopped" if stopped else "completed",
+            payload={"status": turn_status, "stopped": stopped},
+        )
 
         return KernelResponse(
             final_output=str(output or ""),
@@ -139,6 +194,31 @@ def _turn_timeout_seconds() -> float:
         return max(0.0, float(raw))
     except ValueError:
         return 0.0
+
+
+def _agent_delta_emitter(event_bus, *, agent: str = ""):
+    def _emit_delta(text: str) -> None:
+        if not text:
+            return
+        _emit_kernel_event(
+            event_bus,
+            "AgentMessageDelta",
+            str(text),
+            agent=str(agent or ""),
+            status="streaming",
+            payload={"text": str(text)},
+        )
+
+    return _emit_delta
+
+
+def _emit_kernel_event(event_bus, event_type: str, message: str = "", **kwargs) -> None:
+    if event_bus is None or not hasattr(event_bus, "emit"):
+        return
+    try:
+        event_bus.emit(event_type, message, **kwargs)
+    except Exception:
+        return
 
 
 def _format_turn_timeout_message(timeout_seconds: float) -> str:

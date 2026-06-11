@@ -1427,6 +1427,7 @@ async def _handle_plan_command(user_input: str, *, model_registry, runtime_setti
                 planner_model=model_registry.get_model(planner_model_id),
                 hooks=hooks,
                 refiner_enabled=runtime_settings.query_refiner_enabled,
+                allowed_worker_models=runtime_settings.worker_model_pool(model_registry),
             )
             return format_plan_preview(refined, plan)
 

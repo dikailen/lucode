@@ -101,6 +101,7 @@ async def execute_dynamic_request(
     settings: RuntimeSettings | None = None,
     display_input: str | None = None,
     output_controller=None,
+    event_bus=None,
 ) -> str:
     """Plan and execute a request using dynamic Agents."""
 
@@ -128,6 +129,7 @@ async def execute_dynamic_request(
             attempt=attempt,
             display_input=display_input,
             output_controller=output_controller,
+            event_bus=event_bus,
         )
         last_output = output
         last_audit = audit
@@ -169,6 +171,7 @@ async def _execute_dynamic_attempt(
     attempt: int,
     display_input: str | None = None,
     output_controller=None,
+    event_bus=None,
 ) -> tuple[str, object | None]:
     visible_input = str(display_input or raw_user_input or "").strip()
     refiner_model_id = (
@@ -176,7 +179,7 @@ async def _execute_dynamic_attempt(
     )
     planner_model_id = settings.select_model_id(model_registry, "orchestrator")
     synthesizer_model_id = settings.select_model_id(model_registry, "final_synthesizer")
-    event_bus = ExecutionEventBus()
+    event_bus = event_bus or ExecutionEventBus()
     event_bus.emit(
         "PlanningStarted",
         "开始规划本轮任务",
@@ -192,6 +195,7 @@ async def _execute_dynamic_attempt(
                 planner_model=model_registry.get_model(planner_model_id),
                 hooks=hooks,
                 refiner_enabled=settings.query_refiner_enabled,
+                allowed_worker_models=settings.worker_model_pool(model_registry),
             )
     except Exception as exc:
         event_bus.emit(
@@ -219,8 +223,8 @@ async def _execute_dynamic_attempt(
         project_root=project_root,
         mode=settings.execution_mode,
         output_controller=output_controller,
+        event_bus=event_bus,
     )
-    run_state.event_bus = event_bus
     run_state.model_labels = _model_label_map(
         model_registry,
         [planner_model_id, synthesizer_model_id, *(getattr(task, "model", "") for task in plan.tasks)],
@@ -454,48 +458,72 @@ def format_planning_error(exc: Exception, planner_model_id: str = "") -> str:
 
 
 def _apply_executor_model_defaults(plan, settings, model_registry) -> None:
-    """Fill empty or invalid task.model with executor default model.
+    """Fill empty / invalid / out-of-pool task.model, distributing across models.
 
-    Conservative strategy (v1):
-    1. If task.model is empty, fill executor default.
-    2. If task.model is not in configured models and executor has a usable model, replace.
-    3. If task.model is already a valid configured model, leave it alone.
-    4. If task requires MCP/tools but executor model doesn't support tools, keep original
-       model and log a warning.
+    Strategy:
+    1. A task.model is kept only if it is configured-usable AND (when the user set
+       a worker model pool) it belongs to that pool.
+    2. Tasks needing a backfill are assigned by round-robin over the candidate
+       models so a multi-worker team gets different models instead of collapsing
+       onto one shared executor default.
+    3. Candidates = the worker pool when set (never extended past it), otherwise
+       the executor priority list plus the executor default as last resort.
     """
     if not plan.tasks:
         return
 
-    try:
-        executor_model_id = settings.select_model_id(model_registry, "executor")
-    except Exception:
-        executor_model_id = None
+    privacy_mode = getattr(settings, "privacy_mode", "local_first")
+    pool = list(settings.worker_model_pool(model_registry)) if hasattr(settings, "worker_model_pool") else []
 
-    if not executor_model_id:
+    candidate_ids = list(pool) if pool else list(getattr(settings, "executor_model_priority", []) or [])
+    if not pool:
+        try:
+            executor_model_id = settings.select_model_id(model_registry, "executor")
+        except Exception:
+            executor_model_id = None
+        if executor_model_id and executor_model_id not in candidate_ids:
+            candidate_ids.append(executor_model_id)
+    if not candidate_ids:
         return
 
-    try:
-        executor_info = model_registry.get_model_info(executor_model_id)
-    except Exception:
-        executor_info = None
-
+    rr_index = 0
     for task in plan.tasks:
         needs_tools = bool(task.mcp)
-        if not task.model or not _task_model_is_usable(
+        in_pool = (not pool) or (str(task.model or "") in pool)
+        if (
+            task.model
+            and in_pool
+            and _task_model_is_usable(
+                model_registry,
+                task.model,
+                privacy_mode=privacy_mode,
+                requires_tools=needs_tools,
+            )
+        ):
+            continue
+        chosen = _next_usable_candidate(
+            candidate_ids, rr_index, model_registry, privacy_mode, needs_tools
+        )
+        if chosen is not None:
+            task.model = chosen[0]
+            rr_index = chosen[1] + 1
+
+
+def _next_usable_candidate(
+    candidate_ids, start, model_registry, privacy_mode, needs_tools
+) -> tuple[str, int] | None:
+    count = len(candidate_ids)
+    for offset in range(count):
+        idx = (start + offset) % count
+        model_id = candidate_ids[idx]
+        if _task_model_is_usable(
             model_registry,
-            task.model,
-            privacy_mode=getattr(settings, "privacy_mode", "local_first"),
+            model_id,
+            privacy_mode=privacy_mode,
             requires_tools=needs_tools,
         ):
-            if executor_info and not _model_info_usable_for_task(
-                executor_info,
-                privacy_mode=getattr(settings, "privacy_mode", "local_first"),
-                requires_tools=needs_tools,
-            ):
-                continue
-            if not executor_info and needs_tools:
-                continue
-            task.model = executor_model_id
+            return model_id, idx
+    return None
 
 
 def _model_label_map(model_registry, model_ids) -> dict[str, str]:

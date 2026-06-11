@@ -21,6 +21,9 @@ lucode/frozen_entry.py
 bin/
 scripts/
 tests/
+!tests/
+tests/__pycache__/
+!tests/test_gui_batch_*.py
 skills/jpc_now_skill/
 skills/Humanizer-zh-main/
 skills/task-router/
