@@ -346,3 +346,12 @@ class AgentFactory:
             model=self.model_registry.get_model(model_id),
             mcp_servers=[run_workspace_server],
         )
+
+    def create_supervisor_agent(self, model_id: str, readonly_servers=None):
+        Agent = agent_class()
+        return Agent(
+            name="full_supervisor_agent",
+            instructions=sanitize_text(load_skill("full_supervisor")),
+            model=self.model_registry.get_model(model_id),
+            mcp_servers=list(readonly_servers or []),
+        )

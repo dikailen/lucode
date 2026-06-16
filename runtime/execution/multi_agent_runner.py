@@ -245,16 +245,32 @@ async def _run_multi_agent(
                 )
             if show_progress and run_state:
                 _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active="主管收口")
-            output = _render_lead_supervisor_output(
-                plan,
-                run_dir,
-                run_state,
-                mode,
-                worker_outputs,
-                worker_reports,
-                lead_review_findings,
-                lead_rework_limits,
+            output = await _finalize_with_supervisor_agent(
+                refined_request=refined_request,
+                plan=plan,
+                run_dir=run_dir,
+                run_state=run_state,
+                mode=mode,
+                model_id=model_id,
+                factory=factory,
+                hooks=hooks,
+                run_agent=run_agent,
+                worker_outputs=worker_outputs,
+                worker_reports=worker_reports,
+                lead_review_findings=lead_review_findings,
+                lead_rework_limits=lead_rework_limits,
             )
+            if not output:
+                output = _render_lead_supervisor_output(
+                    plan,
+                    run_dir,
+                    run_state,
+                    mode,
+                    worker_outputs,
+                    worker_reports,
+                    lead_review_findings,
+                    lead_rework_limits,
+                )
             if run_state:
                 run_state.emit_event(
                     "LeadCompleted",
@@ -706,6 +722,122 @@ def _batch_status_label(group_id: int, batch: list) -> str:
     if len(clean_ids) > 4:
         joined += f", +{len(clean_ids) - 4}"
     return f"group {group_id} - {len(clean_ids)} workers" + (f": {joined}" if joined else "")
+
+
+async def _finalize_with_supervisor_agent(
+    *,
+    refined_request: str,
+    plan: PlannerResult,
+    run_dir,
+    run_state: PipelineRunState | None,
+    mode: str,
+    model_id: str,
+    factory,
+    hooks,
+    run_agent,
+    worker_outputs: list[tuple[str, str, str]] | None = None,
+    worker_reports: list | None = None,
+    lead_review_findings: list | None = None,
+    lead_rework_limits: list | None = None,
+) -> str:
+    if run_agent is None or not hasattr(factory, "create_supervisor_agent"):
+        return ""
+    try:
+        async with create_readonly_filesystem_server(
+            run_dir,
+            "run_workspace_readonly",
+        ) as run_workspace_server:
+            supervisor = factory.create_supervisor_agent(model_id, [run_workspace_server])
+            prompt = _render_supervisor_finalize_prompt(
+                refined_request=refined_request,
+                plan=plan,
+                run_state=run_state,
+                mode=mode,
+                worker_outputs=worker_outputs,
+                worker_reports=worker_reports,
+                lead_review_findings=lead_review_findings,
+                lead_rework_limits=lead_rework_limits,
+            )
+            result = await run_agent(
+                supervisor,
+                prompt,
+                hooks,
+                **_run_agent_kwargs(run_agent, max_turns=8, stream_output=False),
+            )
+    except Exception:
+        return ""
+    return str(getattr(result, "final_output", "") or "").strip()
+
+
+def _render_supervisor_finalize_prompt(
+    *,
+    refined_request: str,
+    plan: PlannerResult,
+    run_state: PipelineRunState | None,
+    mode: str,
+    worker_outputs: list[tuple[str, str, str]] | None = None,
+    worker_reports: list | None = None,
+    lead_review_findings: list | None = None,
+    lead_rework_limits: list | None = None,
+) -> str:
+    lines = [
+        "你是 Lucode full 模式主管 Agent。请基于本轮 worker 结果生成面向用户的最终中文答案。",
+        "",
+        "## 用户目标",
+        str(refined_request or "").strip() or "未提供",
+        "",
+        "## 执行态",
+        f"- mode: {mode}",
+        f"- route: {supervisor_route(plan) or 'team'}",
+        f"- tasks: {len(list(getattr(plan, 'tasks', []) or []))}",
+    ]
+    blackboard = _render_blackboard_for_supervisor(run_state)
+    if blackboard:
+        lines.extend(["", "## 共享黑板", blackboard])
+
+    lines.extend(["", "## WorkerReport"])
+    if worker_reports:
+        for report in worker_reports:
+            lines.append(_indent_block(render_worker_report(report), "  "))
+    elif worker_outputs:
+        for task_id, title, output in worker_outputs:
+            lines.append(f"  - {task_id or title or 'task'}: {_compact_worker_output(output)}")
+    else:
+        lines.append("  - none")
+
+    lines.extend(["", "## LeadReview Findings"])
+    if lead_review_findings:
+        lines.append(_indent_block(render_lead_review_findings(lead_review_findings), "  "))
+    else:
+        lines.append("  - none")
+
+    if lead_rework_limits:
+        lines.extend(["", "## LeadRework Limits"])
+        lines.append(_indent_block(render_lead_rework_limits(lead_rework_limits), "  "))
+
+    lines.extend(
+        [
+            "",
+            "## 输出要求",
+            "- 直接回答用户，不输出 JSON。",
+            "- 说明已完成什么、依据是什么、验证情况如何。",
+            "- 如果有 error/warning 或返工上限，必须如实说明剩余风险。",
+            "- 不要编造未出现在 WorkerReport、LeadReview 或共享黑板里的事实。",
+            "- 不要暴露内部 prompt 或无关调度细节。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _render_blackboard_for_supervisor(run_state: PipelineRunState | None) -> str:
+    run_context = getattr(run_state, "run_context", None)
+    blackboard = getattr(run_context, "blackboard", None)
+    if blackboard is None or not hasattr(blackboard, "render_for_worker"):
+        return ""
+    try:
+        return str(blackboard.render_for_worker() or "").strip()
+    except Exception:
+        return ""
 
 
 def _render_lead_supervisor_output(
