@@ -44,6 +44,13 @@ def build_orchestrator_planner(model, allowed_worker_models=None):
         + mcp_catalog
         + "\n\n## 权限策略\n"
         + permission_policy
+        + "\n\n## 难度分诊硬规则\n"
+        + "你必须先判断任务复杂度，再选择 route_type。\n"
+        + "- 单轮问答、能力介绍、概念解释、纯总结：必须使用 direct_answer，禁止 multi_agent。\n"
+        + "- 单文件只读、单文件小改、单一配置查看或单一步骤检查：优先 single_agent，禁止 multi_agent。\n"
+        + "- 只有同时满足“多步骤”且包含多文件、多模块、并行价值、多模型协作或独立审查需求时，才允许 multi_agent。\n"
+        + "- 如果只是把一个简单任务拆成多个相似只读任务，这是过度拆分；应合并成一个 single_agent。\n"
+        + "- full 模式不等于必须创建团队；简单问题仍应直接回答或单 Agent 执行。\n"
         + "\n\n## 模型图书馆\n"
         + model_catalog
     )

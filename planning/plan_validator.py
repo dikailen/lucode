@@ -46,10 +46,13 @@ def validate_plan(plan: PlannerResult, privacy_policy: PrivacyPolicy | None = No
     if plan.route_type == "multi_agent":
         if len(plan.tasks) < 2:
             errors.append("multi_agent 路线至少需要 2 个任务。")
+            warnings.append("过度拆分风险：multi_agent 任务数不足，建议降级为 single_agent。")
         if not plan.needs_synthesis and not _uses_supervised_lead_finalization(plan):
             errors.append("multi_agent 路线必须启用汇总副脑。")
         if not plan.synthesis_instruction and not _uses_supervised_lead_finalization(plan):
             errors.append("multi_agent 路线必须提供 synthesis_instruction。")
+        if _looks_like_over_split_readonly_single_file(plan):
+            warnings.append("过度拆分风险：multi_agent 只包含只读单文件任务，建议降级为 single_agent。")
 
     task_ids = [task.id for task in plan.tasks]
     duplicates = sorted({task_id for task_id in task_ids if task_ids.count(task_id) > 1})
@@ -138,6 +141,31 @@ def _uses_supervised_lead_finalization(plan: PlannerResult) -> bool:
         and helper.get("enabled") is False
         and str(helper.get("reason") or "") == "lead_supervisor_final_answer"
     )
+
+
+def _looks_like_over_split_readonly_single_file(plan: PlannerResult) -> bool:
+    tasks = list(plan.tasks or [])
+    if len(tasks) < 2:
+        return False
+    read_targets: set[str] = set()
+    for task in tasks:
+        if getattr(task, "write_intent", None):
+            return False
+        mcp_ids = {str(item or "").strip() for item in list(getattr(task, "mcp", []) or []) if str(item or "").strip()}
+        if "workspace_edit" in mcp_ids or "command_runner" in mcp_ids:
+            return False
+        if not mcp_ids.issubset({"project_filesystem_readonly", "code_locator", "git_tools"}):
+            return False
+        task_reads = [_normalize_read_target(item) for item in list(getattr(task, "read_set", []) or [])]
+        task_reads = [item for item in task_reads if item]
+        if len(set(task_reads)) > 1:
+            return False
+        read_targets.update(task_reads)
+    return len(read_targets) == 1
+
+
+def _normalize_read_target(value: str) -> str:
+    return str(value or "").strip().replace("\\", "/").strip("/")
 
 
 def format_validation(validation: PlanValidation) -> str:
