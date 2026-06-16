@@ -7,6 +7,9 @@ from runtime.agent.supervisor import WorkerReport
 from runtime.execution.supervisor_scheduler import supervisor_normalize_resource
 
 
+REWORKABLE_FINDING_KINDS = frozenset({"task_failed", "blocker", "missing_evidence", "unauthorized_write"})
+
+
 @dataclass(frozen=True)
 class LeadReviewFinding:
     """Deterministic supervisor review note for completed worker reports."""
@@ -21,8 +24,31 @@ class LeadReviewFinding:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class LeadReworkAction:
+    task_id: str
+    attempt: int
+    max_attempts: int
+    finding_kinds: list[str]
+    instruction: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class LeadReworkLimit:
+    task_id: str
+    max_attempts: int
+    finding_kinds: list[str]
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def review_worker_reports(tasks: list, reports: list[WorkerReport], *, readonly_hard_constraint: bool = False) -> list[LeadReviewFinding]:
-    """Review worker reports without triggering retry or rework."""
+    """Review worker reports before the supervisor decides whether to rework."""
 
     task_by_id = {str(getattr(task, "id", "") or ""): task for task in list(tasks or [])}
     findings: list[LeadReviewFinding] = []
@@ -71,6 +97,76 @@ def review_worker_reports(tasks: list, reports: list[WorkerReport], *, readonly_
                 )
             )
     return findings
+
+
+def plan_lead_rework_actions(
+    findings: list[LeadReviewFinding],
+    attempts_by_task: dict[str, int] | None = None,
+    *,
+    max_attempts: int = 2,
+) -> tuple[list[LeadReworkAction], list[LeadReworkLimit]]:
+    attempts = {str(key): int(value or 0) for key, value in dict(attempts_by_task or {}).items()}
+    grouped = _reworkable_findings_by_task(findings)
+    actions: list[LeadReworkAction] = []
+    limits: list[LeadReworkLimit] = []
+    hard_limit = max(0, int(max_attempts or 0))
+    for task_id, task_findings in sorted(grouped.items()):
+        used = max(0, attempts.get(task_id, 0))
+        kinds = _unique_finding_kinds(task_findings)
+        if used >= hard_limit:
+            limits.append(
+                LeadReworkLimit(
+                    task_id=task_id,
+                    max_attempts=hard_limit,
+                    finding_kinds=kinds,
+                    reason="主管返工次数已达上限，本轮停止继续重跑并在最终答案中如实说明。",
+                )
+            )
+            continue
+        attempt = used + 1
+        actions.append(
+            LeadReworkAction(
+                task_id=task_id,
+                attempt=attempt,
+                max_attempts=hard_limit,
+                finding_kinds=kinds,
+                instruction=render_lead_rework_instruction(task_id, task_findings, attempt=attempt, max_attempts=hard_limit),
+            )
+        )
+    return actions, limits
+
+
+def render_lead_rework_instruction(
+    task_id: str,
+    findings: list[LeadReviewFinding],
+    *,
+    attempt: int,
+    max_attempts: int,
+) -> str:
+    lines = [
+        "## 主管打回重做要求",
+        f"- 任务：{task_id or 'unknown'}",
+        f"- 返工轮次：{attempt}/{max_attempts}",
+        "- 必须只修正本任务范围内的问题，不要自行扩大工具、文件或模型权限。",
+        "- 完成后必须在 WorkerReport 中写清 evidence、files_read/files_written、验证或限制。",
+        "- 本次打回原因：",
+    ]
+    for finding in findings:
+        evidence = f" evidence={finding.evidence}" if finding.evidence else ""
+        lines.append(f"  - {finding.severity} {finding.kind}: {finding.message}{evidence}")
+    return "\n".join(lines)
+
+
+def render_lead_rework_limits(limits: list[LeadReworkLimit]) -> str:
+    if not limits:
+        return ""
+    lines = ["LeadReworkLimit", "- exhausted:"]
+    for limit in limits:
+        kinds = ", ".join(limit.finding_kinds) if limit.finding_kinds else "unknown"
+        lines.append(
+            f"  - task={limit.task_id or 'unknown'} max_attempts={limit.max_attempts} kinds={kinds}: {limit.reason}"
+        )
+    return "\n".join(lines)
 
 
 def render_lead_review_findings(findings: list[LeadReviewFinding]) -> str:
@@ -165,7 +261,7 @@ def _resource_within(path: str, allowed: str) -> bool:
 def _completed_message(findings: list[LeadReviewFinding]) -> str:
     if not findings:
         return "主管审查完成，未发现 WorkerReport 风险。"
-    return f"主管审查完成，发现 {len(findings)} 条 WorkerReport 风险，已记录但不自动返工。"
+    return f"主管审查完成，发现 {len(findings)} 条 WorkerReport 风险，已进入返工判断。"
 
 
 def _string_list(value) -> list[str]:
@@ -174,3 +270,26 @@ def _string_list(value) -> list[str]:
     if isinstance(value, str):
         return [value] if value.strip() else []
     return [str(item).strip().replace("\\", "/") for item in list(value) if str(item).strip()]
+
+
+def _reworkable_findings_by_task(findings: list[LeadReviewFinding]) -> dict[str, list[LeadReviewFinding]]:
+    grouped: dict[str, list[LeadReviewFinding]] = {}
+    for finding in list(findings or []):
+        task_id = str(getattr(finding, "task_id", "") or "").strip()
+        kind = str(getattr(finding, "kind", "") or "").strip()
+        if not task_id or kind not in REWORKABLE_FINDING_KINDS:
+            continue
+        grouped.setdefault(task_id, []).append(finding)
+    return grouped
+
+
+def _unique_finding_kinds(findings: list[LeadReviewFinding]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for finding in findings:
+        kind = str(getattr(finding, "kind", "") or "").strip()
+        if not kind or kind in seen:
+            continue
+        seen.add(kind)
+        result.append(kind)
+    return result

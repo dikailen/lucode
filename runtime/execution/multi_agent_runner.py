@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 
 from mcp_servers import apply_full_supervisor_readonly_budget_profile, create_readonly_filesystem_server
@@ -11,8 +12,10 @@ from runtime.config.execution_mode import normalize_execution_mode
 from runtime.execution.execution_contract import summary_helper_enabled, supervisor_route
 from runtime.execution.lead_reviewer import (
     emit_lead_review_events,
+    plan_lead_rework_actions,
     readonly_hard_constraint_from_plan,
     render_lead_review_findings,
+    render_lead_rework_limits,
     review_worker_reports,
 )
 from runtime.execution.parallel_scheduler import _execution_batches_for_mode, _format_parallel_batch_audit
@@ -28,6 +31,7 @@ from runtime.workspace.run_workspace import RunWorkspace
 
 WORKER_OUTPUT_EXPAND_MIN_LINES = 40
 WORKER_OUTPUT_EXPAND_MIN_CHARS = 4000
+MAX_LEAD_REWORK_ATTEMPTS = 2
 
 
 async def _run_multi_agent(
@@ -53,6 +57,7 @@ async def _run_multi_agent(
     use_summary_helper = summary_helper_enabled(plan)
     worker_outputs: list[tuple[str, str, str]] = []
     worker_reports = []
+    lead_rework_limits = []
     supervisor_view = None
     if run_state:
         supervisor_view = emit_supervisor_observation(plan, mode=mode, event_bus=run_state.event_bus)
@@ -113,7 +118,9 @@ async def _run_multi_agent(
                         run_state=run_state,
                     )
                     worker_outputs.append((str(getattr(task, "id", "") or ""), title, output))
-                    worker_reports.append(build_worker_report(task, output, run_state=run_state))
+                    report = build_worker_report(task, output, run_state=run_state)
+                    worker_reports.append(report)
+                    _record_worker_report_to_blackboard(run_state, report)
                     if show_progress and run_state:
                         _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"已完成：{task.title}")
                     continue
@@ -194,7 +201,9 @@ async def _run_multi_agent(
                         run_state=run_state,
                     )
                     worker_outputs.append((str(getattr(task, "id", "") or ""), title, output))
-                    worker_reports.append(build_worker_report(task, output, run_state=run_state))
+                    report = build_worker_report(task, output, run_state=run_state)
+                    worker_reports.append(report)
+                    _record_worker_report_to_blackboard(run_state, report)
                 if show_progress and run_state:
                     _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=f"已完成：{active}")
 
@@ -205,6 +214,24 @@ async def _run_multi_agent(
             enabled=show_progress and mode == "full",
         ):
             lead_review_findings = _review_full_worker_reports(plan, worker_reports, run_state, mode=mode)
+        worker_outputs, worker_reports, lead_review_findings, lead_rework_limits = await _run_lead_rework_until_stable(
+            refined_request=refined_request,
+            plan=plan,
+            project_root=project_root,
+            factory=factory,
+            hooks=hooks,
+            run_agent=run_agent,
+            run_state=run_state,
+            ledger=ledger,
+            workspace=workspace,
+            worker_outputs=worker_outputs,
+            worker_reports=worker_reports,
+            lead_review_findings=lead_review_findings,
+            approval_policy_factory=approval_policy_factory,
+            mode=mode,
+            show_progress=show_progress,
+            attempt=attempt,
+        )
 
         if mode == "full" and route == "team" and not use_summary_helper:
             if run_state:
@@ -226,6 +253,7 @@ async def _run_multi_agent(
                 worker_outputs,
                 worker_reports,
                 lead_review_findings,
+                lead_rework_limits,
             )
             if run_state:
                 run_state.emit_event(
@@ -352,6 +380,205 @@ def _record_worker_output_detail(
             },
         )
     return hint
+
+
+def _record_worker_report_to_blackboard(run_state: PipelineRunState | None, report) -> bool:
+    run_context = getattr(run_state, "run_context", None)
+    if run_context is None:
+        return False
+    recorded = False
+    task_id = str(getattr(report, "task_id", "") or "")
+    summary = str(getattr(report, "summary", "") or "").strip()
+    try:
+        if summary and hasattr(run_context, "put_insight"):
+            run_context.put_insight(summary, source=task_id, key=f"worker_report:{task_id or 'unknown'}")
+            recorded = True
+        if hasattr(run_context, "put_write"):
+            for path in list(getattr(report, "files_written", []) or []):
+                clean_path = str(path or "").strip()
+                if not clean_path:
+                    continue
+                run_context.put_write(clean_path, summary=summary, source=task_id)
+                recorded = True
+    except Exception:
+        return recorded
+    return recorded
+
+
+async def _run_lead_rework_until_stable(
+    *,
+    refined_request: str,
+    plan: PlannerResult,
+    project_root,
+    factory,
+    hooks,
+    run_agent,
+    run_state: PipelineRunState | None,
+    ledger: PatchProposalLedger | None,
+    workspace,
+    worker_outputs: list[tuple[str, str, str]],
+    worker_reports: list,
+    lead_review_findings: list,
+    approval_policy_factory=None,
+    mode: str,
+    show_progress: bool,
+    attempt: int,
+    max_attempts: int = MAX_LEAD_REWORK_ATTEMPTS,
+) -> tuple[list[tuple[str, str, str]], list, list, list]:
+    if mode != "full" or not worker_reports:
+        return worker_outputs, worker_reports, lead_review_findings, []
+
+    attempts_by_task: dict[str, int] = {}
+    task_by_id = {str(getattr(task, "id", "") or ""): task for task in list(getattr(plan, "tasks", []) or [])}
+    lead_rework_limits = []
+
+    while True:
+        actions, limits = plan_lead_rework_actions(
+            lead_review_findings,
+            attempts_by_task,
+            max_attempts=max_attempts,
+        )
+        if limits:
+            lead_rework_limits = limits
+            _emit_lead_rework_limits(run_state, limits, mode=mode)
+        if not actions:
+            return worker_outputs, worker_reports, lead_review_findings, lead_rework_limits
+
+        for action in actions:
+            task = task_by_id.get(action.task_id)
+            if task is None:
+                attempts_by_task[action.task_id] = action.attempt
+                continue
+            attempts_by_task[action.task_id] = action.attempt
+            rework_task = _task_with_rework_instruction(task, action.instruction)
+            _emit_lead_rework_started(run_state, action, mode=mode)
+            if show_progress and run_state:
+                run_state.record_task_started(rework_task)
+                _print_progress_snapshot(
+                    run_state,
+                    mode=mode,
+                    attempt=attempt,
+                    active=f"主管打回重做：{getattr(task, 'title', '') or action.task_id}",
+                )
+            kwargs = _task_runner_kwargs(approval_policy_factory, rework_task)
+            kwargs.update(_execution_mode_kwarg(mode))
+            title, output = await _run_planned_task(
+                refined_request,
+                rework_task,
+                project_root,
+                factory,
+                hooks,
+                run_agent,
+                run_state,
+                ledger,
+                **kwargs,
+            )
+            workspace.write_task_output(rework_task.id, title, output)
+            _record_worker_output_detail(
+                project_root,
+                task_id=str(getattr(rework_task, "id", "") or ""),
+                title=title,
+                output=output,
+                mode=mode,
+                route=supervisor_route(plan),
+                run_state=run_state,
+            )
+            report = build_worker_report(rework_task, output, run_state=run_state)
+            worker_outputs = _replace_worker_output(worker_outputs, str(getattr(rework_task, "id", "") or ""), title, output)
+            worker_reports = _replace_worker_report(worker_reports, report)
+            _record_worker_report_to_blackboard(run_state, report)
+            _emit_lead_rework_completed(run_state, action, report, mode=mode)
+
+        lead_review_findings = _review_full_worker_reports(plan, worker_reports, run_state, mode=mode)
+
+
+def _task_with_rework_instruction(task, rework_instruction: str):
+    try:
+        return replace(task, instruction=str(getattr(task, "instruction", "") or "").rstrip() + "\n\n" + rework_instruction)
+    except TypeError:
+        task.instruction = str(getattr(task, "instruction", "") or "").rstrip() + "\n\n" + rework_instruction
+        return task
+
+
+def _replace_worker_output(
+    worker_outputs: list[tuple[str, str, str]],
+    task_id: str,
+    title: str,
+    output: str,
+) -> list[tuple[str, str, str]]:
+    replaced = False
+    result: list[tuple[str, str, str]] = []
+    for item in list(worker_outputs or []):
+        existing_task_id = str(item[0] or "")
+        if existing_task_id == task_id:
+            result.append((task_id, title, output))
+            replaced = True
+        else:
+            result.append(item)
+    if not replaced:
+        result.append((task_id, title, output))
+    return result
+
+
+def _replace_worker_report(worker_reports: list, report) -> list:
+    task_id = str(getattr(report, "task_id", "") or "")
+    replaced = False
+    result = []
+    for item in list(worker_reports or []):
+        if str(getattr(item, "task_id", "") or "") == task_id:
+            result.append(report)
+            replaced = True
+        else:
+            result.append(item)
+    if not replaced:
+        result.append(report)
+    return result
+
+
+def _emit_lead_rework_started(run_state, action, *, mode: str) -> None:
+    if run_state is None or not hasattr(run_state, "emit_event"):
+        return
+    run_state.emit_event(
+        "LeadReworkStarted",
+        f"主管打回重做：{action.task_id}（{action.attempt}/{action.max_attempts}）",
+        mode=mode,
+        agent="supervisor",
+        task_id=action.task_id,
+        status="running",
+        payload=action.to_dict(),
+    )
+
+
+def _emit_lead_rework_completed(run_state, action, report, *, mode: str) -> None:
+    if run_state is None or not hasattr(run_state, "emit_event"):
+        return
+    run_state.emit_event(
+        "LeadReworkCompleted",
+        f"主管返工完成：{action.task_id}（{action.attempt}/{action.max_attempts}）",
+        mode=mode,
+        agent="supervisor",
+        task_id=action.task_id,
+        status=str(getattr(report, "status", "") or "completed"),
+        payload={
+            "action": action.to_dict(),
+            "report": report.to_dict() if hasattr(report, "to_dict") else {},
+        },
+    )
+
+
+def _emit_lead_rework_limits(run_state, limits: list, *, mode: str) -> None:
+    if run_state is None or not hasattr(run_state, "emit_event"):
+        return
+    for limit in limits:
+        run_state.emit_event(
+            "LeadReworkLimitReached",
+            f"主管返工已达上限：{limit.task_id}（max={limit.max_attempts}）",
+            mode=mode,
+            agent="supervisor",
+            task_id=limit.task_id,
+            status="warning",
+            payload=limit.to_dict(),
+        )
 
 
 def _should_store_worker_output(text: str) -> bool:
@@ -489,6 +716,7 @@ def _render_lead_supervisor_output(
     worker_outputs: list[tuple[str, str, str]] | None = None,
     worker_reports: list | None = None,
     lead_review_findings: list | None = None,
+    lead_rework_limits: list | None = None,
 ) -> str:
     lines = [
         "主管最终汇报",
@@ -524,6 +752,9 @@ def _render_lead_supervisor_output(
     else:
         lines.append("  LeadReview")
         lines.append("  - findings: none")
+    if lead_rework_limits:
+        lines.extend(["", "## 返工状态"])
+        lines.append(_indent_block(render_lead_rework_limits(lead_rework_limits), "  "))
     try:
         names = sorted(path.name for path in run_dir.glob("*.md"))
     except Exception:
@@ -537,6 +768,8 @@ def _render_lead_supervisor_output(
         error_count = sum(1 for finding in lead_review_findings if getattr(finding, "severity", "") == "error")
         warning_count = sum(1 for finding in lead_review_findings if getattr(finding, "severity", "") == "warning")
         lines.append(f"- 主管已完成收口审查：error={error_count}, warning={warning_count}。")
+        if lead_rework_limits:
+            lines.append("- 存在已达返工上限的任务，已停止继续重跑并保留剩余风险。")
         if error_count:
             lines.append("- 存在 error 级风险，请优先查看“主管审查”。")
     else:

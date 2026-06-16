@@ -49,11 +49,13 @@ skills = [
   "cli-command-safety/**/*",
   "code-engineer/**/*",
   "final-synthesizer/**/*",
+  "full-supervisor/**/*",
   "full-worker-contract/**/*",
   "orchestrator-planner/**/*",
   "project-explorer/**/*",
   "query-refiner/**/*",
   "serial-executor-contract/**/*",
+  "solo-executor-contract/**/*",
   "skill-creator/**/*",
 ]
 

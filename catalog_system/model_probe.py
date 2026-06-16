@@ -182,6 +182,55 @@ def probe_model_service(model_info: dict, timeout: float = 1.0) -> dict:
     }
 
 
+def fetch_upstream_models(
+    base_url: str,
+    api_key: str,
+    backend_type: str = "openai_compatible",
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Fetch model names visible to a provider key without probing capabilities."""
+
+    backend = str(backend_type or "openai_compatible").strip().lower()
+    model_info = {"base_url": base_url, "api_key": api_key, "backend_type": backend}
+    try:
+        endpoint = _ollama_tags_endpoint(model_info) if backend == "ollama" else _models_endpoint(model_info)
+    except ValueError as exc:
+        return {"ok": False, "models": [], "source": "upstream", "error": str(exc)}
+
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        response = session.get(endpoint, headers=_headers(model_info), timeout=timeout)
+    except requests.RequestException:
+        return {
+            "ok": False,
+            "models": [],
+            "source": "ollama" if backend == "ollama" else "upstream",
+            "error": "网络连接失败，请检查 base_url、网络或代理设置。",
+        }
+    finally:
+        session.close()
+
+    source = "ollama" if backend == "ollama" else "upstream"
+    if not (200 <= response.status_code < 300):
+        return {
+            "ok": False,
+            "models": [],
+            "source": source,
+            "error": _fetch_error_text(response),
+        }
+
+    names = _ordered_ollama_model_names(response) if backend == "ollama" else _openai_model_names(response)
+    if not names:
+        return {
+            "ok": False,
+            "models": [],
+            "source": source,
+            "error": "模型列表响应为空或格式不符合 OpenAI /models 协议。",
+        }
+    return {"ok": True, "models": names, "source": source, "error": ""}
+
+
 def validate_probe_input(model_info: dict) -> dict:
     backend_type = str(model_info.get("backend_type") or "").strip()
     is_local = backend_type in {"ollama", "llama_cpp", "local"}
@@ -506,6 +555,13 @@ def _chat_completions_endpoint(model_info: dict) -> str:
     if model_info.get("backend_type") == "ollama":
         return f"{base_url}/v1/chat/completions"
     return f"{base_url}/chat/completions"
+
+
+def _models_endpoint(model_info: dict) -> str:
+    base_url = str(model_info.get("base_url") or "").rstrip("/")
+    if not base_url:
+        raise ValueError("model base_url is empty")
+    return f"{base_url}/models"
 
 
 def _ollama_tags_endpoint(model_info: dict) -> str:
@@ -908,6 +964,49 @@ def _ollama_model_names(response) -> set[str]:
             if value:
                 names.add(value)
     return names
+
+
+def _ordered_ollama_model_names(response) -> list[str]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in payload.get("models") or []:
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get("name") or item.get("model") or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            names.append(value)
+    return names
+
+
+def _openai_model_names(response) -> list[str]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in payload.get("data") or []:
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get("id") or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            names.append(value)
+    return names
+
+
+def _fetch_error_text(response) -> str:
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status in {401, 403}:
+        return "鉴权失败，请检查 API key 是否正确，或该 key 是否有模型列表权限。"
+    if status == 404:
+        return "该 Provider 不支持 OpenAI 兼容的 /models 接口，请改用手填模型名。"
+    return f"获取模型列表失败：HTTP {status}。"
 
 
 def _service_block_status(service_result: dict) -> str:

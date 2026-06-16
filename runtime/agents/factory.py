@@ -289,7 +289,8 @@ class AgentFactory:
             "你是动态多智能体系统的主脑。当前问题不需要创建专家 Agent。"
             "请根据用户问题直接用中文回答，简洁、自然、准确。默认不要使用 emoji。"
             "介绍自己时统一自称“动态多智能体助手”或“主脑规划器”，"
-            "不要自称 Lucode、ChatGPT 或其它未由用户指定的品牌名。\n\n"
+            "不要自称 Claude、Claude Code、Anthropic、ChatGPT、OpenAI 模型"
+            "或其它未由用户指定的底层模型品牌。\n\n"
             + self._direct_answer_mode_context(execution_mode)
             + f"回答要求：{instruction}"
         )
@@ -305,7 +306,10 @@ class AgentFactory:
             return (
                 "当前模式：serial。当前问题被判定为直接回答，不需要创建任务 Agent。"
                 "不要声称创建了 Supervisor、Worker、Lead Reviewer 或并行团队；"
-                "不要把 serial 模式描述成 full 团队模式。\n\n"
+                "不要把 serial 模式描述成 full 团队模式。"
+                "不要自称 Claude、Claude Code、Anthropic、ChatGPT、OpenAI 模型或任何用户没有明确指定的底层模型品牌；"
+                "当用户询问你是什么模型时，只能说明你是 Lucode 当前配置的模型驱动的执行 Agent，"
+                "不要猜测底层模型品牌。\n\n"
             )
         if mode == "full":
             return (
@@ -328,17 +332,7 @@ class AgentFactory:
         return Agent(
             name="solo_agent",
             instructions=sanitize_text(
-                "你正在 solo 单模型工具 Agent 模式下工作。"
-                "本模式类似 Claude CLI：由一个模型独立理解用户需求，并在需要时调用工具完成任务。\n\n"
-                "规则：\n"
-                "- 默认使用中文，简洁自然，不要使用 emoji。\n"
-                "- 可以读写文件、联网、运行命令、查看 git、运行测试和做验证，但必须通过已挂载工具真实完成，不要编造工具结果。\n"
-                "- 写入、删除、命令、提交等高风险操作必须等待工具审批流程，不要绕过审批。\n"
-                "- 不能创建多个 Agent，不能声称已经启动主脑、专家 Agent、前置副脑或汇总副脑。\n"
-                "- 不要自动升级到 serial/full，也不要因为任务复杂就建议切换模式；当前模式下能做就直接单 Agent 做完。\n"
-                "- 普通聊天、能力介绍、项目分析和代码任务中，不要主动提 serial/full、多 Agent 或模式切换。\n"
-                "- 只有当用户明确要求“创建多个 Agent / 多专家分工 / 多 Agent 并行”时，才说明当前是 solo 单 Agent 模式，无法创建多个 Agent，需要用户显式切换到 serial 或 full。\n"
-                "- 介绍自己时可以说你是“solo 单模型工具 Agent”，负责在当前项目中直接协助分析、修改和验证；不要主动列出多 Agent 限制。\n"
+                load_skill("solo_executor_contract")
             ),
             model=self.model_registry.get_model(model_id),
             mcp_servers=servers,

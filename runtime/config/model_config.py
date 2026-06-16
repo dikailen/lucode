@@ -208,6 +208,41 @@ def remove_provider_auth(provider_id: str, user_home: Path | str | None = None) 
     return existed
 
 
+def set_provider_models(
+    provider_id: str,
+    models: list[str] | tuple[str, ...] | str,
+    *,
+    workspace_root: Path | str | None = None,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_id(provider_id)
+    normalized_models = _as_string_list(models)
+    if not normalized_models:
+        raise ValueError("Provider 至少保留一个模型；如需全部移除，请删除 Provider。")
+
+    config = load_lucode_config(workspace_root=workspace_root)
+    providers = dict(config.get("provider") or {})
+    provider_config = providers.get(provider_id)
+    if not isinstance(provider_config, dict):
+        raise ValueError(f"未找到 Provider：{provider_id}。")
+
+    previous_models = _as_string_list(provider_config.get("models") or [])
+    provider_config = dict(provider_config)
+    provider_config["models"] = _dedupe_strings(normalized_models)
+    providers[provider_id] = _sanitize_provider_config(provider_config)
+    config["provider"] = providers
+
+    valid_refs = _valid_refs_after_provider_model_update(config, provider_id, provider_config["models"])
+    cleanup = prune_model_refs_from_config(config, valid_refs=valid_refs)
+    save_lucode_config(config, workspace_root=workspace_root)
+
+    return {
+        **cleanup,
+        "provider_id": provider_id,
+        "models": provider_config["models"],
+        "changed": provider_config["models"] != previous_models or cleanup["changed"],
+    }
+
+
 def remove_provider_config(
     provider_id: str,
     *,
@@ -645,6 +680,39 @@ def _as_string_list(value: list[str] | tuple[str, ...] | str | Any) -> list[str]
     return [str(item).strip() for item in raw_items if str(item).strip()]
 
 
+def _dedupe_strings(values: list[str] | tuple[str, ...] | str | Any) -> list[str]:
+    deduped: list[str] = []
+    for item in _as_string_list(values):
+        if item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
+
+def _valid_refs_after_provider_model_update(
+    config: dict[str, Any],
+    provider_id: str,
+    provider_models: list[str],
+) -> set[str]:
+    provider_id = normalize_provider_id(provider_id)
+    provider_refs = {f"{provider_id}/{model}" for model in _as_string_list(provider_models)}
+    refs: set[str] = set()
+
+    model_config = config.get("model")
+    if isinstance(model_config, dict):
+        values = []
+        primary = str(model_config.get("primary") or "").strip()
+        if primary:
+            values.append(primary)
+        values.extend(_as_string_list(model_config.get("fallback") or []))
+        refs.update(normalize_model_ref(value) for value in values if value)
+
+    roles = config.get("roles")
+    if isinstance(roles, dict):
+        for value in roles.values():
+            refs.update(normalize_model_ref(item) for item in _as_string_list(value) if item)
+
+    return {ref for ref in refs if not ref.startswith(f"{provider_id}/")} | provider_refs
 def _normalize_model_id(raw_id: str) -> str:
     value = str(raw_id or "").strip().lower()
     value = re.sub(r"[^a-z0-9_]+", "_", value)

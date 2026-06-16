@@ -25,6 +25,8 @@ def _emit_tool_event(event_bus, event_type: str, event: ToolHookEvent, *, task_i
     if event_bus is None or not hasattr(event_bus, "emit"):
         return None
     payload = tool_invoked_payload(event)
+    if task_id:
+        payload["requester"] = str(task_id)
     label = "Tool invoked" if event_type == "ToolInvoked" else "Tool approval"
     try:
         return event_bus.emit(

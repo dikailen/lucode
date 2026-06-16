@@ -329,6 +329,7 @@ async def _handle_model_tuner_session(*, console, runtime_settings, workspace_co
 
 async def _handle_connect_wizard_session(*, console, workspace_context, runtime_settings) -> None:
     state = build_connect_wizard_state(workspace_context)
+    _apply_runtime_privacy_to_connect_state(state, runtime_settings)
     message = "已进入 Provider 连接向导。先选择 Provider，后面会进入完整表单。"
     while True:
         if not _uses_choice_menu(console):
@@ -352,6 +353,7 @@ async def _handle_connect_wizard_session(*, console, workspace_context, runtime_
                 runtime_settings=runtime_settings,
             )
             state = build_connect_wizard_state(workspace_context)
+            _apply_runtime_privacy_to_connect_state(state, runtime_settings)
             if _uses_choice_menu(console):
                 print(message)
             continue
@@ -364,6 +366,7 @@ async def _handle_connect_wizard_session(*, console, workspace_context, runtime_
                 runtime_settings=runtime_settings,
             )
             state = build_connect_wizard_state(workspace_context)
+            _apply_runtime_privacy_to_connect_state(state, runtime_settings)
             if _uses_choice_menu(console):
                 print(message)
             continue
@@ -398,6 +401,7 @@ async def _handle_connect_wizard_session(*, console, workspace_context, runtime_
                 return
             except _ConnectWizardRestartProvider:
                 state = build_connect_wizard_state(workspace_context)
+                _apply_runtime_privacy_to_connect_state(state, runtime_settings)
                 message = "已返回 Provider 选择。"
                 if _uses_choice_menu(console):
                     print(message)
@@ -713,6 +717,12 @@ def _connect_form_command_items(state):
     if _connect_form_needs_key(state):
         key_state = "已填写" if state.api_key else "未填写"
         items.append(ConnectWizardCommandItem("edit_key", f"编辑 API key            {key_state}", "输入会隐藏"))
+    items.append(ConnectWizardCommandItem("fetch", "获取该 key 可用模型", "调用 /models；默认不自动全选"))
+    items.append(ConnectWizardCommandItem("model all", "选择全部已获取模型", "fetch 后可用"))
+    if getattr(state, "selected_models", None):
+        items.append(ConnectWizardCommandItem("unselect all", "取消选择全部模型", f"当前已选 {len(state.selected_models)} 个"))
+    if getattr(state, "editing", False):
+        items.append(ConnectWizardCommandItem("apply", "应用当前模型选择", "覆盖该 Provider 的模型列表，不改 key"))
     items.extend(
         [
             ConnectWizardCommandItem("save_default", "保存并设为默认模型", _connect_state_primary_ref(state) or "填完字段后可保存"),
@@ -740,9 +750,32 @@ async def _apply_connect_form_action(*, console, state, action: str, workspace_c
     if lower in {"edit_key", "key", "api-key", "apikey"}:
         state = await _collect_one_connect_field(console, state, "key")
         return state, "API key 已填写，未在屏幕回显。", False
-    if lower.startswith(("homepage ", "home ", "base-url ", "base_url ", "url ", "model ", "models ", "key ", "api-key ", "apikey ")):
+    if lower in {"fetch", "拉取", "获取模型", "fetch models", "model all", "models all", "select all", "unselect all", "deselect all"}:
+        state, message = apply_connect_wizard_input(state, action)
+        if lower not in {"fetch", "拉取", "获取模型", "fetch models"}:
+            message = f"字段已更新。{message}"
+        return state, message, False
+    if lower.startswith((
+        "homepage ",
+        "home ",
+        "base-url ",
+        "base_url ",
+        "url ",
+        "model ",
+        "models ",
+        "select ",
+        "unselect ",
+        "deselect ",
+        "key ",
+        "api-key ",
+        "apikey ",
+    )):
         state = _apply_inline_connect_form_command(state, action)
         return state, "字段已更新。", False
+    if lower in {"apply", "save models", "保存模型", "应用"}:
+        state, message = apply_connect_wizard_input(state, action)
+        _clear_connect_wizard_caches()
+        return state, message, False
     if lower in {"save_default", "default", "yes", "y", "set_default"}:
         return state, _save_connect_form(state, workspace_context, runtime_settings, set_default=True), True
     if lower in {"save_only", "save", "connect", "only", "no", "n"}:
@@ -808,6 +841,9 @@ def _field_value(value: str) -> str:
 
 
 def _selected_connect_model(state) -> str:
+    selected_models = [str(item).strip() for item in getattr(state, "selected_models", []) if str(item).strip()]
+    if selected_models:
+        return selected_models[0]
     if str(state.model or "").strip():
         return str(state.model).strip()
     preset = state.provider_catalog.get(state.selected_provider) or {}
@@ -1027,7 +1063,8 @@ def _connect_form_needs_key(state) -> bool:
 
 
 def _connect_state_primary_ref(state) -> str:
-    model = str(state.model or "").strip()
+    selected_models = [str(item).strip() for item in getattr(state, "selected_models", []) if str(item).strip()]
+    model = selected_models[0] if selected_models else str(state.model or "").strip()
     if not model:
         preset = state.provider_catalog.get(state.selected_provider) or {}
         model = str((preset.get("models") or [""])[0]).strip()
@@ -1048,6 +1085,12 @@ def _clear_connect_wizard_caches() -> None:
         clear_completion_caches()
     except Exception:
         pass
+
+
+def _apply_runtime_privacy_to_connect_state(state, runtime_settings) -> None:
+    privacy_mode = str(getattr(runtime_settings, "privacy_mode", "") or "").strip()
+    if privacy_mode:
+        state.privacy_mode = privacy_mode
 
 
 async def _read_model_tuner_line(console, state) -> str:

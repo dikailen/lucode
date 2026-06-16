@@ -32,7 +32,7 @@ def build_supervisor_plan_view(plan: PlannerResult, *, mode: str = "full") -> Su
 
 
 def emit_supervisor_observation(plan: PlannerResult, *, mode: str, event_bus=None) -> SupervisorPlanView | None:
-    """Emit a non-blocking observation event for full mode, without changing execution."""
+    """Emit a non-blocking supervisor event for full mode."""
 
     normalized_mode = normalize_execution_mode(mode)
     if normalized_mode != "full" or plan.route_type != "multi_agent":
@@ -176,14 +176,14 @@ def _decisions_for_conflicts(conflicts: list[dict[str, Any]]) -> list[Supervisor
         return [
             SupervisorDecision(
                 action="observe",
-                reason="Supervisor v0 only records the plan view; execution scheduling remains unchanged.",
+                reason="Supervisor recorded the plan view; no write conflict requires scheduling changes.",
                 severity="info",
             )
         ]
     return [
         SupervisorDecision(
-            action="observe_conflict",
-            reason="Supervisor v0 detected possible resource conflicts but did not alter execution.",
+            action="serialize_conflict",
+            reason="Supervisor detected overlapping write leases; full-mode scheduler must serialize the conflicting workers.",
             affected_task_ids=sorted({task_id for conflict in conflicts for task_id in conflict.get("task_ids", [])}),
             resource_conflicts=conflicts,
             severity="warning",
@@ -192,19 +192,19 @@ def _decisions_for_conflicts(conflicts: list[dict[str, Any]]) -> list[Supervisor
 
 
 def _notes_for_view(task_specs: list[TaskSpec], conflicts: list[dict[str, Any]]) -> list[str]:
-    notes = ["Supervisor v0 is observation-only; it does not change parallel batches or approvals."]
+    notes = ["Supervisor runtime gate is active for full-mode write approvals; conflicting write leases are serialized."]
     remote_tasks = [task.task_id for task in task_specs if task.toolset_id == "remote_lookup"]
     if remote_tasks:
         notes.append("Remote MCP lookup remains a fallback path for tasks: " + ", ".join(remote_tasks))
     if conflicts:
-        notes.append("Detected write conflicts should be handled by the existing scheduler until supervised mode is active.")
+        notes.append("Detected write conflicts are routed through the full-mode supervisor scheduler before execution.")
     return notes
 
 
 def _event_message_for_view(view: SupervisorPlanView) -> str:
     if view.has_conflicts:
-        return f"主管观察：{len(view.task_specs)} 个任务，发现 {len(view.conflicts)} 个资源冲突；本轮仅记录不改调度。"
-    return f"主管观察：{len(view.task_specs)} 个任务，未发现资源写入冲突；本轮仅记录不改调度。"
+        return f"主管调度：{len(view.task_specs)} 个任务，发现 {len(view.conflicts)} 个资源冲突；冲突 worker 将串行化。"
+    return f"主管调度：{len(view.task_specs)} 个任务，未发现资源写入冲突。"
 
 
 def _normalize_resource(resource: str) -> str:

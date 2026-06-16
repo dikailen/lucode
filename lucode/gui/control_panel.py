@@ -182,6 +182,7 @@ if _PYSIDE_AVAILABLE:
         role_model_changed = Signal(str, str)
         query_refiner_toggled = Signal(bool)
         worker_pool_changed = Signal(list)
+        provider_manager_requested = Signal()
 
         def __init__(self, parent: QWidget | None = None):
             super().__init__(parent)
@@ -242,6 +243,11 @@ if _PYSIDE_AVAILABLE:
             self.refiner_toggle.setCheckable(True)
             self.refiner_toggle.toggled.connect(self._on_refiner_toggled)
             top.addWidget(self.refiner_toggle)
+            self.provider_manager_button = QPushButton("Models")
+            self.provider_manager_button.setObjectName("GearButton")
+            self.provider_manager_button.setToolTip("Manage providers, API keys, and available models")
+            self.provider_manager_button.clicked.connect(self.provider_manager_requested.emit)
+            top.addWidget(self.provider_manager_button)
             top.addStretch(1)
 
         def _build_roles_area(self, outer) -> None:
@@ -320,6 +326,7 @@ if _PYSIDE_AVAILABLE:
                 btn.setEnabled(enabled)
             self.privacy_combo.setEnabled(enabled)
             self.refiner_toggle.setEnabled(enabled)
+            self.provider_manager_button.setEnabled(enabled)
             for row in self._role_rows.values():
                 row.combo.setEnabled(enabled)
             if self._pool_row is not None:

@@ -8,6 +8,8 @@ from lucode.gui.approval import (
     LatestApprovalContext,
     safe_resolve_future,
 )
+from runtime.hooks.event_bridge import emit_tool_event_bridge
+from runtime.hooks.tool_events import build_tool_event
 
 
 def test_latest_approval_context_uses_tool_approval_pre_payload():
@@ -72,3 +74,26 @@ def test_safe_resolve_future_sets_pending_future():
 
     assert resolved is True
     assert result == "session"
+
+
+def test_tool_approval_event_payload_includes_requester_task_id():
+    class EventBus:
+        def __init__(self):
+            self.events = []
+
+        def emit(self, event_type, message, **kwargs):
+            self.events.append({"event_type": event_type, "message": message, **kwargs})
+
+    bus = EventBus()
+    event = build_tool_event(
+        "pre_tool_use",
+        "workspace_edit.write_file",
+        '{"path": "runtime/example.py", "content": "x"}',
+        tool_rule="workspace_edit",
+        status="pending",
+    )
+
+    emit_tool_event_bridge(bus, event, task_id="worker-edit")
+
+    assert bus.events[0]["event_type"] == "ToolApprovalPre"
+    assert bus.events[0]["payload"]["requester"] == "worker-edit"

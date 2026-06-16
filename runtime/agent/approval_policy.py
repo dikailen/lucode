@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
@@ -15,6 +16,15 @@ class AutoApprovalDecision:
     reason: str = ""
     reject: bool = False
     rejection_message: str = ""
+
+
+@dataclass(frozen=True)
+class SupervisorApprovalRequest:
+    task_id: str
+    tool_name: str
+    operation: str
+    target_paths: list[str]
+    reason: str = ""
 
 
 class FullModeApprovalPolicy:
@@ -51,6 +61,10 @@ class FullModeApprovalPolicy:
     def decide(self, tool_name: str, arguments: str | None) -> AutoApprovalDecision:
         name = str(tool_name or "")
         parsed = _parse_arguments(arguments)
+        if _is_workspace_edit_tool(name) or _is_delete_tool(name):
+            if _supervisor_gate_enabled():
+                return self._decide_workspace_edit_with_supervisor_gate(name, parsed)
+            return self._decide_workspace_edit_legacy(name, parsed)
         if _is_dangerous_tool(name):
             return AutoApprovalDecision(False, "dangerous_tool_requires_user")
         if _is_command_tool(name):
@@ -59,16 +73,35 @@ class FullModeApprovalPolicy:
             if self._allows_read_tool(name):
                 return AutoApprovalDecision(True, "full_supervisor_planned_scope")
             return AutoApprovalDecision(False, "read_tool_not_declared")
-        if _is_workspace_edit_tool(name):
-            if not self._allows_workspace_edit_tool(name):
-                return AutoApprovalDecision(False, "workspace_edit_not_declared")
-            if _is_delete_tool(name):
-                return AutoApprovalDecision(False, "delete_requires_user")
-            touched = _tool_target_paths(name, parsed)
-            if touched and self._paths_within_intent(touched, self.write_intent):
-                return AutoApprovalDecision(True, "full_supervisor_planned_scope")
-            return AutoApprovalDecision(False, "write_path_out_of_scope")
         return AutoApprovalDecision(False, "tool_not_in_supervisor_policy")
+
+    def _decide_workspace_edit_legacy(self, tool_name: str, parsed: dict[str, Any]) -> AutoApprovalDecision:
+        if not self._allows_workspace_edit_tool(tool_name):
+            return AutoApprovalDecision(False, "workspace_edit_not_declared")
+        if _is_delete_tool(tool_name):
+            return AutoApprovalDecision(False, "delete_requires_user")
+        touched = _tool_target_paths(tool_name, parsed)
+        if touched and self._paths_within_intent(touched, self.write_intent):
+            return AutoApprovalDecision(True, "full_supervisor_planned_scope")
+        return AutoApprovalDecision(False, "write_path_out_of_scope")
+
+    def _decide_workspace_edit_with_supervisor_gate(self, tool_name: str, parsed: dict[str, Any]) -> AutoApprovalDecision:
+        request = SupervisorApprovalRequest(
+            task_id=self.task_id,
+            tool_name=str(tool_name or ""),
+            operation=_workspace_operation(tool_name),
+            target_paths=_tool_target_paths(tool_name, parsed),
+            reason=str(parsed.get("reason") or "").strip(),
+        )
+        if not self._allows_workspace_edit_tool(tool_name):
+            return _supervisor_reject(request, "该任务没有声明 workspace_edit 写入工具。")
+        if _is_delete_tool(tool_name):
+            return _supervisor_reject(request, "删除类操作必须由用户显式确认，本轮主管 gate 不自动放行删除。")
+        if not request.target_paths:
+            return _supervisor_reject(request, "写入申请缺少明确目标路径。")
+        if self._paths_within_intent(request.target_paths, self.write_intent):
+            return AutoApprovalDecision(True, "supervisor_gate_approved")
+        return _supervisor_reject(request, "目标路径不在本任务声明的 write_intent 范围内。")
 
     def _allows_read_tool(self, tool_name: str) -> bool:
         del tool_name
@@ -158,6 +191,7 @@ def _is_workspace_edit_tool(tool_name: str) -> bool:
             "write_file",
             "replace_in_file",
             "apply_unified_patch",
+            "delete_file",
         }
     )
 
@@ -165,6 +199,35 @@ def _is_workspace_edit_tool(tool_name: str) -> bool:
 def _is_delete_tool(tool_name: str) -> bool:
     lowered = tool_name.lower()
     return "delete" in lowered or "safe_delete" in lowered
+
+
+def _workspace_operation(tool_name: str) -> str:
+    lowered = str(tool_name or "").lower()
+    for operation in ("apply_unified_patch", "replace_in_file", "write_file", "create_file", "delete_file"):
+        if operation in lowered:
+            return operation
+    if "delete" in lowered:
+        return "delete"
+    return lowered.rsplit(".", 1)[-1] if lowered else "workspace_edit"
+
+
+def _supervisor_gate_enabled() -> bool:
+    raw = str(os.environ.get("LUCODE_FULL_SUPERVISOR_GATE", "1") or "").strip().lower()
+    return raw not in {"0", "false", "off", "no", "disabled"}
+
+
+def _supervisor_reject(request: SupervisorApprovalRequest, reason: str) -> AutoApprovalDecision:
+    paths = ", ".join(request.target_paths) if request.target_paths else "unknown"
+    task = request.task_id or "unknown"
+    return AutoApprovalDecision(
+        False,
+        "supervisor_gate_rejected",
+        reject=True,
+        rejection_message=(
+            f"主管拒绝了 worker {task} 的写入申请：{paths}。"
+            f"原因：{reason} 请停止本次写入，改为缩小范围、说明 blocker，或请求主脑重新规划。"
+        ),
+    )
 
 
 def _is_dangerous_tool(tool_name: str) -> bool:

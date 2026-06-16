@@ -12,6 +12,7 @@ from runtime.config.connect_command import (
     provider_requires_api_key,
     render_provider_connect_success,
 )
+from catalog_system.model_probe import fetch_upstream_models
 from runtime.config.model_config import (
     auth_path,
     load_auth,
@@ -20,6 +21,7 @@ from runtime.config.model_config import (
     normalize_provider_id,
     project_config_path,
     provider_has_api_key,
+    set_provider_models,
 )
 
 LUCODE_BLUE = "\033[94m"
@@ -40,6 +42,10 @@ class ConnectWizardState:
     display_name: str = ""
     custom: bool = False
     last_message: str = ""
+    available_models: list[str] = field(default_factory=list)
+    selected_models: list[str] = field(default_factory=list)
+    editing: bool = False
+    privacy_mode: str = "local_first"
 
 
 @dataclass(frozen=True)
@@ -62,6 +68,7 @@ def build_connect_wizard_state(workspace_context=None, *, selected_provider: str
         workspace_root=workspace_root,
         user_home=user_home,
         provider_catalog=load_provider_catalog(),
+        privacy_mode=str(getattr(workspace_context, "privacy_mode", "") or "local_first"),
     )
     if selected_provider:
         state, _ = apply_connect_wizard_input(state, f"provider {selected_provider}")
@@ -165,11 +172,19 @@ def apply_connect_wizard_input(state: ConnectWizardState, command: str) -> tuple
         state.api_key = value
         state.last_message = "API key 已填写，只会保存到用户级 auth.json。"
         return state, state.last_message
+    if lower in {"fetch", "拉取", "获取模型", "fetch models"}:
+        return _fetch_models_for_state(state)
     if lower.startswith(("model ", "models ")):
         value = command.split(maxsplit=1)[1].strip()
-        state.model = _resolve_model_value(state, value)
-        state.last_message = f"已选择模型：{state.model}"
-        return state, state.last_message
+        return _select_model_command(state, value, replace_selection=True)
+    if lower.startswith("select "):
+        value = command.split(maxsplit=1)[1].strip()
+        return _select_model_command(state, value, replace_selection=False)
+    if lower.startswith(("unselect ", "deselect ")):
+        value = command.split(maxsplit=1)[1].strip()
+        return _unselect_model_command(state, value)
+    if lower in {"apply", "save models", "保存模型", "应用"}:
+        return _apply_provider_model_selection(state)
     if lower.startswith(("homepage ", "home ")):
         value = command.split(maxsplit=1)[1].strip()
         if not value or _is_placeholder(value):
@@ -191,7 +206,10 @@ def apply_connect_wizard_input(state: ConnectWizardState, command: str) -> tuple
         state.display_name = value
         state.last_message = "已填写显示名称。"
         return state, state.last_message
-    raise ValueError("无法识别。可用：provider deepseek、custom my_proxy、key <key>、model <name>、connect、q。")
+    raise ValueError(
+        "无法识别。可用：provider deepseek、custom my_proxy、key <key>、fetch、model all、"
+        "select <编号/名称>、unselect <编号/名称>、apply、connect、q。"
+    )
 
 
 def build_connect_request_from_state(state: ConnectWizardState) -> ProviderConnectRequest:
@@ -204,7 +222,7 @@ def build_connect_request_from_state(state: ConnectWizardState) -> ProviderConne
         homepage=state.homepage.strip() if state.custom else "",
         base_url=state.base_url.strip() if state.custom else "",
         display_name=state.display_name.strip() if state.custom else "",
-        models=tuple([state.model.strip()] if state.model.strip() else []),
+        models=tuple(state.selected_models or ([state.model.strip()] if state.model.strip() else [])),
         custom=state.custom,
     )
     if not request.models and preset.get("models"):
@@ -263,23 +281,33 @@ def _render_selected_provider(state: ConnectWizardState) -> list[str]:
     display_name = state.display_name or preset.get("display_name") or provider_id
     homepage = state.homepage or preset.get("homepage") or "未填写"
     base_url = state.base_url or preset.get("base_url") or "未填写"
-    models = [str(item) for item in (preset.get("models") or []) if str(item).strip()]
+    models = _candidate_models(state)
     key_state = "本地无需 key" if preset.get("local") else (
         "key 已填写" if state.api_key else (
             "已保存 key" if provider_has_api_key(provider_id, user_home=state.user_home) else "还缺 key"
         )
     )
-    selected_model = state.model or (models[0] if models else "未选择")
+    selected_model = ", ".join(state.selected_models[:3]) if state.selected_models else (state.model or (models[0] if models else "未选择"))
+    if len(state.selected_models) > 3:
+        selected_model = f"{selected_model}, 另有 {len(state.selected_models) - 3} 个"
     lines = [
         f"当前 Provider：{display_name}（{provider_id}）",
-        f"类型：{'自定义中转' if state.custom else '内置预设'}",
+        f"类型：{'编辑已接入 Provider' if state.editing else ('自定义中转' if state.custom else '内置预设')}",
         f"官网：{homepage}",
         f"请求地址：{base_url}",
         f"API key：{key_state}",
         f"模型：{selected_model}",
     ]
     if models:
-        lines.append(f"推荐模型：{', '.join(models[:5])}")
+        if state.available_models:
+            lines.append(f"可用模型：{len(state.available_models)} 个（已选 {len(state.selected_models)}）")
+            for index, model in enumerate(state.available_models[:12], start=1):
+                mark = "☑" if model in state.selected_models else "☐"
+                lines.append(f"  [{index}] {mark} {model}")
+            if len(state.available_models) > 12:
+                lines.append(f"  另有 {len(state.available_models) - 12} 个模型未显示；可用 model <名称> 选择。")
+        else:
+            lines.append(f"推荐模型：{', '.join(models[:5])}")
     if state.custom:
         missing = []
         if not state.homepage:
@@ -298,9 +326,13 @@ def _selected_provider_items(state: ConnectWizardState) -> list[ConnectWizardCom
     items = [
         ConnectWizardCommandItem("connect", "保存当前 Provider", "写入 .lucode/config.toml；key 写入用户级 auth.json"),
         ConnectWizardCommandItem("key <API_KEY>", "填写 API key", "真实输入 key <你的 key>；面板不会回显密钥"),
+        ConnectWizardCommandItem("fetch", "获取该 key 可用模型", "调用 Provider 的 /models；默认不自动全选"),
+        ConnectWizardCommandItem("model all", "选择全部已获取模型", "fetch 后可用"),
     ]
+    if state.editing:
+        items.append(ConnectWizardCommandItem("apply", "应用当前模型选择", "覆盖该 Provider 的模型列表，不改 key"))
     preset = _selected_preset(state)
-    models = [str(item) for item in (preset.get("models") or []) if str(item).strip()]
+    models = _candidate_models(state)
     if models:
         for model in models[:8]:
             items.append(ConnectWizardCommandItem(f"model {model}", f"选择模型：{model}", state.selected_provider))
@@ -322,14 +354,18 @@ def _select_provider(state: ConnectWizardState, provider_id: str, *, custom: boo
     if not custom and provider_id not in state.provider_catalog:
         raise ValueError(f"未找到内置 Provider：{provider_id}。自定义中转请用 custom {provider_id}。")
     preset = state.provider_catalog.get(provider_id) or {}
-    models = [str(item).strip() for item in (preset.get("models") or []) if str(item).strip()]
+    configured = _configured_provider(state, provider_id)
+    models = [str(item).strip() for item in ((configured or preset).get("models") or []) if str(item).strip()]
     state.selected_provider = provider_id
     state.custom = bool(custom)
     state.api_key = ""
     state.model = models[0] if models and not custom else ""
-    state.homepage = "" if custom else str(preset.get("homepage") or "")
-    state.base_url = "" if custom else str(preset.get("base_url") or "")
-    state.display_name = str(preset.get("display_name") or provider_id)
+    state.homepage = "" if custom else str((configured or preset).get("homepage") or "")
+    state.base_url = "" if custom else str((configured or preset).get("base_url") or "")
+    state.display_name = str((configured or preset).get("display_name") or provider_id)
+    state.available_models = list(models)
+    state.selected_models = list(models) if configured else []
+    state.editing = bool(configured)
     state.last_message = f"已选择 Provider：{state.display_name}（{provider_id}）。"
     return state, state.last_message
 
@@ -338,13 +374,124 @@ def _resolve_model_value(state: ConnectWizardState, value: str) -> str:
     value = str(value or "").strip()
     if not value or _is_placeholder(value):
         raise ValueError("请填写真实模型名。")
-    models = [str(item).strip() for item in (_selected_preset(state).get("models") or []) if str(item).strip()]
+    models = _candidate_models(state)
+    if value.lower() == "all":
+        raise ValueError("all 只能用于 model all。")
     if value.isdigit():
         index = int(value)
         if 1 <= index <= len(models):
             return models[index - 1]
         raise ValueError(f"没有第 {index} 个推荐模型。")
     return value
+
+
+def _fetch_models_for_state(state: ConnectWizardState) -> tuple[ConnectWizardState, str]:
+    if not state.selected_provider:
+        raise ValueError("请先选择 Provider。")
+    if str(getattr(state, "privacy_mode", "") or "").lower() == "offline":
+        raise ValueError("离线隐私模式下不会请求上游模型列表。请切换隐私模式，或用 model <名称> 手动填写。")
+    preset = _selected_preset(state)
+    base_url = str(state.base_url or preset.get("base_url") or "").strip()
+    if not base_url:
+        raise ValueError("还缺 base_url。请先填写 base-url <请求地址>。")
+    if _connect_fetch_needs_key(state) and not str(state.api_key or "").strip():
+        raise ValueError("还缺 API key。请先用 key <你的 key> 填写。")
+    backend_type = str(preset.get("compatible_type") or preset.get("backend_type") or "openai_compatible")
+    result = fetch_upstream_models(base_url, state.api_key, backend_type=backend_type)
+    if not result.get("ok"):
+        state.last_message = f"获取模型失败：{result.get('error') or '未知错误'}。可继续用 model <名称> 手填。"
+        return state, state.last_message
+    models = _dedupe_models(result.get("models") or [])
+    state.available_models = models
+    state.selected_models = []
+    state.model = models[0] if models else ""
+    state.last_message = f"已获取 {len(models)} 个模型。默认不自动选择；可用 model all 全选，或 model 1 选择。"
+    return state, state.last_message
+
+
+def _select_model_command(
+    state: ConnectWizardState,
+    value: str,
+    *,
+    replace_selection: bool,
+) -> tuple[ConnectWizardState, str]:
+    if str(value or "").strip().lower() == "all":
+        models = _candidate_models(state)
+        if not models:
+            raise ValueError("当前没有可选模型，请先 fetch 或手填模型名。")
+        state.selected_models = list(models)
+        state.model = models[0]
+        state.last_message = f"已选择全部 {len(models)} 个模型。"
+        return state, state.last_message
+    model = _resolve_model_value(state, value)
+    if replace_selection:
+        state.selected_models = [model]
+    elif model not in state.selected_models:
+        state.selected_models.append(model)
+    state.model = model
+    state.last_message = f"已选择模型：{model}"
+    return state, state.last_message
+
+
+def _unselect_model_command(state: ConnectWizardState, value: str) -> tuple[ConnectWizardState, str]:
+    if str(value or "").strip().lower() == "all":
+        state.selected_models = []
+        state.last_message = "已取消选择全部模型。"
+        return state, state.last_message
+    model = _resolve_model_value(state, value)
+    state.selected_models = [item for item in state.selected_models if item != model]
+    if state.model == model:
+        state.model = state.selected_models[0] if state.selected_models else ""
+    state.last_message = f"已取消选择模型：{model}"
+    return state, state.last_message
+
+
+def _apply_provider_model_selection(state: ConnectWizardState) -> tuple[ConnectWizardState, str]:
+    if not state.selected_provider:
+        raise ValueError("请先选择 Provider。")
+    if not state.editing:
+        raise ValueError("当前 Provider 还没有保存配置；新增请用 connect 保存。")
+    if not state.selected_models:
+        raise ValueError("至少保留一个模型；如果要全部删除，请删除整个 Provider。")
+    result = set_provider_models(
+        state.selected_provider,
+        state.selected_models,
+        workspace_root=state.workspace_root,
+    )
+    state.available_models = list(result.get("models") or [])
+    state.selected_models = list(result.get("models") or [])
+    state.model = state.selected_models[0] if state.selected_models else ""
+    state.last_message = f"已更新 Provider 模型列表：{len(state.selected_models)} 个模型。"
+    return state, state.last_message
+
+
+def _candidate_models(state: ConnectWizardState) -> list[str]:
+    if state.available_models:
+        return list(state.available_models)
+    return [str(item).strip() for item in (_selected_preset(state).get("models") or []) if str(item).strip()]
+
+
+def _configured_provider(state: ConnectWizardState, provider_id: str) -> dict:
+    config = load_effective_lucode_config(workspace_root=state.workspace_root, user_home=state.user_home)
+    providers = config.get("provider") if isinstance(config.get("provider"), dict) else {}
+    configured = (providers or {}).get(normalize_provider_id(provider_id))
+    return dict(configured) if isinstance(configured, dict) else {}
+
+
+def _dedupe_models(models) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in models or []:
+        value = str(item or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            output.append(value)
+    return output
+
+
+def _connect_fetch_needs_key(state: ConnectWizardState) -> bool:
+    preset = _selected_preset(state)
+    return not bool(preset.get("local"))
 
 
 def _visible_providers(state: ConnectWizardState) -> list[tuple[str, dict]]:

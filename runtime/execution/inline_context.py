@@ -110,15 +110,33 @@ def _inline_project_file_context(project_root: Path, task, refined_request: str,
     snippets = []
     query = "\n".join([refined_request, str(getattr(task, "title", "") or ""), str(getattr(task, "instruction", "") or "")])
     for path in paths[:5]:
-        excerpt = _read_project_file_excerpt(path, query=query)
+        relative = path.relative_to(project_root.resolve()).as_posix()
+        excerpt = _cached_inline_file_excerpt(run_context, path, relative)
+        cache_hit = excerpt is not None
+        if excerpt is None:
+            excerpt = _read_project_file_excerpt(path, query=query)
         if not excerpt:
             continue
-        relative = path.relative_to(project_root.resolve()).as_posix()
         snippets.append(f"### {relative}\n{excerpt}")
-        _record_inline_file_snapshot(run_context, path, task, relative, excerpt)
+        if not cache_hit:
+            _record_inline_file_snapshot(run_context, path, task, relative, excerpt)
     if not snippets:
         return ""
     return "内联只读文件片段：\n" + "\n\n".join(snippets)
+
+
+def _cached_inline_file_excerpt(run_context, path: Path, relative: str) -> str | None:
+    if run_context is None or not hasattr(run_context, "get_read"):
+        return None
+    for candidate in (relative, path):
+        try:
+            hit = run_context.get_read(candidate)
+        except Exception:
+            continue
+        content = str(getattr(hit, "content", "") or "") if hit is not None else ""
+        if content:
+            return content
+    return None
 
 
 def _record_inline_file_snapshot(run_context, path: Path, task, relative: str, excerpt: str) -> None:

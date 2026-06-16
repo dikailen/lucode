@@ -194,7 +194,9 @@ class PipelineRunState:
         if not record:
             return
         record.status = "completed"
+        record.error = ""
         record.output_preview = _preview(output)
+        self._clear_task_error(task.id)
         if self._all_tasks_terminal():
             if self.errors or any(str(getattr(item, "status", "")) == "failed" for item in self.tasks):
                 self.output_controller.enter_failed("task failed")
@@ -261,6 +263,10 @@ class PipelineRunState:
         if not self.tasks:
             return False
         return all(str(getattr(record, "status", "")) in {"completed", "failed"} for record in self.tasks)
+
+    def _clear_task_error(self, task_id: str) -> None:
+        prefix = f"{task_id}:"
+        self.errors = [error for error in self.errors if not str(error).startswith(prefix)]
 
     def emit_event(self, event_type: str, message: str = "", **kwargs: Any):
         try:
