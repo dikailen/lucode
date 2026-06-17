@@ -2,6 +2,7 @@ from pathlib import Path
 import re
 
 from catalog_system.model_catalog import ModelRegistry
+from planning.plan_normalizer import normalize_plan_for_execution
 from planning.plan_reviewer import format_plan_review, review_plan
 from planning.plan_validator import format_validation, validate_plan
 from planning.planner import format_execution_plan, preview_plan
@@ -211,6 +212,9 @@ async def _execute_dynamic_attempt(
             run_context_summary=_render_event_summary(event_bus),
         ), None
     _apply_executor_model_defaults(plan, settings, model_registry)
+    plan_before_normalize = plan
+    plan, normalization_notes = normalize_plan_for_execution(plan)
+    plan_was_normalized = plan is not plan_before_normalize
     execution_contract = normalize_execution_contract(
         plan,
         "\n".join([raw_user_input, refined.refined_request]),
@@ -230,6 +234,19 @@ async def _execute_dynamic_attempt(
         [planner_model_id, synthesizer_model_id, *(getattr(task, "model", "") for task in plan.tasks)],
     )
     run_state.output_controller.enter_planning("planning completed")
+    if plan_was_normalized:
+        run_state.emit_event(
+            "PlanNormalized",
+            "\u8ba1\u5212\u5df2\u89c4\u6574",
+            mode=settings.execution_mode,
+            agent="orchestrator",
+            status="completed",
+            payload={
+                "notes": list(normalization_notes),
+                "route_type": plan.route_type,
+                "task_count": len(plan.tasks),
+            },
+        )
     run_state.emit_event(
         "ExecutionContractApplied",
         "执行契约已收口",
