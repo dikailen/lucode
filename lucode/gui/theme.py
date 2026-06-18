@@ -162,6 +162,108 @@ QFrame#ControlBar {
   border-radius: $radius_small;
 }
 
+QFrame#SessionSidebar {
+  background: $surface;
+  border-right: 1px solid $border_subtle;
+}
+
+QLabel#SidebarTitle {
+  color: $text;
+  font-weight: 600;
+}
+
+QLabel#SidebarEmpty {
+  color: $text_muted;
+  font-size: $font_size_small;
+}
+
+QLineEdit#SessionSearchBox {
+  background: $surface_raised;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_small;
+  padding: 6px 10px;
+  color: $text;
+}
+
+QLineEdit#SessionSearchBox:focus {
+  border-color: $primary;
+}
+
+QScrollArea#SessionListScroll {
+  background: transparent;
+  border: none;
+}
+
+QFrame#SessionRow {
+  background: $surface_raised;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_small;
+}
+
+QFrame#SessionRow[selected="true"] {
+  border-left: 3px solid $primary;
+}
+
+QPushButton#SessionRowButton {
+  background: transparent;
+  border: none;
+  border-radius: $radius_small;
+  padding: 4px 6px;
+  text-align: left;
+  color: $text;
+}
+
+QPushButton#SessionDeleteButton {
+  background: transparent;
+  border: none;
+  color: $text_muted;
+  padding: 4px 6px;
+}
+
+QPushButton#SessionDeleteButton:hover {
+  color: $danger;
+}
+
+QPushButton#SidebarNewSessionButton {
+  background: $surface_raised;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_small;
+  padding: 7px 12px;
+  text-align: left;
+}
+
+QPushButton#SidebarNewSessionButton:hover {
+  border-color: $primary_hover;
+}
+
+QFrame#ChatHeader {
+  background: transparent;
+  border: none;
+}
+
+QLabel#SessionTitleLabel {
+  color: $text;
+  font-weight: 600;
+}
+
+QPushButton#SidebarToggleButton {
+  background: transparent;
+  border: none;
+  border-radius: $radius_small;
+  padding: 4px 8px;
+  color: $text_muted;
+}
+
+QPushButton#SidebarToggleButton:hover {
+  color: $text;
+  background: $surface_raised;
+}
+
+QFrame#ComposerToolbar {
+  background: transparent;
+  border: none;
+}
+
 QFrame#ControlBar QLabel#FieldLabel {
   color: $text_muted;
   font-size: $font_size_small;
@@ -429,6 +531,41 @@ QDialog#ProviderManagerDialog QPushButton#ProviderPrimaryButton:hover {
 
 QDialog#ProviderManagerDialog QPushButton#ProviderDangerButton {
   color: $danger;
+}
+
+QDialog#SettingsDialog {
+  background: $surface;
+  border: 1px solid $border;
+  border-radius: $radius_small;
+}
+
+QDialog#SettingsDialog QLabel#SettingsTitle {
+  color: $text;
+  font-weight: 600;
+}
+
+QDialog#SettingsDialog QLabel#FieldLabel {
+  color: $text_muted;
+  font-size: $font_size_small;
+}
+
+QDialog#SettingsDialog QFrame#RolesHost {
+  background: transparent;
+}
+
+QDialog#SettingsDialog QFrame#RoleRow {
+  background: $surface_raised;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_small;
+}
+
+QDialog#SettingsDialog QLabel#RoleName {
+  color: $text;
+}
+
+QDialog#SettingsDialog QLabel#RoleHint {
+  color: $warning;
+  font-size: $font_size_small;
 }
 
 QDialog#ProviderManagerDialog QScrollArea#ProviderModelsScroll {

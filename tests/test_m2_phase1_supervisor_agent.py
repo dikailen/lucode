@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 from planning.planner_schema import PlannerResult
+from runtime.execution.run_context import RunContextStore
 from runtime.agent.supervisor import WorkerReport
 from runtime.agents.factory import AgentFactory
 from runtime.execution.pipeline import PipelineRunState
@@ -174,3 +176,72 @@ def test_full_team_finalization_falls_back_to_template_when_agent_unavailable(mo
     )
 
     assert output.startswith("主管最终汇报")
+
+
+def test_planning_supervisor_scout_reads_key_files_into_blackboard(tmp_path):
+    from planning.planner import scout_project_context_for_planning
+
+    (tmp_path / "README.md").write_text("# Demo\nProject overview\n", encoding="utf-8")
+    package = tmp_path / "package.json"
+    package.write_text('{"scripts":{"test":"pytest"}}\n', encoding="utf-8")
+    (tmp_path / "notes.log").write_text("ignore me\n", encoding="utf-8")
+    store = RunContextStore(tmp_path)
+
+    context = scout_project_context_for_planning(
+        "检查当前项目结构和测试入口",
+        project_root=tmp_path,
+        run_context=store,
+        max_files=2,
+    )
+
+    rendered = store.render_for_task("worker")
+    assert "规划期主管侦察" in context
+    assert "README.md" in context
+    assert "package.json" in context
+    assert "Project overview" in rendered
+    assert "pytest" in rendered
+    assert "notes.log" not in rendered
+
+
+def test_preview_plan_includes_planning_scout_context_in_planner_prompt(monkeypatch, tmp_path):
+    from planning import planner
+
+    (tmp_path / "README.md").write_text("# Demo\nPlanner scout target\n", encoding="utf-8")
+    store = RunContextStore(tmp_path)
+    captured = {}
+
+    class FakeRunner:
+        @staticmethod
+        async def run(agent, prompt, hooks=None):
+            del agent, hooks
+            captured["prompt"] = prompt
+            return SimpleNamespace(
+                final_output=json.dumps(
+                    {
+                        "route_type": "single_agent",
+                        "reason": "scout context available",
+                        "tasks": [],
+                        "needs_synthesis": False,
+                    }
+                )
+            )
+
+    monkeypatch.setattr(planner, "runner_class", lambda: FakeRunner)
+    monkeypatch.setattr(planner, "build_orchestrator_planner", lambda *args, **kwargs: SimpleNamespace(name="planner"))
+
+    refined, plan = asyncio.run(
+        planner.preview_plan(
+            "分析当前项目",
+            refiner_model=None,
+            planner_model=object(),
+            refiner_enabled=False,
+            project_root=tmp_path,
+            run_context=store,
+        )
+    )
+
+    assert refined.refined_request == "分析当前项目"
+    assert plan.route_type == "single_agent"
+    assert "规划期主管侦察" in captured["prompt"]
+    assert "README.md" in captured["prompt"]
+    assert "Planner scout target" in store.render_for_task("worker")

@@ -107,6 +107,7 @@ class KernelFacade:
                     turn_hooks,
                     max_turns=20,
                     approval_policy=None,
+                    supervisor_approval_decider=None,
                     stream_output=None,
                     on_delta=None,
                 ):
@@ -117,6 +118,7 @@ class KernelFacade:
                         session=approval_session,
                         max_turns=max_turns,
                         approval_policy=approval_policy,
+                        supervisor_approval_decider=supervisor_approval_decider,
                         stream_output=stream_output,
                         on_delta=on_delta or _agent_delta_emitter(event_bus, agent=getattr(agent, "name", "") or ""),
                     )

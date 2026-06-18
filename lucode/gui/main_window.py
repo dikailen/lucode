@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -25,6 +26,8 @@ from lucode.gui.chat_session import GuiChatSession
 from lucode.gui.control_panel import ControlBar
 from lucode.gui.event_bridge import EventBridge
 from lucode.gui.provider_manager import ProviderManagerDialog
+from lucode.gui.session_sidebar import SessionSidebar
+from lucode.gui.settings_dialog import SettingsDialog
 from lucode.gui.turn_state import TurnStateGuard
 from lucode.gui.widgets import AnswerBlock, MessageBubble, ThinkingIndicator, WorkArea, status_style
 
@@ -48,7 +51,7 @@ class ChatInput(QPlainTextEdit):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setPlaceholderText("??????????Shift+????")
+        self.setPlaceholderText("输入消息，Enter 发送，Shift+Enter 换行")
         self.setFixedHeight(82)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -95,19 +98,45 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Lucode")
         self.resize(1040, 720)
 
-        root = QWidget()
-        root_layout = QVBoxLayout(root)
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.setObjectName("MainSplitter")
+        self.setCentralWidget(self.main_splitter)
+
+        self.session_sidebar = SessionSidebar()
+        self.session_sidebar.set_session_store(self.chat_session.history_browser)
+        self.session_sidebar.new_session_requested.connect(self._start_new_session)
+        self.session_sidebar.session_selected.connect(self._resume_selected_session)
+        self.session_sidebar.session_deleted.connect(self._on_sidebar_session_deleted)
+        self.main_splitter.addWidget(self.session_sidebar)
+
+        chat_pane = QWidget()
+        chat_pane.setObjectName("ChatPane")
+        root_layout = QVBoxLayout(chat_pane)
         root_layout.setContentsMargins(18, 18, 18, 10)
         root_layout.setSpacing(12)
-        self.setCentralWidget(root)
+        self.main_splitter.addWidget(chat_pane)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setSizes([260, 780])
 
-        header = QLabel("Lucode")
-        header.setObjectName("RoleLabel")
+        header = QFrame()
+        header.setObjectName("ChatHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+        self.sidebar_toggle_button = QPushButton("⟨")
+        self.sidebar_toggle_button.setObjectName("SidebarToggleButton")
+        self.sidebar_toggle_button.setToolTip("折叠/展开会话栏")
+        self.sidebar_toggle_button.clicked.connect(self._toggle_session_sidebar)
+        header_layout.addWidget(self.sidebar_toggle_button)
+        self.session_title_label = QLabel("新会话")
+        self.session_title_label.setObjectName("SessionTitleLabel")
+        header_layout.addWidget(self.session_title_label, 1)
         root_layout.addWidget(header)
 
         self.control_bar = ControlBar()
+        self.settings_dialog = SettingsDialog(parent=self)
         self._init_control_bar()
-        root_layout.addWidget(self.control_bar)
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -120,10 +149,18 @@ class MainWindow(QMainWindow):
         self.message_layout.setSpacing(10)
         self.scroll_area.setWidget(self.message_host)
 
-        self.empty_state = QLabel("????????????????")
+        self.empty_state = QLabel("输入问题，开始使用 Lucode")
         self.empty_state.setObjectName("EmptyState")
         self.empty_state.setAlignment(Qt.AlignCenter)
         self.message_layout.addWidget(self.empty_state, 1)
+
+        toolbar = QFrame()
+        toolbar.setObjectName("ComposerToolbar")
+        toolbar_layout = QVBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.setSpacing(0)
+        toolbar_layout.addWidget(self.control_bar)
+        root_layout.addWidget(toolbar)
 
         composer = QFrame()
         composer_layout = QHBoxLayout(composer)
@@ -135,12 +172,12 @@ class MainWindow(QMainWindow):
         self.input_box.submit_requested.connect(self.send_current_message)
         composer_layout.addWidget(self.input_box, 1)
 
-        self.send_button = QPushButton("??")
+        self.send_button = QPushButton("发送")
         self.send_button.setObjectName("SendButton")
         self.send_button.clicked.connect(self.send_current_message)
         composer_layout.addWidget(self.send_button)
 
-        self.stop_button = QPushButton("??")
+        self.stop_button = QPushButton("停止")
         self.stop_button.setObjectName("StopButton")
         self.stop_button.clicked.connect(self.stop_current_turn)
         self.stop_button.setEnabled(False)
@@ -149,15 +186,18 @@ class MainWindow(QMainWindow):
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.state_label = QLabel()
-        self.event_label = QLabel("??")
+        self.event_label = QLabel("就绪")
         self.path_label = QLabel(str(self.workspace))
         self.status.addWidget(self.state_label)
         self.status.addWidget(self.event_label, 1)
         self.status.addPermanentWidget(self.path_label)
-        self.set_status("idle", "??")
+        self.set_status("idle", "就绪")
+        self.session_sidebar.refresh()
 
     def _init_control_bar(self) -> None:
-        self.control_bar.set_models(self.chat_session.list_configured_models())
+        models = self.chat_session.list_configured_models()
+        self.control_bar.set_models(models)
+        self.settings_dialog.set_models(models)
         settings = self.chat_session.settings
         role_models = {
             "query_refiner": _first_or_empty(settings.query_refiner_model_priority),
@@ -172,12 +212,25 @@ class MainWindow(QMainWindow):
             query_refiner_enabled=bool(settings.query_refiner_enabled),
             worker_pool=list(getattr(settings, "allowed_worker_models", []) or []),
         )
+        self.settings_dialog.set_initial(
+            execution_mode=settings.execution_mode,
+            privacy_mode=settings.privacy_mode,
+            role_models=role_models,
+            query_refiner_enabled=bool(settings.query_refiner_enabled),
+            worker_pool=list(getattr(settings, "allowed_worker_models", []) or []),
+        )
         self.control_bar.execution_mode_changed.connect(self._on_execution_mode_changed)
-        self.control_bar.privacy_mode_changed.connect(self.chat_session.set_privacy_mode)
-        self.control_bar.role_model_changed.connect(self.chat_session.set_model_for_role)
-        self.control_bar.query_refiner_toggled.connect(self.chat_session.set_query_refiner_enabled)
-        self.control_bar.worker_pool_changed.connect(self.chat_session.set_allowed_worker_models)
-        self.control_bar.provider_manager_requested.connect(self._open_provider_manager)
+        self.control_bar.settings_requested.connect(self._open_settings_dialog)
+        self.settings_dialog.privacy_mode_changed.connect(self.chat_session.set_privacy_mode)
+        self.settings_dialog.role_model_changed.connect(self.chat_session.set_model_for_role)
+        self.settings_dialog.query_refiner_toggled.connect(self.chat_session.set_query_refiner_enabled)
+        self.settings_dialog.worker_pool_changed.connect(self.chat_session.set_allowed_worker_models)
+        self.settings_dialog.provider_manager_requested.connect(self._open_provider_manager)
+
+    def _open_settings_dialog(self) -> None:
+        self.settings_dialog.show()
+        self.settings_dialog.raise_()
+        self.settings_dialog.activateWindow()
 
     def _open_provider_manager(self) -> None:
         dialog = ProviderManagerDialog(
@@ -191,11 +244,58 @@ class MainWindow(QMainWindow):
 
     def _refresh_configured_models(self) -> None:
         clear_model_catalog_cache()
-        self.control_bar.set_models(self.chat_session.list_configured_models())
+        models = self.chat_session.list_configured_models()
+        self.control_bar.set_models(models)
+        self.settings_dialog.set_models(models)
 
     def _on_execution_mode_changed(self, mode: str) -> None:
         self.mode = self.chat_session.set_execution_mode(mode)
+        self.settings_dialog.set_execution_mode(self.mode)
         self.set_status("idle" if self.turn_guard.can_start_new_turn else "running", self.event_label.text())
+
+    def _toggle_session_sidebar(self) -> None:
+        visible = not self.session_sidebar.isVisible()
+        self.session_sidebar.setVisible(visible)
+        self.sidebar_toggle_button.setText("⟨" if visible else "⟩")
+
+    def _start_new_session(self) -> None:
+        if not self.turn_guard.can_start_new_turn:
+            return
+        self.chat_session.new_session()
+        self.session_sidebar.select_session("")
+        self._clear_message_area()
+        self.session_title_label.setText("新会话")
+        self.set_status("idle", "新会话")
+
+    def _resume_selected_session(self, session_id: str) -> None:
+        if not self.turn_guard.can_start_new_turn:
+            return
+        selected_id = str(session_id or "").strip()
+        if not selected_id:
+            return
+        messages = self.chat_session.resume_session(selected_id)
+        current_id = str(self.chat_session.current_session_id or "").strip()
+        if not current_id:
+            return
+        self.session_sidebar.select_session(current_id)
+        self._clear_message_area(show_empty=not bool(messages))
+        for message in messages:
+            role = str(message.get("role") or "").strip().lower()
+            content = str(message.get("content") or "")
+            if not content:
+                continue
+            if role == "user":
+                self.add_message("user", content)
+            elif role == "assistant":
+                self.add_answer_block(content)
+        self.session_title_label.setText(
+            self.session_sidebar.session_title(current_id) or _title_from_messages(messages) or "历史会话"
+        )
+        self.set_status("idle", "已恢复会话")
+
+    def _on_sidebar_session_deleted(self, session_id: str) -> None:
+        if str(session_id or "") == str(self.chat_session.current_session_id or ""):
+            self._start_new_session()
 
     def send_current_message(self) -> None:
         if self._closing:
@@ -209,9 +309,9 @@ class MainWindow(QMainWindow):
         self.work_area = None
         self._work_area_row = None
         self._turn_start = time.monotonic()
-        self._show_thinking("?????")
+        self._show_thinking("正在思考")
         self.set_running(True)
-        self.set_status("running", "????")
+        self.set_status("running", "处理中")
         self.work_task_id = turn_id
         self.work_task = asyncio.create_task(self._run_turn(turn_id, text))
 
@@ -318,12 +418,16 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(running)
         self.input_box.setEnabled(not running)
         self.control_bar.set_enabled(not running)
+        self.settings_dialog.set_enabled(not running)
+        self.session_sidebar.set_enabled(not running)
 
     def set_stopping(self) -> None:
         self.send_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.input_box.setEnabled(False)
         self.control_bar.set_enabled(False)
+        self.settings_dialog.set_enabled(False)
+        self.session_sidebar.set_enabled(False)
         self.set_status("stopped", "正在停止")
 
     def set_approval_waiting(self) -> None:
@@ -331,6 +435,8 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(True)
         self.input_box.setEnabled(False)
         self.control_bar.set_enabled(False)
+        self.settings_dialog.set_enabled(False)
+        self.session_sidebar.set_enabled(False)
         self.set_status("running", "等待审批")
 
     def set_status(self, state: str, event: str) -> None:
@@ -381,6 +487,7 @@ class MainWindow(QMainWindow):
             if self.work_area is not None:
                 elapsed = max(0.0, time.monotonic() - self._turn_start) if self._turn_start else None
                 self.work_area.collapse_done(elapsed)
+            self.session_sidebar.refresh()
             if self.turn_guard.is_running and not self.turn_guard.is_stopping:
                 payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
                 if str(payload.get("status") or "") == "failed":
@@ -414,6 +521,13 @@ class MainWindow(QMainWindow):
                 self.set_status("failed", "失败")
             else:
                 self.set_status("idle", "本轮完成")
+            self.session_sidebar.refresh()
+            current_id = str(self.chat_session.current_session_id or "").strip()
+            if current_id:
+                self.session_sidebar.select_session(current_id)
+                title = self.session_sidebar.session_title(current_id)
+                if title:
+                    self.session_title_label.setText(title)
         finally:
             if not self._closing:
                 self.event_bridge.flush()
@@ -427,6 +541,26 @@ class MainWindow(QMainWindow):
     def _hide_empty_state(self) -> None:
         if self.empty_state.isVisible():
             self.empty_state.hide()
+
+    def _create_empty_state(self) -> QLabel:
+        label = QLabel("输入问题，开始使用 Lucode")
+        label.setObjectName("EmptyState")
+        label.setAlignment(Qt.AlignCenter)
+        return label
+
+    def _clear_message_area(self, *, show_empty: bool = True) -> None:
+        self._clear_thinking()
+        self.work_area = None
+        self._work_area_row = None
+        self._bubbles = []
+        self._thinking_indicators = []
+        while self.message_layout.count():
+            item = self.message_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None and widget is not self.empty_state:
+                widget.deleteLater()
+        self.message_layout.addWidget(self.empty_state, 1)
+        self.empty_state.setVisible(show_empty)
 
     def _scroll_to_bottom(self) -> None:
         QTimer.singleShot(0, self._scroll_now)
@@ -450,6 +584,17 @@ def _first_or_empty(values) -> str:
         text = str(item or "").strip()
         if text:
             return text
+    return ""
+
+
+def _title_from_messages(messages: list[dict[str, str]]) -> str:
+    for message in messages:
+        if str(message.get("role") or "").strip().lower() != "user":
+            continue
+        text = str(message.get("content") or "").replace("\n", " ").strip()
+        if not text:
+            continue
+        return text[:34] + "..." if len(text) > 36 else text
     return ""
 
 

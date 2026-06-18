@@ -15,7 +15,7 @@ from runtime.config.settings import RuntimeSettings
 from runtime.safety.privacy import normalize_privacy_mode
 from runtime.config.workspace import discover_workspace_context
 from runtime.events import ExecutionEventBus
-from runtime.history import HistoryStore
+from runtime.history import HistoryFacade, HistoryStore
 from runtime.kernel import KernelFacade
 from runtime.kernel.session import create_token_logger_hooks
 from runtime.safety.session_checkpoint import SessionCheckpointManager
@@ -61,6 +61,10 @@ class GuiChatSession:
         self.recent_turns: list[dict[str, str]] = []
         self.resumed_session_summary = ""
         self.session_store = HistoryStore(self.workspace_context.workspace_root)
+        self.history_browser = HistoryFacade(
+            self.workspace_context.workspace_root,
+            history_store=self.session_store,
+        )
         self.current_session_id: str | None = None
         self.checkpoints = SessionCheckpointManager(self.workspace_context.workspace_root)
         self.last_run_context_summary = ""
@@ -125,6 +129,48 @@ class GuiChatSession:
             pool.append(model_id)
         self.settings.allowed_worker_models = pool
         return pool
+
+    def new_session(self) -> None:
+        self.current_session_id = None
+        self.recent_turns = []
+        self.resumed_session_summary = ""
+        self.last_run_context_summary = ""
+
+    def resume_session(self, session_id: str) -> list[dict[str, str]]:
+        requested = str(session_id or "").strip()
+        if not requested:
+            return []
+        source = self.history_browser
+        try:
+            resolved = source.resolve(requested) if hasattr(source, "resolve") else requested
+        except Exception:
+            return []
+        resolved = str(resolved or "").strip()
+        if not resolved:
+            return []
+        try:
+            messages = (
+                list(source.load_messages(resolved))
+                if hasattr(source, "load_messages")
+                else []
+            )
+            recent_turns = (
+                list(source.load_recent_turns(resolved, max_messages=6))
+                if hasattr(source, "load_recent_turns")
+                else []
+            )
+            context_summary = (
+                str(source.load_context_summary(resolved) or "")
+                if hasattr(source, "load_context_summary")
+                else ""
+            )
+        except Exception:
+            return []
+        self.current_session_id = resolved
+        self.recent_turns = recent_turns
+        self.resumed_session_summary = context_summary
+        self.last_run_context_summary = context_summary
+        return messages
 
     async def run_turn(self, user_input: str) -> GuiTurnResult:
         clean_input = str(user_input or "").strip()

@@ -128,7 +128,7 @@ def _group_by_parallel(tasks: list[dict]) -> list[tuple[str, list[tuple[int, dic
     show_label = len(order) > 1
     result: list[tuple[str, list[tuple[int, dict]]]] = []
     for key in order:
-        label = f"??? {key}" if (key is not None and show_label) else ""
+        label = f"并行组 {key}" if (key is not None and show_label) else ""
         result.append((label, groups[key]))
     return result
 
@@ -193,24 +193,24 @@ def action_label_from_event(event: dict) -> str:
     summary = summary if isinstance(summary, dict) else {}
     if event_type == "FastPathUsed":
         tool = _clean(payload.get("tool") or payload.get("action"))
-        return f"???? {tool}" if tool else "??????"
+        return f"快速路径 {tool}" if tool else "使用快速路径"
     if event_type != "ToolInvoked":
         return ""
     group = _action_group(payload)
     if group == "read":
         paths = _file_paths(payload, access="read")
-        return f"?? {paths[0]}" if paths else "??????"
+        return f"读取 {paths[0]}" if paths else "读取文件"
     if group == "write":
         paths = _file_paths(payload, access="write")
-        return f"?? {paths[0]}" if paths else "?????"
+        return f"写入 {paths[0]}" if paths else "写入文件"
     if group == "search":
         query = _clean(summary.get("query") or summary.get("pattern") or summary.get("text"))
-        return f"?? {query}" if query else "????"
+        return f"搜索 {query}" if query else "搜索代码"
     if group == "run":
         command = _clean(summary.get("command") or summary.get("cmd"))
-        return f"?? {command}" if command else "????"
+        return f"运行 {command}" if command else "运行命令"
     tool = _clean(payload.get("tool") or payload.get("tool_name"))
-    return f"?? {tool}" if tool else _clean(event.get("message")) or "????"
+    return f"调用 {tool}" if tool else _clean(event.get("message")) or "处理工具"
 
 def _truncate_line(text: str) -> str:
     line = _clean(text).splitlines()[-1] if _clean(text) else ""
@@ -219,7 +219,7 @@ def _truncate_line(text: str) -> str:
 
 class WorkerNode(QFrame):
     """One worker, collapsible. Shows status + title + latest-action line by
-    default; expand (鈻? to read the full streamed activity and tool log."""
+        default; expand to read the full streamed activity and tool log."""
 
     def __init__(self, index: int, task: dict, model_label: str, parent: QWidget | None = None):
         super().__init__(parent)
@@ -248,7 +248,7 @@ class WorkerNode(QFrame):
         self._apply_dot("waiting")
         head.addWidget(self.dot)
 
-        title = str(task.get("title") or task.get("id") or f"?? {index}")
+        title = str(task.get("title") or task.get("id") or f"任务 {index}")
         self.title_label = QLabel(f"{index}. {title}")
         self.title_label.setObjectName("PlanTaskTitle")
         self.title_label.setWordWrap(True)
@@ -262,13 +262,13 @@ class WorkerNode(QFrame):
 
         meta = QHBoxLayout()
         meta.setSpacing(8)
-        meta.addWidget(_chip(f"?? {model_label or '???'}", "PlanChipModel"))
+        meta.addWidget(_chip(f"模型 {model_label or '未指定'}", "PlanChipModel"))
         mcp = [str(item) for item in (task.get("mcp") or []) if str(item)]
         if mcp:
             meta.addWidget(_chip("MCP " + ", ".join(mcp), "PlanChip"))
         depends = [str(item) for item in (task.get("depends_on") or []) if str(item)]
         if depends:
-            meta.addWidget(_chip("?? " + ", ".join(depends), "PlanChip"))
+            meta.addWidget(_chip("依赖 " + ", ".join(depends), "PlanChip"))
         meta.addStretch(1)
         layout.addLayout(meta)
 
@@ -306,7 +306,7 @@ class WorkerNode(QFrame):
     def _refresh_detail(self) -> None:
         parts = []
         if self._actions:
-            parts.append("\n".join(f"鈥?{a}" for a in self._actions[-12:]))
+            parts.append("\n".join(f"- {a}" for a in self._actions[-12:]))
         if self._thinking.strip():
             parts.append(self._thinking.strip())
         detail = "\n\n".join(parts)[-MAX_ACTIVITY_CHARS:]
@@ -336,7 +336,7 @@ class WorkArea(QFrame):
     """Flat (non-bubble) live execution tree: supervisor root + worker nodes.
 
     Workers light up and stream their latest action as the turn runs; when the
-    turn ends the whole area collapses to a Codex-style '宸插鐞?路 鐢ㄦ椂 Ns' label.
+    turn ends the whole area collapses to a compact completion summary.
     """
 
     def __init__(
@@ -354,7 +354,7 @@ class WorkArea(QFrame):
 
         route = str(payload.get("route_type") or "")
         tasks = list(payload.get("tasks") or [])
-        self._route_text = ROUTE_LABELS_ZH.get(route, route or "?????")
+        self._route_text = ROUTE_LABELS_ZH.get(route, route or "未规划")
         self._task_count = len(tasks)
 
         layout = QVBoxLayout(self)
@@ -381,12 +381,12 @@ class WorkArea(QFrame):
         self.supervisor_activity.hide()
         body_layout.addWidget(self.supervisor_activity)
 
-        plan_line = QLabel(f"?? ? {self._route_text} ? {self._task_count} ???")
+        plan_line = QLabel(f"计划 · {self._route_text} · {self._task_count} 个任务")
         plan_line.setObjectName("PlanGroupLabel")
         body_layout.addWidget(plan_line)
 
         if not tasks:
-            empty = QLabel("?????????????")
+            empty = QLabel("暂无可展示的执行任务")
             empty.setObjectName("PlanEmpty")
             body_layout.addWidget(empty)
         else:
@@ -408,7 +408,7 @@ class WorkArea(QFrame):
             self.header.setText(f"\u25b8 {self._collapsed_summary}")
             return
         arrow = "\u25be" if self.header.isChecked() else "\u25b8"
-        self.header.setText(f"{arrow} ???? ? {self._task_count} ???")
+        self.header.setText(f"{arrow} 执行计划 · {self._task_count} 个任务")
 
     def _toggle_body(self) -> None:
         self.body.setVisible(self.header.isChecked())
@@ -431,7 +431,7 @@ class WorkArea(QFrame):
         text = _clean(text)
         if not text:
             return
-        self.supervisor_activity.setText(f"?? ? {text}")
+        self.supervisor_activity.setText(f"主脑 · {text}")
         self.supervisor_activity.show()
 
     def apply_event(self, event: dict) -> bool:
@@ -463,13 +463,13 @@ class WorkArea(QFrame):
         done = sum(1 for n in self.worker_nodes.values() if n.status == "completed")
         failed = sum(1 for n in self.worker_nodes.values() if n.status == "failed")
         if total and failed:
-            base = f"???? ? {done}/{total} ?? ? {failed} ??"
+            base = f"已完成 · {done}/{total} 完成 · {failed} 失败"
         elif total:
-            base = f"???? ? {total} ???"
+            base = f"已完成 · {total} 个任务"
         else:
-            base = "????"
+            base = "已完成"
         if elapsed_seconds is not None and elapsed_seconds >= 0:
-            base += f" ? ?? {int(round(elapsed_seconds))}s"
+            base += f" · 用时 {int(round(elapsed_seconds))}s"
         self._collapsed_summary = base
         self.header.setChecked(False)
         self.body.setVisible(False)
@@ -479,7 +479,7 @@ class WorkArea(QFrame):
 class AnswerBlock(QFrame):
     """Final answer rendered as flat markdown (not a chat bubble)."""
 
-    def __init__(self, text: str = "?????", parent: QWidget | None = None):
+    def __init__(self, text: str = "最终回答", parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("AnswerBlock")
         layout = QVBoxLayout(self)

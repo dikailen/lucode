@@ -270,7 +270,7 @@ def _resolve_project_directory_candidates(project_root: Path, candidate: str, *,
 
 
 def _clean_project_path_candidate(candidate: str) -> str:
-    value = str(candidate or "").strip().strip("`'\"鈥溾€濃€樷€欙紙锛?)[]<>锛?銆傦紱;锛?")
+    value = str(candidate or "").strip().strip("`'\"“”‘’（）()[]<>，,。；;：:")
     value = value.replace("\\", "/")
     while value.startswith("./"):
         value = value[2:]

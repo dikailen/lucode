@@ -141,6 +141,7 @@ class PipelineRunState:
         mode: str = "",
         output_controller: OutputController | None = None,
         event_bus: ExecutionEventBus | None = None,
+        run_context: RunContextStore | None = None,
     ) -> "PipelineRunState":
         controller = output_controller or OutputController(mode=mode, route=plan.route_type)
         controller.configure(mode=mode, route=plan.route_type)
@@ -163,7 +164,7 @@ class PipelineRunState:
                 )
                 for task in plan.tasks
             ],
-            run_context=RunContextStore(project_root) if project_root else None,
+            run_context=run_context or (RunContextStore(project_root) if project_root else None),
             event_bus=event_bus or ExecutionEventBus(),
             output_controller=controller,
         )

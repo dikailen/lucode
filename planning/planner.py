@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from catalog_system.loader import (
     compact_cli_safety_rules_for_prompt,
     compact_mcp_catalog_for_prompt,
@@ -14,7 +16,20 @@ from planning.planner_schema import (
 )
 from runtime.common.text_utils import sanitize_text
 from runtime.agents.sdk import agent_class, runner_class
+from runtime.execution.inline_context import _safe_inline_project_file, _read_project_file_excerpt
 from skills.loader import load_skill
+
+
+PLANNING_SCOUT_SOURCE = "planning_supervisor"
+PLANNING_SCOUT_FILE_NAMES = (
+    "README.md",
+    "pyproject.toml",
+    "package.json",
+    "requirements.txt",
+    "setup.py",
+    "main.py",
+    "app.py",
+)
 
 
 def build_query_refiner(model):
@@ -69,6 +84,8 @@ async def preview_plan(
     hooks=None,
     refiner_enabled: bool = True,
     allowed_worker_models=None,
+    project_root: Path | str | None = None,
+    run_context=None,
 ) -> tuple[object, PlannerResult]:
     """Run query refinement and planner preview without creating execution Agents."""
 
@@ -81,8 +98,13 @@ async def preview_plan(
     else:
         refined = build_refined_request_without_refiner(raw_user_input)
 
+    scout_context = scout_project_context_for_planning(
+        "\n".join([refined.raw_user_input, refined.refined_request]),
+        project_root=project_root,
+        run_context=run_context,
+    )
     planner = build_orchestrator_planner(planner_model, allowed_worker_models=allowed_worker_models)
-    planner_input = sanitize_text(
+    context_lines = [
         "请根据以下优化后的用户请求输出调度计划。\n\n"
         "运行上下文：当前程序运行在本地项目根目录中。"
         "如果原始问题和优化问题在任务动作上冲突，以原始问题为准；"
@@ -93,12 +115,19 @@ async def preview_plan(
         "如果用户要修复、评审、重构或实现当前项目代码，"
         "优先让 `code_engineer` 搭配 `code_locator` 先定位相关文件，"
         "再少量读取目标文件；不要计划读取整个项目。\n\n"
-        f"原始问题：{refined.raw_user_input}\n"
-        f"优化问题：{refined.refined_request}\n"
-        f"明确约束：{refined.explicit_constraints}\n"
-        f"潜在歧义：{refined.possible_ambiguities}\n"
-        f"可能意图：{refined.likely_intent}\n"
+    ]
+    if scout_context:
+        context_lines.append(scout_context + "\n\n")
+    context_lines.extend(
+        [
+            f"原始问题：{refined.raw_user_input}\n",
+            f"优化问题：{refined.refined_request}\n",
+            f"明确约束：{refined.explicit_constraints}\n",
+            f"潜在歧义：{refined.possible_ambiguities}\n",
+            f"可能意图：{refined.likely_intent}\n",
+        ]
     )
+    planner_input = sanitize_text("".join(context_lines))
     planner_result = await Runner.run(planner, planner_input, hooks=hooks)
     fallback_context = "\n".join(
         [
@@ -111,6 +140,77 @@ async def preview_plan(
     plan = parse_planner_result(planner_result.final_output, fallback_user_input=fallback_context)
 
     return refined, plan
+
+
+def scout_project_context_for_planning(
+    request_text: str,
+    *,
+    project_root: Path | str | None,
+    run_context=None,
+    max_files: int = 3,
+) -> str:
+    """Read a few stable project files before planning and mirror them to the blackboard."""
+
+    root = _resolve_scout_root(project_root)
+    if root is None or run_context is None or not hasattr(run_context, "record_file_snapshot"):
+        return ""
+    paths = _planning_scout_candidates(root, max_files=max_files)
+    if not paths:
+        return ""
+
+    lines = ["规划期主管侦察：", "主管已只读查看少量关键文件，用于避免盲目规划；后续 worker 可复用共享黑板。"]
+    query = sanitize_text(str(request_text or ""))
+    for path in paths:
+        relative = path.relative_to(root).as_posix()
+        excerpt = _read_project_file_excerpt(path, query=query)
+        if not excerpt:
+            continue
+        summary = f"规划期主管侦察读取 {relative}"
+        try:
+            run_context.record_file_snapshot(
+                path=path,
+                task_id=PLANNING_SCOUT_SOURCE,
+                summary=summary,
+                excerpt=excerpt,
+            )
+        except Exception:
+            continue
+        lines.append(f"- {relative}：{_first_nonempty_line(excerpt)}")
+    return "\n".join(lines) if len(lines) > 2 else ""
+
+
+def _resolve_scout_root(project_root: Path | str | None) -> Path | None:
+    if project_root is None:
+        return None
+    try:
+        root = Path(project_root).resolve()
+    except OSError:
+        return None
+    return root if root.is_dir() else None
+
+
+def _planning_scout_candidates(root: Path, *, max_files: int) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for name in PLANNING_SCOUT_FILE_NAMES:
+        path = (root / name).resolve()
+        if path in seen or not path.is_file():
+            continue
+        if not _safe_inline_project_file(root, path):
+            continue
+        seen.add(path)
+        candidates.append(path)
+        if len(candidates) >= max(1, max_files):
+            break
+    return candidates
+
+
+def _first_nonempty_line(text: str, *, limit: int = 160) -> str:
+    for line in str(text or "").splitlines():
+        clean = sanitize_text(line).strip()
+        if clean:
+            return clean[:limit]
+    return "已读取，未发现可展示片段。"
 
 
 def build_refined_request_without_refiner(raw_user_input: str) -> RefinedRequest:

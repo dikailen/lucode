@@ -277,10 +277,10 @@ async def _handle_model_tuner_session(*, console, runtime_settings, workspace_co
         if not command or lower in {"help", "?", "/help"}:
             message = model_tuner_help()
             continue
-        if lower in {"list", "/list", "refresh", "鍒锋柊"}:
+        if lower in {"list", "/list", "refresh", "刷新"}:
             message = "已刷新模型调音台。"
             continue
-        if lower in {"s", "save", "淇濆瓨"}:
+        if lower in {"s", "save", "保存"}:
             message = "模型选择会即时保存；当前没有待保存修改。"
             continue
 
@@ -345,7 +345,7 @@ async def _handle_connect_wizard_session(*, console, workspace_context, runtime_
         if lower in {"q", "quit", "exit", "/exit", "back", "/back", "return"}:
             print("已退出 Provider 连接向导。")
             return
-        if lower in {"delete", "remove", "鍒犻櫎", "鍒犻櫎 provider", "delete provider"}:
+        if lower in {"delete", "remove", "删除", "删除 provider", "delete provider"}:
             message = await _handle_connect_delete_session(
                 console=console,
                 state=state,
@@ -370,10 +370,10 @@ async def _handle_connect_wizard_session(*, console, workspace_context, runtime_
             if _uses_choice_menu(console):
                 print(message)
             continue
-        if lower in {"connect", "save", "淇濆瓨"} and not state.selected_provider:
+        if lower in {"connect", "save", "保存"} and not state.selected_provider:
             message = "请先选择 Provider。"
             continue
-        if lower in {"connect", "save", "淇濆瓨"}:
+        if lower in {"connect", "save", "保存"}:
             try:
                 result = apply_connect_wizard_connection(state)
                 _clear_connect_wizard_caches()
@@ -439,12 +439,12 @@ async def _handle_connect_delete_session(*, console, state, workspace_context, r
     ]
     value = await _read_connect_delete_choice(
         console,
-        "\n鍒犻櫎妯″瀷> ",
+        "\n删除模型> ",
         choices,
         toolbar="↑↓ 选择要删除的模型/Provider，Enter 确认，q 返回",
     )
     lower = value.lower()
-    if lower in {"q", "quit", "exit", "/exit", "back", "/back", "杩斿洖", "鍙栨秷"}:
+    if lower in {"q", "quit", "exit", "/exit", "back", "/back", "返回", "取消"}:
         return "已取消删除。"
     if lower.startswith(("delete ", "remove ")):
         provider_id = value.split(maxsplit=1)[1].strip()
@@ -529,7 +529,7 @@ async def _complete_connect_wizard_form(*, console, state, workspace_context, ru
             try:
                 state = _apply_connect_form_values(state, fullscreen_result.values)
                 action = str(fullscreen_result.action or "").strip().lower()
-                if action in {"q", "quit", "exit", "/exit", "cancel", "鍙栨秷"}:
+                if action in {"q", "quit", "exit", "/exit", "cancel", "取消"}:
                     raise _ConnectWizardCancelled()
                 if action in {"change_provider", "provider", "back", "b", "return"}:
                     raise _ConnectWizardRestartProvider()
@@ -552,7 +552,7 @@ async def _complete_connect_wizard_form(*, console, state, workspace_context, ru
         print(render_connect_wizard_snapshot(state, message=message))
         action = await _read_connect_form_action(console, state)
         lower = action.lower()
-        if lower in {"q", "quit", "exit", "/exit", "cancel", "鍙栨秷"}:
+        if lower in {"q", "quit", "exit", "/exit", "cancel", "取消"}:
             raise _ConnectWizardCancelled()
         if lower in {"change_provider", "provider", "back", "b", "return"}:
             raise _ConnectWizardRestartProvider()
@@ -687,13 +687,13 @@ async def _read_connect_form_action(console, state) -> str:
     choice_reader = getattr(console, "read_choice_line", None)
     if callable(choice_reader):
         value = await choice_reader(
-            "\n杩炴帴琛ㄥ崟> ",
+            "\n连接表单> ",
             choices,
             bottom_toolbar="↑↓ 选择字段，Enter 编辑；滚轮可滚动终端历史；保存前不会写入；q 退出",
             reserve_space_for_menu=12,
         )
         return str(value or "").strip()
-    print("\n杩炴帴琛ㄥ崟> ", end="", flush=True)
+    print("\n连接表单> ", end="", flush=True)
     reader = getattr(console, "read_runtime_line", None)
     if callable(reader):
         return str(await reader()).strip()
@@ -972,13 +972,13 @@ async def _read_connect_save_decision(console, state) -> str:
     choice_reader = getattr(console, "read_choice_line", None)
     if callable(choice_reader):
         value = await choice_reader(
-            "\n淇濆瓨鏂瑰紡> ",
+            "\n保存方式> ",
             choices,
             bottom_toolbar="Up/Down choose save mode, Enter confirm; recommended: save and set default",
             reserve_space_for_menu=8,
         )
     else:
-        value = await _read_connect_text_field(console, "淇濆瓨鏂瑰紡锛歞efault/save_only/cancel", default="save_default")
+        value = await _read_connect_text_field(console, "保存方式：default/save_only/cancel", default="save_default")
     value = str(value or "").strip().lower()
     if value in {"default", "yes", "y", "set_default"}:
         return "save_default"
@@ -1008,7 +1008,7 @@ async def _read_connect_text_field(
     else:
         value = await console.read_line(prompt)
     value = str(value or "").strip()
-    if value.lower() in {"q", "quit", "exit", "/exit", "鍙栨秷"}:
+    if value.lower() in {"q", "quit", "exit", "/exit", "取消"}:
         raise _ConnectWizardCancelled()
     if value.lower() in {"back", "b", "return"}:
         raise _ConnectWizardFieldBack()
@@ -1027,7 +1027,7 @@ async def _read_connect_secret_field(console) -> str:
     else:
         value = await _read_connect_text_field(console, "API key", aliases=("key", "api-key", "apikey"))
     value = _strip_field_alias(str(value or "").strip(), ("key", "api-key", "apikey"))
-    if value.lower() in {"q", "quit", "exit", "/exit", "鍙栨秷"}:
+    if value.lower() in {"q", "quit", "exit", "/exit", "取消"}:
         raise _ConnectWizardCancelled()
     if value.lower() in {"back", "b", "return"}:
         raise _ConnectWizardFieldBack()

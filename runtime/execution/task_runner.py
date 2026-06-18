@@ -420,6 +420,9 @@ def _run_agent_kwargs(run_agent, *, max_turns: int, approval_policy=None, stream
     kwargs = {"max_turns": max_turns}
     if approval_policy is not None and _run_agent_accepts_approval_policy(run_agent):
         kwargs["approval_policy"] = approval_policy
+        decider = getattr(approval_policy, "supervisor_approval_decider", None)
+        if decider is not None and _run_agent_accepts_supervisor_approval_decider(run_agent):
+            kwargs["supervisor_approval_decider"] = decider
     if stream_output is not None and _run_agent_accepts_stream_output(run_agent):
         kwargs["stream_output"] = stream_output
     if on_delta is not None and _run_agent_accepts_on_delta(run_agent):
@@ -433,6 +436,16 @@ def _run_agent_accepts_approval_policy(run_agent) -> bool:
     except (TypeError, ValueError):
         return True
     if "approval_policy" in parameters:
+        return True
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
+def _run_agent_accepts_supervisor_approval_decider(run_agent) -> bool:
+    try:
+        parameters = inspect.signature(run_agent).parameters
+    except (TypeError, ValueError):
+        return True
+    if "supervisor_approval_decider" in parameters:
         return True
     return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
 

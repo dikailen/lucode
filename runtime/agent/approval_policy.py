@@ -16,6 +16,9 @@ class AutoApprovalDecision:
     reason: str = ""
     reject: bool = False
     rejection_message: str = ""
+    requires_supervisor: bool = False
+    supervisor_request: "SupervisorApprovalRequest | None" = None
+    fallback_decision: "AutoApprovalDecision | None" = None
 
 
 @dataclass(frozen=True)
@@ -96,12 +99,12 @@ class FullModeApprovalPolicy:
         if not self._allows_workspace_edit_tool(tool_name):
             return _supervisor_reject(request, "该任务没有声明 workspace_edit 写入工具。")
         if _is_delete_tool(tool_name):
-            return _supervisor_reject(request, "删除类操作必须由用户显式确认，本轮主管 gate 不自动放行删除。")
+            return _supervisor_review(request, "删除类操作必须由主管裁决；主管不可用时不自动放行删除。")
         if not request.target_paths:
             return _supervisor_reject(request, "写入申请缺少明确目标路径。")
         if self._paths_within_intent(request.target_paths, self.write_intent):
             return AutoApprovalDecision(True, "supervisor_gate_approved")
-        return _supervisor_reject(request, "目标路径不在本任务声明的 write_intent 范围内。")
+        return _supervisor_review(request, "目标路径不在本任务声明的 write_intent 范围内。")
 
     def _allows_read_tool(self, tool_name: str) -> bool:
         del tool_name
@@ -227,6 +230,16 @@ def _supervisor_reject(request: SupervisorApprovalRequest, reason: str) -> AutoA
             f"主管拒绝了 worker {task} 的写入申请：{paths}。"
             f"原因：{reason} 请停止本次写入，改为缩小范围、说明 blocker，或请求主脑重新规划。"
         ),
+    )
+
+
+def _supervisor_review(request: SupervisorApprovalRequest, fallback_reason: str) -> AutoApprovalDecision:
+    return AutoApprovalDecision(
+        False,
+        "supervisor_gate_requires_agent",
+        requires_supervisor=True,
+        supervisor_request=request,
+        fallback_decision=_supervisor_reject(request, fallback_reason),
     )
 
 

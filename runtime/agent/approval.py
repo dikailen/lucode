@@ -23,6 +23,7 @@ async def run_with_approval(
     session=None,
     max_turns=20,
     approval_policy=None,
+    supervisor_approval_decider=None,
     stream_output: bool | None = None,
     on_delta=None,
 ):
@@ -49,6 +50,43 @@ async def run_with_approval(
             tool_rule = approval_tool_rule(tool_name)
             pre_event = record_pre_tool_use(hooks, tool_name, item.arguments, tool_rule=tool_rule)
             policy_decision = approval_policy.decide(tool_name, item.arguments) if approval_policy is not None else None
+            if policy_decision is not None and getattr(policy_decision, "requires_supervisor", False):
+                supervisor_decision = await _decide_with_supervisor_agent(
+                    supervisor_approval_decider,
+                    policy_decision,
+                    approval_policy,
+                    tool_name,
+                    item.arguments,
+                )
+                action = supervisor_decision[0]
+                reason = supervisor_decision[1]
+                if action == "approve":
+                    state.approve(item)
+                    record_post_tool_use(
+                        hooks,
+                        pre_event,
+                        decision="approved",
+                        status="supervisor_agent_approved",
+                        reason=reason or "supervisor_agent_approved",
+                    )
+                    continue
+                fallback = getattr(policy_decision, "fallback_decision", None)
+                rejection_message = (
+                    reason
+                    if action in {"reject", "serialize"} and reason
+                    else str(getattr(fallback, "rejection_message", "") or "")
+                )
+                if not rejection_message:
+                    rejection_message = "主管未批准该越界工具调用，请缩小范围或请求重新规划。"
+                state.reject(item, rejection_message=rejection_message)
+                record_post_tool_use(
+                    hooks,
+                    pre_event,
+                    decision="rejected",
+                    status="supervisor_agent_rejected" if action in {"reject", "serialize"} else "supervisor_rejected",
+                    reason=reason or str(getattr(fallback, "reason", "") or "supervisor_agent_unavailable"),
+                )
+                continue
             if policy_decision is not None and policy_decision.approve:
                 state.approve(item)
                 record_post_tool_use(
@@ -211,6 +249,33 @@ async def run_with_approval(
         )
 
     return result
+
+
+async def _decide_with_supervisor_agent(decider, policy_decision, approval_policy, tool_name: str, arguments: str | None):
+    request = getattr(policy_decision, "supervisor_request", None)
+    if decider is None or request is None:
+        return ("fallback", "supervisor_agent_unavailable")
+    try:
+        decision = await decider(request, approval_policy, tool_name, arguments)
+    except Exception:
+        return ("fallback", "supervisor_agent_unavailable")
+    action = ""
+    reason = ""
+    if isinstance(decision, tuple):
+        action = str(decision[0] if decision else "").strip().lower()
+        reason = str(decision[1] if len(decision) > 1 else "").strip()
+    elif isinstance(decision, dict):
+        action = str(decision.get("decision") or decision.get("action") or "").strip().lower()
+        reason = str(decision.get("reason") or "").strip()
+    else:
+        action = str(decision or "").strip().lower()
+    if action in {"approve", "approved", "allow", "yes", "y"}:
+        return ("approve", reason)
+    if action in {"serialize", "serialized", "serial"}:
+        return ("serialize", reason or "主管要求串行化或重新规划该写入。")
+    if action in {"reject", "rejected", "deny", "no", "n"}:
+        return ("reject", reason or "主管拒绝该越界写入。")
+    return ("fallback", reason or "supervisor_agent_parse_failed")
 
 
 def approval_prompt() -> str:

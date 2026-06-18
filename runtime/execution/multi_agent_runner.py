@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import inspect
 from collections import defaultdict
 from dataclasses import replace
@@ -11,6 +12,8 @@ from planning.planner_schema import PlannerResult
 from runtime.config.execution_mode import normalize_execution_mode
 from runtime.execution.execution_contract import summary_helper_enabled, supervisor_route
 from runtime.execution.lead_reviewer import (
+    LeadReworkAction,
+    LeadReworkLimit,
     emit_lead_review_events,
     plan_lead_rework_actions,
     readonly_hard_constraint_from_plan,
@@ -55,13 +58,39 @@ async def _run_multi_agent(
     _apply_full_supervisor_budget_profile(factory, plan.tasks, mode)
     route = supervisor_route(plan)
     use_summary_helper = summary_helper_enabled(plan)
+    supervisor_view = emit_supervisor_observation(
+        plan,
+        mode=mode,
+        event_bus=run_state.event_bus if run_state else None,
+    )
+    if run_state:
+        _seed_supervisor_context_pack(run_state, supervisor_view, mode=mode, route=route)
+    supervisor_approval_decider = _build_supervisor_approval_decider(
+        refined_request=refined_request,
+        plan=plan,
+        supervisor_view=supervisor_view,
+        project_root=project_root,
+        factory=factory,
+        hooks=hooks,
+        run_agent=run_agent,
+        run_state=run_state,
+        model_id=model_id,
+        mode=mode,
+    )
+    supervisor_rework_decider = _build_supervisor_rework_decider(
+        refined_request=refined_request,
+        plan=plan,
+        project_root=project_root,
+        factory=factory,
+        hooks=hooks,
+        run_agent=run_agent,
+        run_state=run_state,
+        model_id=model_id,
+        mode=mode,
+    )
     worker_outputs: list[tuple[str, str, str]] = []
     worker_reports = []
     lead_rework_limits = []
-    supervisor_view = None
-    if run_state:
-        supervisor_view = emit_supervisor_observation(plan, mode=mode, event_bus=run_state.event_bus)
-        _seed_supervisor_context_pack(run_state, supervisor_view, mode=mode, route=route)
 
     try:
         for group_id, tasks in _tasks_by_parallel_group(plan).items():
@@ -94,7 +123,11 @@ async def _run_multi_agent(
                     if show_progress and run_state:
                         run_state.record_task_started(task)
                         _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active=task.title)
-                    kwargs = _task_runner_kwargs(approval_policy_factory, task)
+                    kwargs = _task_runner_kwargs(
+                        approval_policy_factory,
+                        task,
+                        supervisor_approval_decider=supervisor_approval_decider,
+                    )
                     kwargs.update(_execution_mode_kwarg(mode))
                     title, output = await _run_planned_task(
                         refined_request,
@@ -157,7 +190,12 @@ async def _run_multi_agent(
                                 run_agent,
                                 run_state,
                                 ledger,
-                                **_task_runner_kwargs_with_mode(approval_policy_factory, task, mode),
+                                **_task_runner_kwargs_with_mode(
+                                    approval_policy_factory,
+                                    task,
+                                    mode,
+                                    supervisor_approval_decider=supervisor_approval_decider,
+                                ),
                                 show_status=False,
                             )
                             for task in batch
@@ -228,6 +266,8 @@ async def _run_multi_agent(
             worker_reports=worker_reports,
             lead_review_findings=lead_review_findings,
             approval_policy_factory=approval_policy_factory,
+            supervisor_approval_decider=supervisor_approval_decider,
+            supervisor_rework_decider=supervisor_rework_decider,
             mode=mode,
             show_progress=show_progress,
             attempt=attempt,
@@ -436,6 +476,8 @@ async def _run_lead_rework_until_stable(
     worker_reports: list,
     lead_review_findings: list,
     approval_policy_factory=None,
+    supervisor_approval_decider=None,
+    supervisor_rework_decider=None,
     mode: str,
     show_progress: bool,
     attempt: int,
@@ -449,11 +491,39 @@ async def _run_lead_rework_until_stable(
     lead_rework_limits = []
 
     while True:
-        actions, limits = plan_lead_rework_actions(
-            lead_review_findings,
-            attempts_by_task,
+        if not lead_review_findings:
+            return worker_outputs, worker_reports, [], lead_rework_limits
+        decision = await _decide_lead_rework_with_supervisor(
+            supervisor_rework_decider,
+            refined_request=refined_request,
+            plan=plan,
+            run_state=run_state,
+            worker_reports=worker_reports,
+            lead_review_findings=lead_review_findings,
+            attempts_by_task=attempts_by_task,
             max_attempts=max_attempts,
         )
+        if decision["decision"] == "accept":
+            return worker_outputs, worker_reports, [], lead_rework_limits
+        if decision["decision"] == "rework":
+            actions, limits = _lead_rework_actions_from_supervisor_decision(
+                decision,
+                lead_review_findings,
+                attempts_by_task,
+                max_attempts=max_attempts,
+            )
+            if not actions and not limits:
+                actions, limits = plan_lead_rework_actions(
+                    lead_review_findings,
+                    attempts_by_task,
+                    max_attempts=max_attempts,
+                )
+        else:
+            actions, limits = plan_lead_rework_actions(
+                lead_review_findings,
+                attempts_by_task,
+                max_attempts=max_attempts,
+            )
         if limits:
             lead_rework_limits = limits
             _emit_lead_rework_limits(run_state, limits, mode=mode)
@@ -476,7 +546,11 @@ async def _run_lead_rework_until_stable(
                     attempt=attempt,
                     active=f"主管打回重做：{getattr(task, 'title', '') or action.task_id}",
                 )
-            kwargs = _task_runner_kwargs(approval_policy_factory, rework_task)
+            kwargs = _task_runner_kwargs(
+                approval_policy_factory,
+                rework_task,
+                supervisor_approval_decider=supervisor_approval_decider,
+            )
             kwargs.update(_execution_mode_kwarg(mode))
             title, output = await _run_planned_task(
                 refined_request,
@@ -698,15 +772,441 @@ def _approval_policy_for_task(approval_policy_factory, task):
         return None
 
 
-def _task_runner_kwargs(approval_policy_factory, task) -> dict:
+def _task_runner_kwargs(
+    approval_policy_factory,
+    task,
+    supervisor_approval_decider=None,
+) -> dict:
     policy = _approval_policy_for_task(approval_policy_factory, task)
-    return {"approval_policy": policy} if policy is not None else {}
+    if policy is None:
+        return {}
+    if supervisor_approval_decider is not None:
+        try:
+            setattr(policy, "supervisor_approval_decider", supervisor_approval_decider)
+        except Exception:
+            pass
+    return {"approval_policy": policy}
 
 
-def _task_runner_kwargs_with_mode(approval_policy_factory, task, mode: str) -> dict:
-    kwargs = _task_runner_kwargs(approval_policy_factory, task)
+def _task_runner_kwargs_with_mode(
+    approval_policy_factory,
+    task,
+    mode: str,
+    supervisor_approval_decider=None,
+) -> dict:
+    kwargs = _task_runner_kwargs(
+        approval_policy_factory,
+        task,
+        supervisor_approval_decider=supervisor_approval_decider,
+    )
     kwargs.update(_execution_mode_kwarg(mode))
     return kwargs
+
+
+def _build_supervisor_rework_decider(
+    *,
+    refined_request: str,
+    plan: PlannerResult,
+    project_root,
+    factory,
+    hooks,
+    run_agent,
+    run_state: PipelineRunState | None,
+    model_id: str,
+    mode: str,
+):
+    if str(mode or "").strip().lower() != "full":
+        return None
+    if run_agent is None or not hasattr(factory, "create_supervisor_agent"):
+        return None
+
+    async def _decide(*, worker_reports, lead_review_findings, attempts_by_task, max_attempts):
+        try:
+            async with create_readonly_filesystem_server(
+                project_root,
+                "supervisor_rework_readonly",
+            ) as readonly_server:
+                supervisor = factory.create_supervisor_agent(model_id, [readonly_server])
+                result = await run_agent(
+                    supervisor,
+                    _render_supervisor_rework_prompt(
+                        refined_request=refined_request,
+                        plan=plan,
+                        run_state=run_state,
+                        worker_reports=worker_reports,
+                        lead_review_findings=lead_review_findings,
+                        attempts_by_task=attempts_by_task,
+                        max_attempts=max_attempts,
+                    ),
+                    hooks,
+                    **_run_agent_kwargs(run_agent, max_turns=5, stream_output=False),
+                )
+        except Exception:
+            return {"decision": "fallback", "reason": "supervisor_agent_unavailable"}
+        return _parse_supervisor_rework_output(str(getattr(result, "final_output", "") or ""))
+
+    return _decide
+
+
+async def _decide_lead_rework_with_supervisor(
+    supervisor_rework_decider,
+    *,
+    refined_request: str,
+    plan: PlannerResult,
+    run_state: PipelineRunState | None,
+    worker_reports: list,
+    lead_review_findings: list,
+    attempts_by_task: dict[str, int],
+    max_attempts: int,
+) -> dict:
+    del refined_request, plan, run_state
+    if supervisor_rework_decider is None:
+        return {"decision": "fallback", "reason": "supervisor_agent_unavailable"}
+    try:
+        decision = await supervisor_rework_decider(
+            worker_reports=worker_reports,
+            lead_review_findings=lead_review_findings,
+            attempts_by_task=attempts_by_task,
+            max_attempts=max_attempts,
+        )
+    except Exception:
+        return {"decision": "fallback", "reason": "supervisor_agent_unavailable"}
+    return _normalize_supervisor_rework_decision(decision)
+
+
+def _normalize_supervisor_rework_decision(decision) -> dict:
+    if isinstance(decision, dict):
+        action = str(decision.get("decision") or decision.get("action") or "").strip().lower()
+        if action in {"accept", "accepted", "pass", "ok"}:
+            return {"decision": "accept", "reason": str(decision.get("reason") or "").strip()}
+        if action in {"rework", "retry", "revise"}:
+            return {
+                "decision": "rework",
+                "reason": str(decision.get("reason") or "").strip(),
+                "rework": list(decision.get("rework") or decision.get("actions") or []),
+            }
+        return {"decision": "fallback", "reason": str(decision.get("reason") or "supervisor_agent_parse_failed").strip()}
+    text = str(decision or "").strip().lower()
+    if text in {"accept", "accepted", "pass", "ok"}:
+        return {"decision": "accept", "reason": ""}
+    if text in {"fallback", ""}:
+        return {"decision": "fallback", "reason": "supervisor_agent_parse_failed"}
+    return {"decision": "fallback", "reason": text or "supervisor_agent_parse_failed"}
+
+
+def _render_supervisor_rework_prompt(
+    *,
+    refined_request: str,
+    plan: PlannerResult,
+    run_state: PipelineRunState | None,
+    worker_reports: list,
+    lead_review_findings: list,
+    attempts_by_task: dict[str, int],
+    max_attempts: int,
+) -> str:
+    tasks = [
+        {
+            "id": str(getattr(task, "id", "") or ""),
+            "title": str(getattr(task, "title", "") or ""),
+            "instruction": str(getattr(task, "instruction", "") or ""),
+            "write_intent": list(getattr(task, "write_intent", []) or []),
+            "mcp": list(getattr(task, "mcp", []) or []),
+        }
+        for task in list(getattr(plan, "tasks", []) or [])
+    ]
+    reports = [
+        report.to_dict() if hasattr(report, "to_dict") else dict(report)
+        for report in list(worker_reports or [])
+    ]
+    findings = [
+        finding.to_dict() if hasattr(finding, "to_dict") else dict(finding)
+        for finding in list(lead_review_findings or [])
+    ]
+    return "\n".join(
+        [
+            "你是 Lucode full 模式主管 Agent。请根据 WorkerReport 与 LeadReview findings 判断是否合格或需要返工。",
+            "",
+            "只允许输出 JSON，不要输出 Markdown：",
+            '{"decision":"accept|rework","reason":"一句中文原因","rework":[{"task_id":"...","instruction":"..."}]}',
+            "",
+            "裁决规则：",
+            "- findings 是证据，不是最终结论；你要结合用户目标、任务契约、WorkerReport 和共享黑板判断。",
+            "- 如果当前结果可以接受，decision=accept，rework 为空。",
+            "- 如果需要返工，decision=rework，并只给需要返工的 task_id 和可执行 instruction。",
+            "- 不要让任何任务超过 max_attempts；达到上限的任务不要继续要求返工。",
+            "- 主管只判断和写返工说明，不亲自写文件。",
+            "",
+            "## 用户目标",
+            str(refined_request or "").strip() or "未提供",
+            "",
+            "## 当前计划任务",
+            json.dumps(tasks, ensure_ascii=False, indent=2),
+            "",
+            "## WorkerReport",
+            json.dumps(reports, ensure_ascii=False, indent=2),
+            "",
+            "## LeadReview Findings",
+            json.dumps(findings, ensure_ascii=False, indent=2),
+            "",
+            "## Attempts",
+            json.dumps(
+                {
+                    "attempts_by_task": {str(key): int(value or 0) for key, value in dict(attempts_by_task or {}).items()},
+                    "max_attempts": max(0, int(max_attempts or 0)),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            "",
+            "## 共享黑板",
+            _render_blackboard_for_supervisor(run_state) or "none",
+        ]
+    )
+
+
+def _parse_supervisor_rework_output(text: str) -> dict:
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").strip()
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end <= start:
+            return {"decision": "fallback", "reason": "supervisor_agent_parse_failed"}
+        try:
+            data = json.loads(raw[start : end + 1])
+        except json.JSONDecodeError:
+            return {"decision": "fallback", "reason": "supervisor_agent_parse_failed"}
+    return _normalize_supervisor_rework_decision(data)
+
+
+def _lead_rework_actions_from_supervisor_decision(
+    decision: dict,
+    findings: list,
+    attempts_by_task: dict[str, int],
+    *,
+    max_attempts: int,
+) -> tuple[list[LeadReworkAction], list[LeadReworkLimit]]:
+    hard_limit = max(0, int(max_attempts or 0))
+    findings_by_task: dict[str, list] = {}
+    for finding in list(findings or []):
+        task_id = str(getattr(finding, "task_id", "") or "").strip()
+        if task_id:
+            findings_by_task.setdefault(task_id, []).append(finding)
+    actions: list[LeadReworkAction] = []
+    limits: list[LeadReworkLimit] = []
+    for item in list(decision.get("rework") or []):
+        if not isinstance(item, dict):
+            continue
+        task_id = str(item.get("task_id") or "").strip()
+        instruction = str(item.get("instruction") or "").strip()
+        if not task_id:
+            continue
+        used = max(0, int(dict(attempts_by_task or {}).get(task_id, 0) or 0))
+        task_findings = findings_by_task.get(task_id, [])
+        kinds = _finding_kinds(task_findings)
+        if used >= hard_limit:
+            limits.append(
+                LeadReworkLimit(
+                    task_id=task_id,
+                    max_attempts=hard_limit,
+                    finding_kinds=kinds,
+                    reason=str(decision.get("reason") or "主管要求返工，但该任务已达到返工上限。"),
+                )
+            )
+            continue
+        attempt = used + 1
+        if not instruction:
+            instruction = _fallback_rework_instruction(task_id, task_findings, attempt=attempt, max_attempts=hard_limit)
+        actions.append(
+            LeadReworkAction(
+                task_id=task_id,
+                attempt=attempt,
+                max_attempts=hard_limit,
+                finding_kinds=kinds,
+                instruction=instruction,
+            )
+        )
+    return actions, limits
+
+
+def _finding_kinds(findings: list) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for finding in list(findings or []):
+        kind = str(getattr(finding, "kind", "") or "").strip()
+        if kind and kind not in seen:
+            seen.add(kind)
+            result.append(kind)
+    return result
+
+
+def _fallback_rework_instruction(task_id: str, findings: list, *, attempt: int, max_attempts: int) -> str:
+    actions, _limits = plan_lead_rework_actions(
+        findings,
+        {task_id: max(0, int(attempt or 1) - 1)},
+        max_attempts=max_attempts,
+    )
+    for action in actions:
+        if action.task_id == task_id:
+            return action.instruction
+    return f"主管要求返工：{task_id or 'unknown'}（{attempt}/{max_attempts}）。请补充证据并修正 LeadReview findings 指出的风险。"
+
+
+def _build_supervisor_approval_decider(
+    *,
+    refined_request: str,
+    plan: PlannerResult,
+    supervisor_view=None,
+    project_root,
+    factory,
+    hooks,
+    run_agent,
+    run_state: PipelineRunState | None,
+    model_id: str,
+    mode: str,
+):
+    if str(mode or "").strip().lower() != "full":
+        return None
+    if run_agent is None or not hasattr(factory, "create_supervisor_agent"):
+        return None
+
+    async def _decide(request, policy, tool_name, arguments):
+        del policy
+        try:
+            async with create_readonly_filesystem_server(
+                project_root,
+                "supervisor_workspace_readonly",
+            ) as readonly_server:
+                supervisor = factory.create_supervisor_agent(model_id, [readonly_server])
+                result = await run_agent(
+                    supervisor,
+                    _render_supervisor_approval_prompt(
+                        refined_request=refined_request,
+                        plan=plan,
+                        supervisor_view=supervisor_view,
+                        run_state=run_state,
+                        request=request,
+                        tool_name=tool_name,
+                        arguments=arguments,
+                    ),
+                    hooks,
+                    **_run_agent_kwargs(run_agent, max_turns=4, stream_output=False),
+                )
+        except Exception:
+            return ("fallback", "supervisor_agent_unavailable")
+        return _parse_supervisor_approval_output(str(getattr(result, "final_output", "") or ""))
+
+    return _decide
+
+
+def _render_supervisor_approval_prompt(
+    *,
+    refined_request: str,
+    plan: PlannerResult,
+    supervisor_view=None,
+    run_state: PipelineRunState | None,
+    request,
+    tool_name: str,
+    arguments: str | None,
+) -> str:
+    blackboard = _render_blackboard_for_supervisor(run_state)
+    payload = {
+        "task_id": str(getattr(request, "task_id", "") or ""),
+        "tool_name": str(tool_name or getattr(request, "tool_name", "") or ""),
+        "operation": str(getattr(request, "operation", "") or ""),
+        "target_paths": list(getattr(request, "target_paths", []) or []),
+        "reason": str(getattr(request, "reason", "") or ""),
+        "arguments": str(arguments or "")[:4000],
+    }
+    tasks = [
+        {
+            "id": str(getattr(task, "id", "") or ""),
+            "title": str(getattr(task, "title", "") or ""),
+            "write_intent": list(getattr(task, "write_intent", []) or []),
+            "mcp": list(getattr(task, "mcp", []) or []),
+        }
+        for task in list(getattr(plan, "tasks", []) or [])
+    ]
+    return "\n".join(
+        [
+            "你是 Lucode full 模式主管 Agent。现在有 worker 申请越界或冲突写入，请裁决。",
+            "",
+            "只允许输出 JSON，不要输出 Markdown：",
+            '{"decision":"approve|reject|serialize","reason":"一句中文原因"}',
+            "",
+            "裁决规则：",
+            "- 如果该写入明显属于用户目标、风险可控，decision=approve。",
+            "- 如果写入目标不属于用户目标、缺少依据、涉及删除或敏感内容，decision=reject。",
+            "- 如果问题是并行/冲突导致需要重新排序或重新规划，decision=serialize。",
+            "- 主管只裁决，不亲自写文件。",
+            "",
+            "## 用户目标",
+            str(refined_request or "").strip() or "未提供",
+            "",
+            "## 当前计划任务",
+            json.dumps(tasks, ensure_ascii=False, indent=2),
+            "",
+            "## 写入申请",
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            "",
+            "## 冲突视图",
+            _render_supervisor_conflict_view(supervisor_view),
+            "",
+            "## 共享黑板",
+            blackboard or "none",
+        ]
+    )
+
+
+def _render_supervisor_conflict_view(supervisor_view) -> str:
+    if supervisor_view is None:
+        return "none"
+    conflicts = list(getattr(supervisor_view, "conflicts", []) or [])
+    decisions = [
+        item.to_dict() if hasattr(item, "to_dict") else dict(item)
+        for item in list(getattr(supervisor_view, "decisions", []) or [])
+    ]
+    notes = list(getattr(supervisor_view, "notes", []) or [])
+    if not conflicts and not decisions and not notes:
+        return "none"
+    return json.dumps(
+        {
+            "conflicts": conflicts,
+            "decisions": decisions,
+            "notes": notes,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _parse_supervisor_approval_output(text: str) -> tuple[str, str]:
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").strip()
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end <= start:
+            return ("fallback", "supervisor_agent_parse_failed")
+        try:
+            data = json.loads(raw[start : end + 1])
+        except json.JSONDecodeError:
+            return ("fallback", "supervisor_agent_parse_failed")
+    action = str(data.get("decision") or data.get("action") or "").strip().lower()
+    reason = str(data.get("reason") or "").strip()
+    if action in {"approve", "reject", "serialize"}:
+        return (action, reason)
+    return ("fallback", reason or "supervisor_agent_parse_failed")
 
 
 def _execution_mode_kwarg(mode: str) -> dict:

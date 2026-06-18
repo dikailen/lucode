@@ -15,6 +15,7 @@ from runtime.execution.pipeline import (
     apply_pipeline_gate,
     format_gate_decision,
 )
+from runtime.execution.run_context import RunContextStore
 # Keep private imports available here as compatibility re-exports while dynamic.py is being split.
 from runtime.execution.fast_paths import (
     _build_url_search_query,
@@ -181,6 +182,7 @@ async def _execute_dynamic_attempt(
     planner_model_id = settings.select_model_id(model_registry, "orchestrator")
     synthesizer_model_id = settings.select_model_id(model_registry, "final_synthesizer")
     event_bus = event_bus or ExecutionEventBus()
+    planning_run_context = RunContextStore(project_root) if project_root else None
     event_bus.emit(
         "PlanningStarted",
         "开始规划本轮任务",
@@ -197,6 +199,8 @@ async def _execute_dynamic_attempt(
                 hooks=hooks,
                 refiner_enabled=settings.query_refiner_enabled,
                 allowed_worker_models=settings.worker_model_pool(model_registry),
+                project_root=project_root,
+                run_context=planning_run_context,
             )
     except Exception as exc:
         event_bus.emit(
@@ -228,6 +232,7 @@ async def _execute_dynamic_attempt(
         mode=settings.execution_mode,
         output_controller=output_controller,
         event_bus=event_bus,
+        run_context=planning_run_context,
     )
     run_state.model_labels = _model_label_map(
         model_registry,
