@@ -239,6 +239,71 @@ def test_turn_ended_refreshes_sidebar(app, tmp_path):
     assert len(window.session_sidebar.findChildren(QPushButton, "SessionRowButton")) == 3
 
 
+def test_answer_delta_creates_and_appends_answer_block(app, tmp_path):
+    workspace = _isolated_workspace(tmp_path)
+    session = GuiChatSession(workspace=workspace)
+    session.settings.execution_mode = "solo"
+    window = MainWindow(workspace=workspace, chat_session=session)
+    window.show()
+    app.processEvents()
+    turn_id = window.turn_guard.start()
+    window.work_task_id = turn_id
+
+    window.handle_runtime_event(
+        {
+            "event_type": "AgentMessageDelta",
+            "agent": "solo",
+            "task_id": "solo_agent",
+            "payload": {"text": "Hello"},
+        }
+    )
+    window.handle_runtime_event(
+        {
+            "event_type": "AgentMessageDelta",
+            "agent": "solo",
+            "task_id": "solo_agent",
+            "payload": {"text": " world"},
+        }
+    )
+    app.processEvents()
+
+    answers = window.message_host.findChildren(AnswerBlock)
+    assert len(answers) == 1
+    assert answers[0].content_label.text() == "Hello world"
+
+
+def test_run_turn_updates_streamed_answer_instead_of_adding_duplicate(app, tmp_path):
+    from lucode.gui.chat_session import GuiTurnResult
+
+    class StreamingGuiChatSession(GuiChatSession):
+        async def run_turn(self, user_input: str):
+            del user_input
+            window.handle_runtime_event(
+                {
+                    "event_type": "AgentMessageDelta",
+                    "agent": "full_supervisor_agent",
+                    "payload": {"text": "Partial"},
+                }
+            )
+            return GuiTurnResult(final_output="Partial final", execution_mode="full")
+
+    workspace = _isolated_workspace(tmp_path)
+    session = StreamingGuiChatSession(workspace=workspace)
+    session.settings.execution_mode = "full"
+    window = MainWindow(workspace=workspace, chat_session=session)
+    window.show()
+    app.processEvents()
+
+    turn_id = window.turn_guard.start()
+    window.work_task_id = turn_id
+    asyncio.run(window._run_turn(turn_id, "question"))
+    app.processEvents()
+
+    answers = window.message_host.findChildren(AnswerBlock)
+    assert len(answers) == 1
+    assert answers[0].content_label.text() == "Partial final"
+
+
 def test_run_turn_completion_refreshes_sidebar_after_history_write(app, tmp_path):
     class RecordingGuiChatSession(GuiChatSession):
         async def run_turn(self, user_input: str):

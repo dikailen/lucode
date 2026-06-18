@@ -22,12 +22,14 @@ from PySide6.QtWidgets import (
 
 from catalog_system.model_catalog import clear_model_catalog_cache
 from lucode.gui.approval import GuiApprovalSession, LatestApprovalContext
+from lucode.gui.answer_stream import AnswerStreamState
 from lucode.gui.chat_session import GuiChatSession
 from lucode.gui.control_panel import ControlBar
 from lucode.gui.event_bridge import EventBridge
 from lucode.gui.provider_manager import ProviderManagerDialog
 from lucode.gui.session_sidebar import SessionSidebar
 from lucode.gui.settings_dialog import SettingsDialog
+from lucode.gui.stream_routing import classify_gui_stream_event
 from lucode.gui.turn_state import TurnStateGuard
 from lucode.gui.widgets import AnswerBlock, MessageBubble, ThinkingIndicator, WorkArea, status_style
 
@@ -88,6 +90,8 @@ class MainWindow(QMainWindow):
         self._work_area_row: QWidget | None = None
         self._thinking_row: QWidget | None = None
         self._thinking_indicator: ThinkingIndicator | None = None
+        self._stream_answer_block: AnswerBlock | None = None
+        self._answer_stream = AnswerStreamState()
         self._bubbles: list[MessageBubble] = []
         self._thinking_indicators: list[ThinkingIndicator] = []
         self.work_task: asyncio.Task | None = None
@@ -308,6 +312,8 @@ class MainWindow(QMainWindow):
         turn_id = self.turn_guard.start()
         self.work_area = None
         self._work_area_row = None
+        self._stream_answer_block = None
+        self._answer_stream.reset()
         self._turn_start = time.monotonic()
         self._show_thinking("正在思考")
         self.set_running(True)
@@ -385,6 +391,27 @@ class MainWindow(QMainWindow):
         self.message_layout.addWidget(row)
         self._scroll_to_bottom()
         return block
+
+    def _append_stream_answer(self, text: str) -> None:
+        if not text:
+            return
+        current = self._answer_stream.append_delta(text)
+        if self._stream_answer_block is None:
+            self._stream_answer_block = self.add_answer_block(current)
+        else:
+            self._stream_answer_block.set_text(current)
+            self._scroll_to_bottom()
+
+    def _finalize_stream_answer(self, final_output: str) -> bool:
+        if self._stream_answer_block is None and not self._answer_stream.has_streamed:
+            return False
+        current = self._answer_stream.finalize(final_output)
+        if self._stream_answer_block is None:
+            self._stream_answer_block = self.add_answer_block(current)
+        elif current:
+            self._stream_answer_block.set_text(current)
+            self._scroll_to_bottom()
+        return True
 
     def _show_thinking(self, text: str) -> None:
         self._clear_thinking()
@@ -470,7 +497,12 @@ class MainWindow(QMainWindow):
         if event_type == "AgentMessageDelta":
             if not self.turn_guard.is_running or self.turn_guard.is_stopping or not self.work_task_id:
                 return
-            if self.work_area is not None and task_id and self.work_area.has_task(task_id):
+            route = classify_gui_stream_event(event, mode=self.mode)
+            if route == "answer":
+                payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                text = str(payload.get("text") or event.get("text") or event.get("message") or "")
+                self._append_stream_answer(text)
+            elif route == "work_area" and self.work_area is not None and task_id and self.work_area.has_task(task_id):
                 self.work_area.apply_event(event)
                 self._scroll_to_bottom()
             return
@@ -513,7 +545,8 @@ class MainWindow(QMainWindow):
             if self._closing or not self.turn_guard.is_current(turn_id):
                 return
             if result.final_output:
-                self.add_answer_block(result.final_output)
+                if not self._finalize_stream_answer(result.final_output):
+                    self.add_answer_block(result.final_output)
             self.mode = result.execution_mode or self.mode
             if result.stopped:
                 self.set_status("stopped", "已停止")
@@ -552,6 +585,8 @@ class MainWindow(QMainWindow):
         self._clear_thinking()
         self.work_area = None
         self._work_area_row = None
+        self._stream_answer_block = None
+        self._answer_stream.reset()
         self._bubbles = []
         self._thinking_indicators = []
         while self.message_layout.count():

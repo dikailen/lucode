@@ -344,7 +344,12 @@ async def _run_multi_agent(
                     synthesizer,
                     synthesis_prompt,
                     hooks,
-                    **_run_agent_kwargs(run_agent, max_turns=10, stream_output=False),
+                    **_run_agent_kwargs(
+                        run_agent,
+                        max_turns=10,
+                        stream_output=True,
+                        on_delta=_final_answer_delta_emitter(run_state, agent="final_synthesizer_agent"),
+                    ),
                 )
             if show_progress and run_state:
                 _print_progress_snapshot(run_state, mode=mode, attempt=attempt, active="汇总完成")
@@ -1262,11 +1267,38 @@ async def _finalize_with_supervisor_agent(
                 supervisor,
                 prompt,
                 hooks,
-                **_run_agent_kwargs(run_agent, max_turns=8, stream_output=False),
+                **_run_agent_kwargs(
+                    run_agent,
+                    max_turns=8,
+                    stream_output=True,
+                    on_delta=_final_answer_delta_emitter(run_state, agent="full_supervisor_agent"),
+                ),
             )
     except Exception:
         return ""
     return str(getattr(result, "final_output", "") or "").strip()
+
+
+def _final_answer_delta_emitter(run_state: PipelineRunState | None, *, agent: str):
+    event_bus = getattr(run_state, "event_bus", None)
+    if event_bus is None or not hasattr(event_bus, "emit"):
+        return None
+
+    def _emit_delta(text: str) -> None:
+        if not text:
+            return
+        try:
+            event_bus.emit(
+                "AgentMessageDelta",
+                str(text),
+                agent=str(agent or ""),
+                status="streaming",
+                payload={"text": str(text)},
+            )
+        except Exception:
+            return
+
+    return _emit_delta
 
 
 def _render_supervisor_finalize_prompt(
