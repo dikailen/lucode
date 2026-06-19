@@ -5,6 +5,7 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -16,9 +17,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from lucode.gui.sidebar_data import (
+    McpRow,
+    SkillCard,
+    load_default_mcp_rows,
+    load_default_skill_cards,
+)
+
 
 class SessionSidebar(QFrame):
-    """Conversation history sidebar backed by the existing HistoryStore API."""
+    """Workbench sidebar for conversations, skills, and MCP status."""
 
     new_session_requested = Signal()
     session_selected = Signal(str)
@@ -32,27 +40,43 @@ class SessionSidebar(QFrame):
         self._session_store = None
         self._selected_session_id = ""
         self._enabled = True
+        self._active_tab = "chats"
         self._items_by_session_id: dict[str, Any] = {}
+        self._skill_cards = load_default_skill_cards()
+        self._mcp_rows = load_default_mcp_rows()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
         header = QHBoxLayout()
-        title = QLabel("会话")
+        title = QLabel("Lucode")
         title.setObjectName("SidebarTitle")
         header.addWidget(title)
         header.addStretch(1)
         layout.addLayout(header)
 
-        self.new_session_button = QPushButton("+ 新会话")
+        self.new_session_button = QPushButton("+ New Chat")
         self.new_session_button.setObjectName("SidebarNewSessionButton")
         self.new_session_button.clicked.connect(self.new_session_requested.emit)
         layout.addWidget(self.new_session_button)
 
+        self.tab_group = QButtonGroup(self)
+        self.tab_group.setExclusive(True)
+        tab_row = QHBoxLayout()
+        tab_row.setSpacing(6)
+        self.chats_tab = self._make_tab_button("Chats", "chats", "SidebarTabChats")
+        self.skills_tab = self._make_tab_button("Skills", "skills", "SidebarTabSkills")
+        self.mcp_tab = self._make_tab_button("MCP", "mcp", "SidebarTabMcp")
+        for button in (self.chats_tab, self.skills_tab, self.mcp_tab):
+            tab_row.addWidget(button)
+            self.tab_group.addButton(button)
+        self.chats_tab.setChecked(True)
+        layout.addLayout(tab_row)
+
         self.search_box = QLineEdit()
         self.search_box.setObjectName("SessionSearchBox")
-        self.search_box.setPlaceholderText("搜索会话")
+        self.search_box.setPlaceholderText("Search chats")
         self.search_box.textChanged.connect(lambda _text: self.refresh())
         layout.addWidget(self.search_box)
 
@@ -68,7 +92,7 @@ class SessionSidebar(QFrame):
         self.list_layout.setSpacing(6)
         self.scroll.setWidget(self.list_host)
 
-        self.empty_label = QLabel("还没有历史会话")
+        self.empty_label = QLabel("No conversations yet")
         self.empty_label.setObjectName("SidebarEmpty")
         self.empty_label.setWordWrap(True)
         self.list_layout.addWidget(self.empty_label)
@@ -78,6 +102,16 @@ class SessionSidebar(QFrame):
         self._session_store = session_store
 
     def refresh(self) -> None:
+        if self._active_tab == "skills":
+            self._refresh_session_cache()
+            self._render_skills()
+            return
+        if self._active_tab == "mcp":
+            self._refresh_session_cache()
+            self._render_mcp()
+            return
+
+        self._refresh_session_cache()
         query = self.search_box.text().strip()
         items = []
         if self._session_store is not None:
@@ -92,7 +126,8 @@ class SessionSidebar(QFrame):
 
     def select_session(self, session_id: str) -> None:
         self._selected_session_id = str(session_id or "")
-        self.refresh()
+        if self._active_tab == "chats":
+            self.refresh()
 
     def session_title(self, session_id: str) -> str:
         item = self._items_by_session_id.get(str(session_id or ""))
@@ -102,29 +137,69 @@ class SessionSidebar(QFrame):
         self._enabled = bool(enabled)
         self._apply_enabled_state()
 
+    def _make_tab_button(self, text: str, tab_id: str, object_name: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName(object_name)
+        button.setCheckable(True)
+        button.clicked.connect(lambda _checked=False, value=tab_id: self._switch_tab(value))
+        return button
+
+    def _switch_tab(self, tab_id: str) -> None:
+        if tab_id not in {"chats", "skills", "mcp"}:
+            return
+        self._active_tab = tab_id
+        self.chats_tab.setChecked(tab_id == "chats")
+        self.skills_tab.setChecked(tab_id == "skills")
+        self.mcp_tab.setChecked(tab_id == "mcp")
+        self.new_session_button.setVisible(tab_id == "chats")
+        self.search_box.setVisible(tab_id == "chats")
+        self.refresh()
+        self._apply_enabled_state()
+
     def _apply_enabled_state(self) -> None:
         self.new_session_button.setEnabled(self._enabled)
         self.search_box.setEnabled(self._enabled)
+        for button in (self.chats_tab, self.skills_tab, self.mcp_tab):
+            button.setEnabled(self._enabled)
         for button in self.findChildren(QPushButton, "SessionRowButton"):
             button.setEnabled(self._enabled)
         for button in self.findChildren(QPushButton, "SessionDeleteButton"):
             button.setEnabled(self._enabled)
+        for button in self.findChildren(QPushButton, "SkillCardButton"):
+            button.setEnabled(self._enabled)
 
-    def _render_items(self, items: list[Any]) -> None:
+    def _clear_list_layout(self) -> None:
         while self.list_layout.count():
             item = self.list_layout.takeAt(0)
             widget = item.widget()
-            if widget is not None and widget is not self.empty_label:
-                widget.setParent(None)
+            if widget is None:
+                continue
+            widget.setParent(None)
+            if widget is not self.empty_label:
                 widget.deleteLater()
+
+    def _refresh_session_cache(self) -> None:
+        if self._session_store is None or not hasattr(self._session_store, "list_items"):
+            return
+        try:
+            items = list(self._session_store.list_items(limit=50))
+        except Exception:
+            return
         self._items_by_session_id = {
             _item_session_id(item): item for item in items if _item_session_id(item)
         }
-        self.list_layout.addWidget(self.empty_label)
+
+    def _render_items(self, items: list[Any]) -> None:
+        self._clear_list_layout()
+        self._items_by_session_id = {
+            _item_session_id(item): item for item in items if _item_session_id(item)
+        }
         if not items:
-            self.empty_label.setText("还没有历史会话")
+            self.empty_label.setText("No conversations yet")
             self.empty_label.show()
+            self.list_layout.addWidget(self.empty_label)
             self.list_layout.addStretch(1)
+            self._apply_enabled_state()
             return
         self.empty_label.hide()
         for item in items:
@@ -135,6 +210,26 @@ class SessionSidebar(QFrame):
         self.list_layout.addStretch(1)
         self._apply_enabled_state()
 
+    def _render_skills(self) -> None:
+        self._clear_list_layout()
+        title = QLabel("Skill library")
+        title.setObjectName("SkillPanelTitle")
+        self.list_layout.addWidget(title)
+        for card in self._skill_cards:
+            self.list_layout.addWidget(_SkillCardRow(card))
+        self.list_layout.addStretch(1)
+        self._apply_enabled_state()
+
+    def _render_mcp(self) -> None:
+        self._clear_list_layout()
+        title = QLabel("MCP servers")
+        title.setObjectName("McpPanelTitle")
+        self.list_layout.addWidget(title)
+        for row in self._mcp_rows:
+            self.list_layout.addWidget(_McpStatusRow(row))
+        self.list_layout.addStretch(1)
+        self._apply_enabled_state()
+
     def _on_session_selected(self, session_id: str) -> None:
         self._selected_session_id = str(session_id or "")
         self.session_selected.emit(self._selected_session_id)
@@ -142,7 +237,7 @@ class SessionSidebar(QFrame):
     def _on_delete_requested(self, session_id: str) -> None:
         if not session_id or self._session_store is None:
             return
-        answer = QMessageBox.question(self, "删除会话", "确定删除这段会话吗？")
+        answer = QMessageBox.question(self, "Delete Chat", "Delete this conversation?")
         if answer != QMessageBox.Yes:
             return
         try:
@@ -179,11 +274,59 @@ class _SessionRow(QFrame):
         self.row_button.clicked.connect(lambda: self.session_selected.emit(self.session_id))
         layout.addWidget(self.row_button, 1)
 
-        self.delete_button = QPushButton("删除")
+        self.delete_button = QPushButton("Delete")
         self.delete_button.setObjectName("SessionDeleteButton")
         self.delete_button.setProperty("session_id", self.session_id)
         self.delete_button.clicked.connect(lambda: self.delete_requested.emit(self.session_id))
         layout.addWidget(self.delete_button)
+
+
+class _SkillCardRow(QFrame):
+    def __init__(self, card: SkillCard, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("SkillCardRow")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        text = card.title
+        if card.description:
+            text = f"{text}\n{card.description}"
+        if card.chips:
+            text = f"{text}\n{'  '.join(card.chips)}"
+
+        self.card_button = QPushButton(text)
+        self.card_button.setObjectName("SkillCardButton")
+        self.card_button.setProperty("skill_id", card.id)
+        layout.addWidget(self.card_button)
+
+
+class _McpStatusRow(QFrame):
+    def __init__(self, row: McpRow, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("McpStatusRow")
+        self.setProperty("mcp_id", row.id)
+        self.setProperty("status", row.status)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(3)
+
+        top = QHBoxLayout()
+        name = QLabel(row.title)
+        name.setObjectName("McpName")
+        status = QLabel(row.status)
+        status.setObjectName("McpStatus")
+        top.addWidget(name, 1)
+        top.addWidget(status)
+        layout.addLayout(top)
+
+        if row.detail:
+            detail = QLabel(row.detail)
+            detail.setObjectName("McpDetail")
+            detail.setWordWrap(True)
+            layout.addWidget(detail)
 
 
 def _item_session_id(item) -> str:
@@ -198,7 +341,7 @@ def _item_title(item) -> str:
     else:
         title = getattr(item, "title", "") or getattr(item, "last_user", "") or getattr(item, "session_id", "")
     text = str(title or "").replace("\n", " ").strip()
-    return text[:34] + "..." if len(text) > 36 else text or "未命名会话"
+    return text[:34] + "..." if len(text) > 36 else text or "Untitled chat"
 
 
 def _item_meta(item) -> str:
@@ -213,7 +356,7 @@ def _item_meta(item) -> str:
     if relative:
         parts.append(relative)
     if count:
-        parts.append(f"{count} 条")
+        parts.append(f"{count} messages")
     return " · ".join(parts)
 
 
@@ -230,14 +373,14 @@ def _relative_time(value: str) -> str:
     except ValueError:
         return text[:10]
     if seconds < 60:
-        return "刚刚"
+        return "just now"
     minutes = seconds // 60
     if minutes < 60:
-        return f"{minutes} 分钟前"
+        return f"{minutes} min ago"
     hours = minutes // 60
     if hours < 24:
-        return f"{hours} 小时前"
+        return f"{hours} hr ago"
     days = hours // 24
     if days < 30:
-        return f"{days} 天前"
+        return f"{days} days ago"
     return updated.date().isoformat()

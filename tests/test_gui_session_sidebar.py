@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(not HAS_PYSIDE, reason="PySide6 is not installed
 if HAS_PYSIDE:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QMessageBox, QPushButton  # noqa: E402
+    from PySide6.QtWidgets import QApplication, QLabel, QFrame, QLineEdit, QMessageBox, QPushButton  # noqa: E402
     from lucode.gui.chat_session import GuiChatSession  # noqa: E402
     from lucode.gui.main_window import MainWindow  # noqa: E402
     from lucode.gui.session_sidebar import SessionSidebar  # noqa: E402
@@ -155,6 +155,45 @@ def test_sidebar_refresh_preserves_disabled_state(app):
     assert buttons
     assert all(not button.isEnabled() for button in buttons)
     assert all(not button.isEnabled() for button in delete_buttons)
+
+
+def test_sidebar_switches_between_chats_skills_and_mcp(app):
+    store = FakeSessionStore()
+    sidebar = SessionSidebar()
+    sidebar.set_session_store(store)
+    sidebar.refresh()
+
+    assert sidebar.findChild(QPushButton, "SidebarTabChats").isChecked()
+    assert len(sidebar.findChildren(QPushButton, "SessionRowButton")) == 2
+
+    sidebar.findChild(QPushButton, "SidebarTabSkills").click()
+    app.processEvents()
+
+    assert sidebar.findChild(QPushButton, "SidebarTabSkills").isChecked()
+    assert sidebar.findChild(QLabel, "SkillPanelTitle").text() == "Skill library"
+    skill_cards = sidebar.findChildren(QPushButton, "SkillCardButton")
+    assert [button.property("skill_id") for button in skill_cards[:4]] == [
+        "code_engineer",
+        "project_explorer",
+        "final_synthesizer",
+        "skill_creator",
+    ]
+
+    sidebar.findChild(QPushButton, "SidebarTabMcp").click()
+    app.processEvents()
+
+    assert sidebar.findChild(QPushButton, "SidebarTabMcp").isChecked()
+    assert sidebar.findChild(QLabel, "McpPanelTitle").text() == "MCP servers"
+    mcp_rows = sidebar.findChildren(QFrame, "McpStatusRow")
+    statuses = {row.property("mcp_id"): row.property("status") for row in mcp_rows}
+    assert statuses["filesystem"] == "Connected"
+    assert statuses["image_draw"] == "Offline"
+
+    sidebar.findChild(QPushButton, "SidebarTabChats").click()
+    app.processEvents()
+
+    assert sidebar.findChild(QPushButton, "SidebarTabChats").isChecked()
+    assert len(sidebar.findChildren(QPushButton, "SessionRowButton")) == 2
 
 
 def test_main_window_new_session_clears_messages_and_title(app, tmp_path):
@@ -320,6 +359,7 @@ def test_run_turn_completion_refreshes_sidebar_after_history_write(app, tmp_path
     store.items = []
     session.session_store = store
     window = MainWindow(workspace=workspace, chat_session=session)
+    window.session_sidebar.set_session_store(store)
     window.show()
     app.processEvents()
 
@@ -330,6 +370,35 @@ def test_run_turn_completion_refreshes_sidebar_after_history_write(app, tmp_path
     buttons = window.session_sidebar.findChildren(QPushButton, "SessionRowButton")
     assert len(buttons) == 1
     assert "新问题" in buttons[0].text()
+
+
+def test_run_turn_refreshes_title_while_sidebar_is_on_skills(app, tmp_path):
+    class RecordingGuiChatSession(GuiChatSession):
+        async def run_turn(self, user_input: str):
+            self.current_session_id = self.session_store.start_session(user_input)
+            self.session_store.append_message(self.current_session_id, "user", user_input)
+            self.session_store.append_message(self.current_session_id, "assistant", "answer")
+            from lucode.gui.chat_session import GuiTurnResult
+
+            return GuiTurnResult(final_output="answer", execution_mode=self.settings.execution_mode)
+
+    workspace = _isolated_workspace(tmp_path)
+    session = RecordingGuiChatSession(workspace=workspace)
+    store = FakeSessionStore()
+    store.items = []
+    session.session_store = store
+    window = MainWindow(workspace=workspace, chat_session=session)
+    window.show()
+    app.processEvents()
+    window.session_sidebar.findChild(QPushButton, "SidebarTabSkills").click()
+    app.processEvents()
+
+    turn_id = window.turn_guard.start()
+    asyncio.run(window._run_turn(turn_id, "Fresh title"))
+    app.processEvents()
+
+    assert window.session_title_label.text() == "Fresh title"
+    assert window.session_sidebar.findChild(QPushButton, "SidebarTabSkills").isChecked()
 
 
 def test_sidebar_uses_history_facade_for_real_gui_session_store(app, tmp_path):

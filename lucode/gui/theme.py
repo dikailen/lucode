@@ -236,6 +236,70 @@ QPushButton#SidebarNewSessionButton:hover {
   border-color: $primary_hover;
 }
 
+QPushButton#SidebarTabChats,
+QPushButton#SidebarTabSkills,
+QPushButton#SidebarTabMcp {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: $radius_pill;
+  padding: 5px 10px;
+  color: $text_muted;
+}
+
+QPushButton#SidebarTabChats:hover,
+QPushButton#SidebarTabSkills:hover,
+QPushButton#SidebarTabMcp:hover {
+  color: $text;
+  background: $surface_raised;
+  border-color: $border_subtle;
+}
+
+QPushButton#SidebarTabChats:checked,
+QPushButton#SidebarTabSkills:checked,
+QPushButton#SidebarTabMcp:checked {
+  color: $text;
+  background: $user_surface;
+  border-color: $border;
+}
+
+QLabel#SkillPanelTitle,
+QLabel#McpPanelTitle {
+  color: $text_muted;
+  font-size: $font_size_small;
+  font-weight: 600;
+  padding: 2px 4px 4px 4px;
+}
+
+QFrame#SkillCardRow,
+QFrame#McpStatusRow {
+  background: $surface_raised;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_small;
+}
+
+QPushButton#SkillCardButton {
+  background: transparent;
+  border: none;
+  border-radius: $radius_small;
+  padding: 8px;
+  text-align: left;
+  color: $text;
+}
+
+QPushButton#SkillCardButton:hover {
+  background: $user_surface;
+}
+
+QLabel#McpName {
+  color: $text;
+}
+
+QLabel#McpStatus,
+QLabel#McpDetail {
+  color: $text_muted;
+  font-size: $font_size_small;
+}
+
 QFrame#ChatHeader {
   background: transparent;
   border: none;
