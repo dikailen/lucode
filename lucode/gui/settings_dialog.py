@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -111,13 +112,14 @@ class SettingsDialog(QDialog):
     query_refiner_toggled = Signal(bool)
     worker_pool_changed = Signal(list)
     provider_manager_requested = Signal()
+    custom_provider_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("SettingsDialog")
         self.setWindowTitle("设置")
         self.setModal(False)
-        self.resize(620, 520)
+        self.resize(760, 560)
 
         self._models: list[tuple[str, str]] = []
         self._role_models: dict[str, str] = {}
@@ -132,44 +134,82 @@ class SettingsDialog(QDialog):
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(12)
 
-        title = QLabel("设置")
+        title = QLabel("Settings")
         title.setObjectName("SettingsTitle")
         outer.addWidget(title)
 
-        top = QHBoxLayout()
-        top.setSpacing(12)
-        outer.addLayout(top)
+        body = QHBoxLayout()
+        body.setSpacing(14)
+        outer.addLayout(body, 1)
 
-        priv_label = QLabel("隐私模式")
-        priv_label.setObjectName("FieldLabel")
-        top.addWidget(priv_label)
+        nav = QFrame()
+        nav.setObjectName("SettingsNav")
+        nav_layout = QVBoxLayout(nav)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(6)
+        body.addWidget(nav)
+
+        self._tab_buttons: dict[str, QPushButton] = {}
+        for key, text in (
+            ("Models", "Models"),
+            ("Privacy", "Privacy"),
+            ("Providers", "Providers"),
+            ("Shortcuts", "Shortcuts"),
+            ("About", "About"),
+        ):
+            button = QPushButton(text)
+            button.setObjectName(f"SettingsTab{key}")
+            button.setCheckable(True)
+            button.clicked.connect(lambda _checked=False, page=key: self._select_page(page))
+            nav_layout.addWidget(button)
+            self._tab_buttons[key] = button
+        nav_layout.addStretch(1)
+
+        self.content_stack = QStackedWidget()
+        self.content_stack.setObjectName("SettingsContentStack")
+        body.addWidget(self.content_stack, 1)
+
+        self._pages: dict[str, QWidget] = {}
+        self._build_models_page()
+        self._build_privacy_page()
+        self._build_providers_page()
+        self._build_shortcuts_page()
+        self._build_about_page()
 
         self.privacy_combo = QComboBox()
         self.privacy_combo.setObjectName("PrivacyModeCombo")
         for key, text in privacy_mode_options():
             self.privacy_combo.addItem(text, key)
         self.privacy_combo.currentIndexChanged.connect(self._emit_privacy_mode)
-        top.addWidget(self.privacy_combo)
+        self._privacy_controls_layout.addWidget(self.privacy_combo)
 
         self.refiner_toggle = QPushButton("前置优化")
         self.refiner_toggle.setObjectName("QueryRefinerToggle")
         self.refiner_toggle.setCheckable(True)
         self.refiner_toggle.toggled.connect(self._on_refiner_toggled)
-        top.addWidget(self.refiner_toggle)
+        self._models_actions_layout.addWidget(self.refiner_toggle)
 
-        self.provider_manager_button = QPushButton("Models")
+        self.provider_manager_button = QPushButton("Manage providers")
         self.provider_manager_button.setObjectName("ProviderManagerButton")
         self.provider_manager_button.setToolTip("Manage providers, API keys, and available models")
         self.provider_manager_button.clicked.connect(self.provider_manager_requested.emit)
-        top.addWidget(self.provider_manager_button)
-        top.addStretch(1)
+        self._providers_actions_layout.addWidget(self.provider_manager_button)
+
+        self.custom_provider_button = QPushButton("Add custom provider")
+        self.custom_provider_button.setObjectName("CustomProviderButton")
+        self.custom_provider_button.setToolTip("Create an OpenAI-compatible proxy provider")
+        self.custom_provider_button.clicked.connect(self.custom_provider_requested.emit)
+        self._providers_actions_layout.addWidget(self.custom_provider_button)
+        self._providers_actions_layout.addStretch(1)
 
         self.roles_host = QFrame()
         self.roles_host.setObjectName("RolesHost")
         self._roles_layout = QVBoxLayout(self.roles_host)
         self._roles_layout.setContentsMargins(0, 0, 0, 0)
         self._roles_layout.setSpacing(6)
-        outer.addWidget(self.roles_host, 1)
+        self._models_page_layout.addWidget(self.roles_host, 1)
+
+        self._select_page("Models")
 
         footer = QHBoxLayout()
         footer.addStretch(1)
@@ -178,6 +218,86 @@ class SettingsDialog(QDialog):
         footer.addWidget(close_button)
         outer.addLayout(footer)
         self._building = False
+
+    def _build_models_page(self) -> None:
+        page, layout = self._new_page("Models", "Models")
+        description = QLabel("Configure the models used by each execution role.")
+        description.setObjectName("SettingsDescription")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        self._models_actions_layout = QHBoxLayout()
+        self._models_actions_layout.setSpacing(8)
+        layout.addLayout(self._models_actions_layout)
+        self._models_page_layout = layout
+        self._add_page("Models", page)
+
+    def _build_privacy_page(self) -> None:
+        page, layout = self._new_page("Privacy", "Privacy")
+        self.privacy_hint = QLabel("Offline mode prevents GUI provider discovery from calling upstream model APIs.")
+        self.privacy_hint.setObjectName("PrivacyModeHint")
+        self.privacy_hint.setWordWrap(True)
+        layout.addWidget(self.privacy_hint)
+        self._privacy_controls_layout = QHBoxLayout()
+        self._privacy_controls_layout.setSpacing(10)
+        label = QLabel("Privacy mode")
+        label.setObjectName("FieldLabel")
+        self._privacy_controls_layout.addWidget(label)
+        layout.addLayout(self._privacy_controls_layout)
+        layout.addStretch(1)
+        self._add_page("Privacy", page)
+
+    def _build_providers_page(self) -> None:
+        page, layout = self._new_page("Providers", "Providers")
+        description = QLabel("Connect API providers, configure keys, and add OpenAI-compatible proxy providers.")
+        description.setObjectName("SettingsDescription")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        self._providers_actions_layout = QHBoxLayout()
+        self._providers_actions_layout.setSpacing(8)
+        layout.addLayout(self._providers_actions_layout)
+        layout.addStretch(1)
+        self._add_page("Providers", page)
+
+    def _build_shortcuts_page(self) -> None:
+        page, layout = self._new_page("Shortcuts", "Shortcuts")
+        for text in ("Enter: send", "Shift+Enter: new line", "Stop: cancel current turn"):
+            item = QLabel(text)
+            item.setObjectName("SettingsDescription")
+            layout.addWidget(item)
+        layout.addStretch(1)
+        self._add_page("Shortcuts", page)
+
+    def _build_about_page(self) -> None:
+        page, layout = self._new_page("About", "About")
+        about = QLabel("Lucode desktop workbench")
+        about.setObjectName("SettingsDescription")
+        about.setWordWrap(True)
+        layout.addWidget(about)
+        layout.addStretch(1)
+        self._add_page("About", page)
+
+    def _new_page(self, key: str, title_text: str) -> tuple[QWidget, QVBoxLayout]:
+        page = QWidget()
+        page.setObjectName(f"SettingsPage{key}")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        title = QLabel(title_text)
+        title.setObjectName(f"SettingsPageTitle{key}")
+        layout.addWidget(title)
+        return page, layout
+
+    def _add_page(self, key: str, page: QWidget) -> None:
+        self._pages[key] = page
+        self.content_stack.addWidget(page)
+
+    def _select_page(self, key: str) -> None:
+        page = self._pages.get(key)
+        if page is None:
+            return
+        self.content_stack.setCurrentWidget(page)
+        for tab_key, button in self._tab_buttons.items():
+            button.setChecked(tab_key == key)
 
     def set_models(self, models: list[tuple[str, str]]) -> None:
         self._models = list(models)
@@ -212,6 +332,7 @@ class SettingsDialog(QDialog):
         self.privacy_combo.setEnabled(enabled)
         self.refiner_toggle.setEnabled(enabled)
         self.provider_manager_button.setEnabled(enabled)
+        self.custom_provider_button.setEnabled(enabled)
         for row in self._role_rows.values():
             row.combo.setEnabled(enabled)
         if self._pool_row is not None:

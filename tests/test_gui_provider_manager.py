@@ -174,11 +174,17 @@ def test_provider_manager_delete_removes_provider_and_key(tmp_path, app):
     assert "deepseek" not in load_auth(user_home=home).get("providers", {})
 
 
-def test_control_bar_exposes_provider_manager_entry(app):
-    from lucode.gui.control_panel import ControlBar
+def test_settings_dialog_exposes_provider_manager_entry(app):
+    from lucode.gui.settings_dialog import SettingsDialog
 
-    bar = ControlBar()
+    dialog = SettingsDialog()
+    emitted = []
+    dialog.provider_manager_requested.connect(lambda: emitted.append(True))
 
-    assert hasattr(bar, "provider_manager_requested")
-    assert isinstance(bar.provider_manager_button, QPushButton)
-    assert bar.provider_manager_button.text()
+    assert hasattr(dialog, "provider_manager_requested")
+    assert isinstance(dialog.provider_manager_button, QPushButton)
+    assert dialog.provider_manager_button.text()
+
+    dialog.provider_manager_button.click()
+
+    assert emitted == [True]

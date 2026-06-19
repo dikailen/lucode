@@ -11,7 +11,7 @@ pytestmark = pytest.mark.skipif(not HAS_PYSIDE, reason="PySide6 is not installed
 if HAS_PYSIDE:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    from PySide6.QtWidgets import QApplication, QComboBox, QPushButton  # noqa: E402
+    from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QStackedWidget  # noqa: E402
 
     from lucode.gui.chat_session import GuiChatSession  # noqa: E402
     from lucode.gui.control_panel import ControlBar  # noqa: E402
@@ -56,6 +56,61 @@ def test_settings_dialog_contains_migrated_controls(app, tmp_path):
     assert dialog.findChild(QComboBox, "PrivacyModeCombo") is not None
     assert dialog.findChild(QPushButton, "QueryRefinerToggle") is not None
     assert dialog.findChild(QPushButton, "ProviderManagerButton") is not None
+
+
+def test_settings_dialog_has_workbench_tabs(app):
+    dialog = SettingsDialog(parent=None)
+
+    assert dialog.findChild(QStackedWidget, "SettingsContentStack") is not None
+    for tab_name in ("Models", "Privacy", "Providers", "Shortcuts", "About"):
+        tab = dialog.findChild(QPushButton, f"SettingsTab{tab_name}")
+        page = dialog.findChild(QLabel, f"SettingsPageTitle{tab_name}")
+        assert tab is not None
+        assert page is not None
+
+
+def test_settings_dialog_provider_page_exposes_manager_and_custom_provider(app):
+    dialog = SettingsDialog(parent=None)
+    emitted = []
+    dialog.provider_manager_requested.connect(lambda: emitted.append("manager"))
+    dialog.custom_provider_requested.connect(lambda: emitted.append("custom"))
+
+    provider_tab = dialog.findChild(QPushButton, "SettingsTabProviders")
+    provider_tab.click()
+    app.processEvents()
+
+    manager_button = dialog.findChild(QPushButton, "ProviderManagerButton")
+    custom_button = dialog.findChild(QPushButton, "CustomProviderButton")
+
+    assert manager_button is not None
+    assert custom_button is not None
+
+    manager_button.click()
+    custom_button.click()
+
+    assert emitted == ["manager", "custom"]
+
+
+def test_settings_dialog_privacy_page_keeps_offline_control_and_hint(app):
+    dialog = SettingsDialog(parent=None)
+    dialog.set_initial(
+        execution_mode="solo",
+        privacy_mode="offline",
+        role_models={"executor": ""},
+        query_refiner_enabled=False,
+        worker_pool=[],
+    )
+
+    privacy_tab = dialog.findChild(QPushButton, "SettingsTabPrivacy")
+    privacy_tab.click()
+    app.processEvents()
+
+    privacy_combo = dialog.findChild(QComboBox, "PrivacyModeCombo")
+    hint = dialog.findChild(QLabel, "PrivacyModeHint")
+
+    assert privacy_combo.currentData() == "offline"
+    assert hint is not None
+    assert "offline" in hint.text().lower() or "离线" in hint.text()
 
 
 def test_settings_dialog_signals_still_update_chat_session(app, tmp_path):

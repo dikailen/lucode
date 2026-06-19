@@ -238,6 +238,7 @@ class MainWindow(QMainWindow):
         self.settings_dialog.query_refiner_toggled.connect(self.chat_session.set_query_refiner_enabled)
         self.settings_dialog.worker_pool_changed.connect(self.chat_session.set_allowed_worker_models)
         self.settings_dialog.provider_manager_requested.connect(self._open_provider_manager)
+        self.settings_dialog.custom_provider_requested.connect(self._open_custom_provider_manager)
 
     def _open_settings_dialog(self) -> None:
         self.settings_dialog.show()
@@ -252,6 +253,17 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         dialog.providers_changed.connect(self._refresh_configured_models)
+        dialog.exec()
+
+    def _open_custom_provider_manager(self) -> None:
+        dialog = ProviderManagerDialog(
+            workspace_root=self.chat_session.workspace_context.workspace_root,
+            user_home=self.chat_session.workspace_context.user_home,
+            privacy_mode=self.chat_session.settings.privacy_mode,
+            parent=self,
+        )
+        dialog.providers_changed.connect(self._refresh_configured_models)
+        dialog.start_custom_provider()
         dialog.exec()
 
     def _refresh_configured_models(self) -> None:

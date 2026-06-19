@@ -625,6 +625,60 @@ QDialog#SettingsDialog QLabel#SettingsTitle {
   font-weight: 600;
 }
 
+QDialog#SettingsDialog QFrame#SettingsNav {
+  background: transparent;
+  border: none;
+  min-width: 140px;
+}
+
+QDialog#SettingsDialog QPushButton#SettingsTabModels,
+QDialog#SettingsDialog QPushButton#SettingsTabPrivacy,
+QDialog#SettingsDialog QPushButton#SettingsTabProviders,
+QDialog#SettingsDialog QPushButton#SettingsTabShortcuts,
+QDialog#SettingsDialog QPushButton#SettingsTabAbout {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: $radius_small;
+  padding: 8px 10px;
+  text-align: left;
+  color: $text_muted;
+}
+
+QDialog#SettingsDialog QPushButton#SettingsTabModels:hover,
+QDialog#SettingsDialog QPushButton#SettingsTabPrivacy:hover,
+QDialog#SettingsDialog QPushButton#SettingsTabProviders:hover,
+QDialog#SettingsDialog QPushButton#SettingsTabShortcuts:hover,
+QDialog#SettingsDialog QPushButton#SettingsTabAbout:hover {
+  background: $surface_raised;
+  border-color: $border_subtle;
+  color: $text;
+}
+
+QDialog#SettingsDialog QPushButton#SettingsTabModels:checked,
+QDialog#SettingsDialog QPushButton#SettingsTabPrivacy:checked,
+QDialog#SettingsDialog QPushButton#SettingsTabProviders:checked,
+QDialog#SettingsDialog QPushButton#SettingsTabShortcuts:checked,
+QDialog#SettingsDialog QPushButton#SettingsTabAbout:checked {
+  background: $user_surface;
+  border-color: $border;
+  color: $text;
+}
+
+QDialog#SettingsDialog QLabel#SettingsPageTitleModels,
+QDialog#SettingsDialog QLabel#SettingsPageTitlePrivacy,
+QDialog#SettingsDialog QLabel#SettingsPageTitleProviders,
+QDialog#SettingsDialog QLabel#SettingsPageTitleShortcuts,
+QDialog#SettingsDialog QLabel#SettingsPageTitleAbout {
+  color: $text;
+  font-weight: 600;
+}
+
+QDialog#SettingsDialog QLabel#SettingsDescription,
+QDialog#SettingsDialog QLabel#PrivacyModeHint {
+  color: $text_muted;
+  font-size: $font_size_small;
+}
+
 QDialog#SettingsDialog QLabel#FieldLabel {
   color: $text_muted;
   font-size: $font_size_small;
