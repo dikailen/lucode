@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from lucode.gui.theme import TOKENS
@@ -498,6 +498,58 @@ class AnswerBlock(QFrame):
         if len(value) > MAX_MESSAGE_CHARS:
             value = value[:MAX_MESSAGE_CHARS] + "\n\n[Content truncated]"
         self.content_label.setText(value)
+
+
+class ErrorRecoveryPanel(QFrame):
+    retry_requested = Signal()
+    switch_model_requested = Signal()
+    provider_doctor_requested = Signal()
+
+    def __init__(self, reason: str = "", parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("ErrorRecoveryPanel")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        title = QLabel("Run failed")
+        title.setObjectName("RunFailedTitle")
+        title.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(title)
+
+        self.reason_label = QLabel()
+        self.reason_label.setObjectName("RunFailedReason")
+        self.reason_label.setWordWrap(True)
+        self.reason_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.reason_label)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        layout.addLayout(action_row)
+
+        retry = QPushButton("Retry")
+        retry.setObjectName("RunFailedRetryButton")
+        retry.clicked.connect(self.retry_requested.emit)
+        action_row.addWidget(retry)
+
+        switch_model = QPushButton("Switch model")
+        switch_model.setObjectName("RunFailedSwitchModelButton")
+        switch_model.clicked.connect(self.switch_model_requested.emit)
+        action_row.addWidget(switch_model)
+
+        provider_doctor = QPushButton("Open Provider doctor")
+        provider_doctor.setObjectName("RunFailedProviderDoctorButton")
+        provider_doctor.clicked.connect(self.provider_doctor_requested.emit)
+        action_row.addWidget(provider_doctor)
+        action_row.addStretch(1)
+
+        self.set_reason(reason)
+
+    def set_reason(self, reason: str) -> None:
+        value = str(reason or "").strip() or "The turn failed before a detailed reason was available."
+        if len(value) > 800:
+            value = value[:800].rstrip() + "\n... [truncated]"
+        self.reason_label.setText(value)
 
 
 class ThinkingIndicator(QFrame):

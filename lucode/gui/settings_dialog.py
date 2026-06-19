@@ -299,6 +299,9 @@ class SettingsDialog(QDialog):
         for tab_key, button in self._tab_buttons.items():
             button.setChecked(tab_key == key)
 
+    def select_page(self, key: str) -> None:
+        self._select_page(str(key or ""))
+
     def set_models(self, models: list[tuple[str, str]]) -> None:
         self._models = list(models)
         self._rebuild_role_rows()

@@ -482,6 +482,34 @@ QLabel#AnswerText {
   line-height: 150%;
 }
 
+QFrame#ErrorRecoveryPanel {
+  background: transparent;
+  border: none;
+}
+
+QLabel#RunFailedTitle {
+  color: $danger;
+  font-weight: 600;
+}
+
+QLabel#RunFailedReason {
+  color: $text_muted;
+  font-size: $font_size_small;
+}
+
+QPushButton#RunFailedRetryButton {
+  background: $surface_raised;
+  border-color: $primary;
+  color: $primary;
+}
+
+QPushButton#RunFailedSwitchModelButton,
+QPushButton#RunFailedProviderDoctorButton {
+  background: $surface;
+  border-color: $border_subtle;
+  color: $text;
+}
+
 QFrame#ThinkingIndicator {
   background: $surface;
   border: 1px solid $border;

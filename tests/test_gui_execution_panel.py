@@ -7,9 +7,9 @@ import pytest
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
-from lucode.gui.widgets import WorkArea, action_label_from_event  # noqa: E402
+from lucode.gui.widgets import ErrorRecoveryPanel, WorkArea, action_label_from_event  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -90,3 +90,19 @@ def test_worker_delta_is_consumed_by_work_area_not_answer():
 
     assert consumed
     assert area.worker_nodes["task_1"].latest_label.text() == "worker progress"
+
+
+def test_error_recovery_panel_shows_reason_and_actions(app):
+    panel = ErrorRecoveryPanel("provider request timed out")
+
+    assert panel.findChild(QLabel, "RunFailedTitle").text() == "Run failed"
+    assert "provider request timed out" in panel.findChild(QLabel, "RunFailedReason").text()
+
+    buttons = {
+        button.objectName(): button.text()
+        for button in panel.findChildren(QPushButton)
+        if button.objectName().startswith("RunFailed")
+    }
+    assert buttons["RunFailedRetryButton"] == "Retry"
+    assert buttons["RunFailedSwitchModelButton"] == "Switch model"
+    assert buttons["RunFailedProviderDoctorButton"] == "Open Provider doctor"

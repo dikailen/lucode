@@ -31,7 +31,7 @@ from lucode.gui.session_sidebar import SessionSidebar
 from lucode.gui.settings_dialog import SettingsDialog
 from lucode.gui.stream_routing import classify_gui_stream_event
 from lucode.gui.turn_state import TurnStateGuard
-from lucode.gui.widgets import AnswerBlock, MessageBubble, ThinkingIndicator, WorkArea, status_style
+from lucode.gui.widgets import ErrorRecoveryPanel, AnswerBlock, MessageBubble, ThinkingIndicator, WorkArea, status_style
 
 
 WORKER_EVENTS = {"TaskStarted", "TaskCompleted", "TaskFailed", "ToolInvoked", "FastPathUsed"}
@@ -94,6 +94,9 @@ class MainWindow(QMainWindow):
         self._answer_stream = AnswerStreamState()
         self._bubbles: list[MessageBubble] = []
         self._thinking_indicators: list[ThinkingIndicator] = []
+        self._error_panel_row: QWidget | None = None
+        self._error_panel: ErrorRecoveryPanel | None = None
+        self._last_failed_prompt = ""
         self.work_task: asyncio.Task | None = None
         self.work_task_id = 0
         self._turn_start: float = 0.0
@@ -328,6 +331,8 @@ class MainWindow(QMainWindow):
         if not text or not self.turn_guard.can_start_new_turn:
             return
         self.input_box.clear()
+        self._clear_error_panel()
+        self._last_failed_prompt = text
         self.add_message("user", text)
         turn_id = self.turn_guard.start()
         self.work_area = None
@@ -411,6 +416,45 @@ class MainWindow(QMainWindow):
         self.message_layout.addWidget(row)
         self._scroll_to_bottom()
         return block
+
+    def show_failed_state(self, reason: str) -> ErrorRecoveryPanel:
+        self._clear_thinking()
+        self._hide_empty_state()
+        self._clear_error_panel()
+        panel = ErrorRecoveryPanel(reason)
+        panel.retry_requested.connect(self._prefill_retry_prompt)
+        panel.switch_model_requested.connect(self._open_settings_models_page)
+        panel.provider_doctor_requested.connect(self._open_provider_manager)
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(panel, 1)
+        self.message_layout.addWidget(row)
+        self._error_panel = panel
+        self._error_panel_row = row
+        self.set_status("failed", "运行失败")
+        self.set_running(False)
+        self._scroll_to_bottom()
+        return panel
+
+    def _clear_error_panel(self) -> None:
+        if self._error_panel_row is not None:
+            self.message_layout.removeWidget(self._error_panel_row)
+            self._error_panel_row.deleteLater()
+        self._error_panel_row = None
+        self._error_panel = None
+
+    def _prefill_retry_prompt(self) -> None:
+        prompt = str(self._last_failed_prompt or "").strip()
+        if prompt:
+            self.input_box.setPlainText(prompt)
+            self.input_box.setFocus()
+        self.set_status("idle", "已回填失败请求")
+
+    def _open_settings_models_page(self) -> None:
+        if hasattr(self.settings_dialog, "select_page"):
+            self.settings_dialog.select_page("Models")
+        self._open_settings_dialog()
 
     def _append_stream_answer(self, text: str) -> None:
         if not text:
@@ -543,7 +587,7 @@ class MainWindow(QMainWindow):
             if self.turn_guard.is_running and not self.turn_guard.is_stopping:
                 payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
                 if str(payload.get("status") or "") == "failed":
-                    self.set_status("failed", "本轮失败")
+                    self.show_failed_state(_event_text(event) or "The turn failed.")
                 else:
                     self.set_status("idle", "本轮完成")
             return
@@ -564,14 +608,14 @@ class MainWindow(QMainWindow):
             result = await self.chat_session.run_turn(text)
             if self._closing or not self.turn_guard.is_current(turn_id):
                 return
-            if result.final_output:
+            if result.final_output and not result.failed:
                 if not self._finalize_stream_answer(result.final_output):
                     self.add_answer_block(result.final_output)
             self.mode = result.execution_mode or self.mode
             if result.stopped:
                 self.set_status("stopped", "已停止")
             elif result.failed:
-                self.set_status("failed", "失败")
+                self.show_failed_state(result.final_output)
             else:
                 self.set_status("idle", "本轮完成")
             self.session_sidebar.refresh()
@@ -609,6 +653,8 @@ class MainWindow(QMainWindow):
         self._answer_stream.reset()
         self._bubbles = []
         self._thinking_indicators = []
+        self._error_panel_row = None
+        self._error_panel = None
         while self.message_layout.count():
             item = self.message_layout.takeAt(0)
             widget = item.widget()
