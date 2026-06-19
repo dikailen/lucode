@@ -555,6 +555,20 @@ QDialog#ApprovalDialog QLabel#ApprovalTitle {
   font-size: $font_size_small;
 }
 
+QDialog#ApprovalDialog QLabel#ApprovalPrompt {
+  color: $text;
+}
+
+QDialog#ApprovalDialog QPlainTextEdit#ApprovalDetails {
+  background: $surface_raised;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_small;
+  padding: $space_2;
+  color: $text;
+  font-family: $font_mono;
+  font-size: $font_size_small;
+}
+
 QDialog#ProviderManagerDialog {
   background: $surface;
   border: 1px solid $border;
@@ -645,18 +659,24 @@ QDialog#ProviderManagerDialog QCheckBox#ProviderModelCheck {
   background: transparent;
 }
 
-QPushButton#ApprovalAllow {
+QPushButton#ApprovalAllowOnce {
   background: $primary;
   border-color: $primary;
   color: $bg;
 }
 
-QPushButton#ApprovalAllow:hover {
+QPushButton#ApprovalAllowOnce:hover {
   background: $primary_hover;
   border-color: $primary_hover;
 }
 
-QPushButton#ApprovalDeny {
+QPushButton#ApprovalAllowSession {
+  background: $user_surface;
+  border-color: $border;
+  color: $text;
+}
+
+QPushButton#ApprovalReject {
   color: $danger;
 }
 

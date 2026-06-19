@@ -6,6 +6,7 @@ from lucode.gui.approval import (
     APPROVAL_DECISIONS,
     ApprovalRequestContext,
     LatestApprovalContext,
+    _render_context_details,
     safe_resolve_future,
 )
 from runtime.hooks.event_bridge import emit_tool_event_bridge
@@ -74,6 +75,39 @@ def test_safe_resolve_future_sets_pending_future():
 
     assert resolved is True
     assert result == "session"
+
+
+def test_approval_context_details_show_file_lines_and_code_preview():
+    context = ApprovalRequestContext(
+        prompt="Approve?",
+        tool_name="edit_file",
+        tool_rule="workspace_edit",
+        arguments_summary={
+            "path": "loader.py",
+            "content": "def load_data():\n    return []\n",
+            "mode": "replace",
+        },
+        files_touched=[
+            {
+                "path": "loader.py",
+                "access": "write",
+                "line_start": 1,
+                "line_end": 12,
+            }
+        ],
+        risk={"risk_level": "medium"},
+    )
+
+    details = _render_context_details(context)
+
+    assert "Tool: edit_file" in details
+    assert "Rule: workspace_edit" in details
+    assert "File: loader.py" in details
+    assert "Access: write" in details
+    assert "Lines: 1-12" in details
+    assert "Code preview:" in details
+    assert "def load_data():" in details
+    assert "mode: replace" in details
 
 
 def test_tool_approval_event_payload_includes_requester_task_id():

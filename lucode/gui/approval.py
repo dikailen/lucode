@@ -5,6 +5,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+_CODE_PREVIEW_KEYS = ("content", "code", "patch", "diff", "preview", "new_content", "replacement")
+_PREVIEW_LIMIT = 2000
+
+
 @dataclass(frozen=True)
 class ApprovalDecisions:
     once: str = "y"
@@ -130,25 +134,28 @@ class ApprovalDialog(_qt_base_dialog()):
 
     def _build(self, context: ApprovalRequestContext) -> None:
         _, QtWidgets = _qt_modules()
-        self.setWindowTitle("Tool approval")
+        self.setObjectName("ApprovalDialog")
+        self.setWindowTitle("Approval required")
         self.setModal(False)
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(620)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
-        title = QtWidgets.QLabel("Approve tool call")
-        title.setObjectName("RoleLabel")
+        title = QtWidgets.QLabel("Approval required")
+        title.setObjectName("ApprovalTitle")
         layout.addWidget(title)
 
         prompt = QtWidgets.QLabel(context.prompt or "Approve this tool call?")
+        prompt.setObjectName("ApprovalPrompt")
         prompt.setWordWrap(True)
         layout.addWidget(prompt)
 
         details = QtWidgets.QPlainTextEdit(_render_context_details(context))
+        details.setObjectName("ApprovalDetails")
         details.setReadOnly(True)
-        details.setMinimumHeight(180)
+        details.setMinimumHeight(220)
         layout.addWidget(details)
 
         button_row = QtWidgets.QHBoxLayout()
@@ -156,26 +163,24 @@ class ApprovalDialog(_qt_base_dialog()):
         layout.addLayout(button_row)
 
         once = QtWidgets.QPushButton("Allow once")
-        once.setObjectName("SendButton")
+        once.setObjectName("ApprovalAllowOnce")
         once.clicked.connect(lambda: self._decide(APPROVAL_DECISIONS.once))
         button_row.addWidget(once)
 
-        session = QtWidgets.QPushButton("Allow tool")
+        session = QtWidgets.QPushButton("Allow session")
+        session.setObjectName("ApprovalAllowSession")
         session.clicked.connect(lambda: self._decide(APPROVAL_DECISIONS.session))
         button_row.addWidget(session)
 
-        rule = QtWidgets.QPushButton("Allow type")
-        rule.clicked.connect(lambda: self._decide(APPROVAL_DECISIONS.rule))
-        button_row.addWidget(rule)
-
-        edit = QtWidgets.QPushButton("Edit instruction")
-        edit.clicked.connect(lambda: self._decide(APPROVAL_DECISIONS.edit))
-        button_row.addWidget(edit)
-
-        deny = QtWidgets.QPushButton("Deny")
-        deny.setObjectName("StopButton")
+        deny = QtWidgets.QPushButton("Reject")
+        deny.setObjectName("ApprovalReject")
         deny.clicked.connect(lambda: self._decide(APPROVAL_DECISIONS.deny))
         button_row.addWidget(deny)
+
+        edit = QtWidgets.QPushButton("Edit instruction")
+        edit.setObjectName("ApprovalEditInstruction")
+        edit.clicked.connect(lambda: self._decide(APPROVAL_DECISIONS.edit))
+        button_row.addWidget(edit)
 
     def _decide(self, value: str) -> None:
         self._closed_by_decision = True
@@ -201,13 +206,28 @@ def _render_context_details(context: ApprovalRequestContext) -> str:
             path = str(item.get("path") or "").strip()
             access = str(item.get("access") or "").strip()
             if path:
-                lines.append(f"- {path}" + (f" ({access})" if access else ""))
+                lines.append(f"- File: {path}")
+                if access:
+                    lines.append(f"  Access: {access}")
+                line_range = _format_line_range(item)
+                if line_range:
+                    lines.append(f"  {line_range}")
     if context.arguments_summary:
-        lines.append("")
-        lines.append("Arguments summary:")
-        for key in sorted(context.arguments_summary):
-            value = context.arguments_summary.get(key)
-            lines.append(f"- {key}: {_format_summary_value(value)}")
+        code_preview = _extract_code_preview(context.arguments_summary)
+        normal_keys = [key for key in sorted(context.arguments_summary) if key not in code_preview]
+        if normal_keys:
+            lines.append("")
+            lines.append("Arguments summary:")
+            for key in normal_keys:
+                value = context.arguments_summary.get(key)
+                lines.append(f"- {key}: {_format_summary_value(value)}")
+        if code_preview:
+            lines.append("")
+            lines.append("Code preview:")
+            for key in sorted(code_preview):
+                value = _truncate_preview(str(code_preview[key]))
+                lines.append(f"{key}:")
+                lines.append(value)
     if context.risk:
         lines.append("")
         lines.append("Risk:")
@@ -225,4 +245,42 @@ def _format_summary_value(value: Any) -> str:
     if isinstance(value, dict):
         return ", ".join(f"{key}={value[key]}" for key in sorted(value))
     return str(value)
+
+
+def _format_line_range(item: dict[str, Any]) -> str:
+    explicit = item.get("lines") or item.get("line_range")
+    if explicit not in (None, ""):
+        return f"Lines: {explicit}"
+    start = (
+        item.get("line_start")
+        or item.get("start_line")
+        or item.get("from_line")
+        or item.get("line")
+        or item.get("line_number")
+    )
+    end = item.get("line_end") or item.get("end_line") or item.get("to_line")
+    if start in (None, ""):
+        return ""
+    if end in (None, "") or str(end) == str(start):
+        return f"Line: {start}"
+    return f"Lines: {start}-{end}"
+
+
+def _extract_code_preview(arguments: dict[str, Any]) -> dict[str, str]:
+    preview: dict[str, str] = {}
+    for key in _CODE_PREVIEW_KEYS:
+        value = arguments.get(key)
+        if value in (None, ""):
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            preview[key] = str(value)
+        else:
+            preview[key] = _format_summary_value(value)
+    return preview
+
+
+def _truncate_preview(value: str) -> str:
+    if len(value) <= _PREVIEW_LIMIT:
+        return value
+    return value[:_PREVIEW_LIMIT].rstrip() + "\n... [preview truncated]"
 
