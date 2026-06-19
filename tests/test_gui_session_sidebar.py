@@ -170,7 +170,7 @@ def test_sidebar_switches_between_chats_skills_and_mcp(app):
     app.processEvents()
 
     assert sidebar.findChild(QPushButton, "SidebarTabSkills").isChecked()
-    assert sidebar.findChild(QLabel, "SkillPanelTitle").text() == "Skill library"
+    assert sidebar.findChild(QLabel, "SkillPanelTitle").text() == "技能库"
     skill_cards = sidebar.findChildren(QPushButton, "SkillCardButton")
     assert [button.property("skill_id") for button in skill_cards[:4]] == [
         "code_engineer",
@@ -183,11 +183,11 @@ def test_sidebar_switches_between_chats_skills_and_mcp(app):
     app.processEvents()
 
     assert sidebar.findChild(QPushButton, "SidebarTabMcp").isChecked()
-    assert sidebar.findChild(QLabel, "McpPanelTitle").text() == "MCP servers"
+    assert sidebar.findChild(QLabel, "McpPanelTitle").text() == "MCP 服务"
     mcp_rows = sidebar.findChildren(QFrame, "McpStatusRow")
     statuses = {row.property("mcp_id"): row.property("status") for row in mcp_rows}
-    assert statuses["filesystem"] == "Connected"
-    assert statuses["image_draw"] == "Offline"
+    assert statuses["filesystem"] == "已连接"
+    assert statuses["image_draw"] == "离线"
 
     sidebar.findChild(QPushButton, "SidebarTabChats").click()
     app.processEvents()

@@ -53,7 +53,7 @@ class ChatInput(QPlainTextEdit):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setPlaceholderText("输入消息，Enter 发送，Shift+Enter 换行")
+        self.setPlaceholderText("输入消息，回车发送，Shift+回车换行")
         self.setFixedHeight(82)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -587,7 +587,7 @@ class MainWindow(QMainWindow):
             if self.turn_guard.is_running and not self.turn_guard.is_stopping:
                 payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
                 if str(payload.get("status") or "") == "failed":
-                    self.show_failed_state(_event_text(event) or "The turn failed.")
+                    self.show_failed_state(_event_text(event) or "本轮运行失败。")
                 else:
                     self.set_status("idle", "本轮完成")
             return

@@ -78,7 +78,7 @@ class ProviderManagerDialog(QDialog):
         layout.setSpacing(12)
 
         header = QHBoxLayout()
-        title = QLabel("已接入 Provider")
+        title = QLabel("已接入服务商")
         title.setObjectName("ProviderManagerTitle")
         header.addWidget(title)
         header.addStretch(1)
@@ -110,32 +110,32 @@ class ProviderManagerDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        self.form_title = QLabel("添加 Provider")
+        self.form_title = QLabel("添加服务商")
         self.form_title.setObjectName("ProviderManagerTitle")
         layout.addWidget(self.form_title)
 
         self.provider_combo = QComboBox()
         self._populate_provider_combo()
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
-        layout.addLayout(self._field_row("Provider", self.provider_combo))
+        layout.addLayout(self._field_row("服务商", self.provider_combo))
 
         self.custom_provider_id_edit = QLineEdit()
         self.custom_provider_id_edit.setPlaceholderText("my_proxy")
         self.custom_provider_id_edit.textChanged.connect(lambda _text: self._on_provider_changed())
-        layout.addLayout(self._field_row("provider_id", self.custom_provider_id_edit))
+        layout.addLayout(self._field_row("服务商编号", self.custom_provider_id_edit))
 
         self.base_url_edit = QLineEdit()
         self.base_url_edit.setPlaceholderText("https://api.example.com/v1")
-        layout.addLayout(self._field_row("base_url", self.base_url_edit))
+        layout.addLayout(self._field_row("接口地址", self.base_url_edit))
 
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.Password)
-        self.api_key_edit.setPlaceholderText("编辑已有 Provider 时留空表示不修改 key")
-        layout.addLayout(self._field_row("api_key", self.api_key_edit))
+        self.api_key_edit.setPlaceholderText("编辑已有服务商时留空表示不修改密钥")
+        layout.addLayout(self._field_row("API 密钥", self.api_key_edit))
 
         self.homepage_edit = QLineEdit()
         self.homepage_edit.setPlaceholderText("https://example.com")
-        layout.addLayout(self._field_row("homepage", self.homepage_edit))
+        layout.addLayout(self._field_row("官网地址", self.homepage_edit))
 
         action_row = QHBoxLayout()
         self.fetch_button = QPushButton("获取模型")
@@ -232,7 +232,7 @@ class ProviderManagerDialog(QDialog):
         config = load_lucode_config(workspace_root=self.workspace_root)
         providers = config.get("provider") or {}
         if not providers:
-            empty = QLabel("还没有接入任何 Provider。")
+            empty = QLabel("还没有接入任何服务商。")
             empty.setObjectName("ProviderEmpty")
             self.provider_list_layout.addWidget(empty)
             self.provider_list_layout.addStretch(1)
@@ -256,7 +256,7 @@ class ProviderManagerDialog(QDialog):
         layout.addWidget(name)
 
         models = [str(item) for item in provider_config.get("models") or [] if str(item).strip()]
-        key_state = "本地" if provider_config.get("local") else ("已配置 key" if provider_has_api_key(provider_id, self.user_home) else "未配置 key")
+        key_state = "本地" if provider_config.get("local") else ("已配置密钥" if provider_has_api_key(provider_id, self.user_home) else "未配置密钥")
         detail = QLabel(f"{key_state} · {len(models)} 模型")
         detail.setObjectName("ProviderDetail")
         layout.addWidget(detail)
@@ -274,7 +274,7 @@ class ProviderManagerDialog(QDialog):
     def start_add(self) -> None:
         self._mode = "add"
         self._editing_provider_id = ""
-        self.form_title.setText("添加 Provider")
+        self.form_title.setText("添加服务商")
         self._populate_provider_combo()
         if self.provider_combo.currentData() == CUSTOM_PROVIDER_SENTINEL and self.provider_combo.count() > 1:
             self.provider_combo.setCurrentIndex(1)
@@ -312,12 +312,12 @@ class ProviderManagerDialog(QDialog):
         config = load_lucode_config(workspace_root=self.workspace_root)
         provider_config = config.get("provider", {}).get(provider_id)
         if not isinstance(provider_config, dict):
-            self.status_label.setText(f"未找到 Provider：{provider_id}")
+            self.status_label.setText(f"未找到服务商：{provider_id}")
             return
 
         self._mode = "edit"
         self._editing_provider_id = provider_id
-        self.form_title.setText("编辑 Provider")
+        self.form_title.setText("编辑服务商")
         self._populate_provider_combo()
         idx = self.provider_combo.findData(provider_id)
         if idx >= 0:
@@ -344,7 +344,7 @@ class ProviderManagerDialog(QDialog):
         try:
             provider_id = self._current_provider_id()
         except ValueError:
-            self.status_label.setText("请先填写 provider_id。")
+            self.status_label.setText("请先填写服务商编号。")
             return
         base_url = self.base_url_edit.text().strip()
         api_key = self.api_key_edit.text().strip()
@@ -354,10 +354,10 @@ class ProviderManagerDialog(QDialog):
             self.status_label.setText("离线隐私模式下不会请求上游模型列表，可手动输入模型名。")
             return
         if not base_url:
-            self.status_label.setText("请先填写 base_url。")
+            self.status_label.setText("请先填写接口地址。")
             return
         if backend_type != "ollama" and not api_key and not provider_info.get("local"):
-            self.status_label.setText("请先填写 api_key。")
+            self.status_label.setText("请先填写 API 密钥。")
             return
 
         result = fetch_upstream_models(base_url, api_key, backend_type=backend_type)
@@ -374,7 +374,7 @@ class ProviderManagerDialog(QDialog):
         try:
             provider_id = self._current_provider_id()
         except ValueError:
-            self.status_label.setText("请先填写 provider_id。")
+            self.status_label.setText("请先填写服务商编号。")
             return False
         selected = self.selected_models() if self._model_checks else self._manual_models()
         if not selected:
@@ -431,8 +431,8 @@ class ProviderManagerDialog(QDialog):
         if not confirm:
             result = QMessageBox.question(
                 self,
-                "删除 Provider",
-                "删除后会同时移除该 Provider 的模型配置和 API key。确认删除吗？",
+                "删除服务商",
+                "删除后会同时移除该服务商的模型配置和 API 密钥。确认删除吗？",
             )
             if result != QMessageBox.Yes:
                 return False

@@ -10,10 +10,10 @@ MAX_MESSAGE_CHARS = 20000
 
 
 ROUTE_LABELS_ZH = {
-    "multi_agent": "team",
-    "single_agent": "single agent",
-    "direct_answer": "direct answer",
-    "clarify": "clarify",
+    "multi_agent": "团队执行",
+    "single_agent": "单 Agent",
+    "direct_answer": "直接回答",
+    "clarify": "澄清问题",
 }
 
 
@@ -78,17 +78,17 @@ class MessageBubble(QFrame):
         value = str(text or "")
         self._truncated = len(value) > MAX_MESSAGE_CHARS
         if self._truncated:
-            value = value[:MAX_MESSAGE_CHARS] + "\n\n[Content truncated]"
+            value = value[:MAX_MESSAGE_CHARS] + "\n\n[内容已截断]"
         self._text = value
         self.content_label.setText(value)
         self._resize_to_content()
 
 
 STATUS_LABELS_ZH = {
-    "waiting": "Waiting",
-    "running": "Running",
-    "completed": "Completed",
-    "failed": "Failed",
+    "waiting": "等待中",
+    "running": "运行中",
+    "completed": "已完成",
+    "failed": "失败",
 }
 
 STATUS_TOKEN = {
@@ -121,7 +121,7 @@ def _group_by_parallel(tasks: list[dict]) -> list[tuple[str, list[tuple[int, dic
     show_label = len(order) > 1
     result: list[tuple[str, list[tuple[int, dict]]]] = []
     for key in order:
-        label = f"Parallel group {key}" if (key is not None and show_label) else ""
+        label = f"并行组 {key}" if (key is not None and show_label) else ""
         result.append((label, groups[key]))
     return result
 
@@ -186,29 +186,29 @@ def action_label_from_event(event: dict) -> str:
     summary = summary if isinstance(summary, dict) else {}
     if event_type == "FastPathUsed":
         tool = _clean(payload.get("tool") or payload.get("action"))
-        return f"Fast path: {tool}" if tool else "Fast path used"
+        return f"快速路径：{tool}" if tool else "使用快速路径"
     if event_type != "ToolInvoked":
         return ""
     tool = _clean(payload.get("tool") or payload.get("tool_name"))
     paths = _file_paths(payload)
     if tool and paths:
-        return f"Tool: {tool}({paths[0]})"
+        return f"工具：{tool}({paths[0]})"
     if tool:
-        return f"Tool: {tool}"
+        return f"工具：{tool}"
     group = _action_group(payload)
     if group == "read":
         paths = _file_paths(payload, access="read")
-        return f"Read: {paths[0]}" if paths else "Read files"
+        return f"读取：{paths[0]}" if paths else "读取文件"
     if group == "write":
         paths = _file_paths(payload, access="write")
-        return f"Write: {paths[0]}" if paths else "Write files"
+        return f"写入：{paths[0]}" if paths else "写入文件"
     if group == "search":
         query = _clean(summary.get("query") or summary.get("pattern") or summary.get("text"))
-        return f"Search: {query}" if query else "Search code"
+        return f"搜索：{query}" if query else "搜索代码"
     if group == "run":
         command = _clean(summary.get("command") or summary.get("cmd"))
-        return f"Run: {command}" if command else "Run command"
-    return _clean(event.get("message")) or "Tool event"
+        return f"运行：{command}" if command else "运行命令"
+    return _clean(event.get("message")) or "工具事件"
 
 def _truncate_line(text: str) -> str:
     line = _clean(text).splitlines()[-1] if _clean(text) else ""
@@ -246,7 +246,7 @@ class WorkerNode(QFrame):
         self._apply_dot("waiting")
         head.addWidget(self.dot)
 
-        title = str(task.get("title") or task.get("id") or f"Task {index}")
+        title = str(task.get("title") or task.get("id") or f"任务 {index}")
         self.title_label = QLabel(f"{index}. {title}")
         self.title_label.setObjectName("PlanTaskTitle")
         self.title_label.setWordWrap(True)
@@ -260,13 +260,13 @@ class WorkerNode(QFrame):
 
         meta = QHBoxLayout()
         meta.setSpacing(8)
-        meta.addWidget(_chip(f"Model {model_label or 'unassigned'}", "PlanChipModel"))
+        meta.addWidget(_chip(f"模型 {model_label or '未分配'}", "PlanChipModel"))
         mcp = [str(item) for item in (task.get("mcp") or []) if str(item)]
         if mcp:
             meta.addWidget(_chip("MCP " + ", ".join(mcp), "PlanChip"))
         depends = [str(item) for item in (task.get("depends_on") or []) if str(item)]
         if depends:
-            meta.addWidget(_chip("Depends " + ", ".join(depends), "PlanChip"))
+            meta.addWidget(_chip("依赖 " + ", ".join(depends), "PlanChip"))
         meta.addStretch(1)
         layout.addLayout(meta)
 
@@ -352,7 +352,7 @@ class WorkArea(QFrame):
 
         route = str(payload.get("route_type") or "")
         tasks = list(payload.get("tasks") or [])
-        self._route_text = ROUTE_LABELS_ZH.get(route, route or "unplanned")
+        self._route_text = ROUTE_LABELS_ZH.get(route, route or "未规划")
         self._task_count = len(tasks)
 
         layout = QVBoxLayout(self)
@@ -379,12 +379,12 @@ class WorkArea(QFrame):
         self.supervisor_activity.hide()
         body_layout.addWidget(self.supervisor_activity)
 
-        plan_line = QLabel(f"Planning completed · {self._route_text} · {self._task_count} tasks")
+        plan_line = QLabel(f"规划完成 · {self._route_text} · {self._task_count} 个任务")
         plan_line.setObjectName("PlanGroupLabel")
         body_layout.addWidget(plan_line)
 
         if not tasks:
-            empty = QLabel("No execution tasks to display")
+            empty = QLabel("暂无执行任务")
             empty.setObjectName("PlanEmpty")
             body_layout.addWidget(empty)
         else:
@@ -406,7 +406,7 @@ class WorkArea(QFrame):
             self.header.setText(f"\u25b8 {self._collapsed_summary}")
             return
         arrow = "\u25be" if self.header.isChecked() else "\u25b8"
-        self.header.setText(f"{arrow} Execution · {self._task_count} tasks")
+        self.header.setText(f"{arrow} 执行过程 · {self._task_count} 个任务")
 
     def _toggle_body(self) -> None:
         self.body.setVisible(self.header.isChecked())
@@ -429,7 +429,7 @@ class WorkArea(QFrame):
         text = _clean(text)
         if not text:
             return
-        self.supervisor_activity.setText(f"Supervisor · {text}")
+        self.supervisor_activity.setText(f"主管 · {text}")
         self.supervisor_activity.show()
 
     def apply_event(self, event: dict) -> bool:
@@ -461,13 +461,13 @@ class WorkArea(QFrame):
         done = sum(1 for n in self.worker_nodes.values() if n.status == "completed")
         failed = sum(1 for n in self.worker_nodes.values() if n.status == "failed")
         if total and failed:
-            base = f"Completed · {done}/{total} done · {failed} failed"
+            base = f"已完成 · {done}/{total} 完成 · {failed} 失败"
         elif total:
-            base = f"Completed · {total} tasks"
+            base = f"已完成 · {total} 个任务"
         else:
-            base = "Completed"
+            base = "已完成"
         if elapsed_seconds is not None and elapsed_seconds >= 0:
-            base += f" · {int(round(elapsed_seconds))}s"
+            base += f" · {int(round(elapsed_seconds))} 秒"
         self._collapsed_summary = base
         self.header.setChecked(False)
         self.body.setVisible(False)
@@ -496,7 +496,7 @@ class AnswerBlock(QFrame):
     def set_text(self, text: str) -> None:
         value = str(text or "")
         if len(value) > MAX_MESSAGE_CHARS:
-            value = value[:MAX_MESSAGE_CHARS] + "\n\n[Content truncated]"
+            value = value[:MAX_MESSAGE_CHARS] + "\n\n[内容已截断]"
         self.content_label.setText(value)
 
 
@@ -512,7 +512,7 @@ class ErrorRecoveryPanel(QFrame):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(8)
 
-        title = QLabel("Run failed")
+        title = QLabel("运行失败")
         title.setObjectName("RunFailedTitle")
         title.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(title)
@@ -527,17 +527,17 @@ class ErrorRecoveryPanel(QFrame):
         action_row.setSpacing(8)
         layout.addLayout(action_row)
 
-        retry = QPushButton("Retry")
+        retry = QPushButton("重试")
         retry.setObjectName("RunFailedRetryButton")
         retry.clicked.connect(self.retry_requested.emit)
         action_row.addWidget(retry)
 
-        switch_model = QPushButton("Switch model")
+        switch_model = QPushButton("切换模型")
         switch_model.setObjectName("RunFailedSwitchModelButton")
         switch_model.clicked.connect(self.switch_model_requested.emit)
         action_row.addWidget(switch_model)
 
-        provider_doctor = QPushButton("Open Provider doctor")
+        provider_doctor = QPushButton("打开服务商诊断")
         provider_doctor.setObjectName("RunFailedProviderDoctorButton")
         provider_doctor.clicked.connect(self.provider_doctor_requested.emit)
         action_row.addWidget(provider_doctor)
@@ -546,9 +546,9 @@ class ErrorRecoveryPanel(QFrame):
         self.set_reason(reason)
 
     def set_reason(self, reason: str) -> None:
-        value = str(reason or "").strip() or "The turn failed before a detailed reason was available."
+        value = str(reason or "").strip() or "本轮运行失败，但没有返回详细原因。"
         if len(value) > 800:
-            value = value[:800].rstrip() + "\n... [truncated]"
+            value = value[:800].rstrip() + "\n... [已截断]"
         self.reason_label.setText(value)
 
 

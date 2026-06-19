@@ -80,4 +80,4 @@ def test_gui_chat_session_returns_stopped_result_on_cancel(monkeypatch, tmp_path
 
     assert result.stopped is True
     assert result.failed is False
-    assert result.final_output == "(Stopped)"
+    assert result.final_output == "已停止"

@@ -69,6 +69,30 @@ def test_settings_dialog_has_workbench_tabs(app):
         assert page is not None
 
 
+def test_settings_dialog_defaults_to_chinese_and_exposes_language_choice(app):
+    dialog = SettingsDialog(parent=None)
+
+    assert dialog.findChild(QPushButton, "SettingsTabModels").text() == "模型"
+    assert dialog.findChild(QPushButton, "SettingsTabLanguage") is not None
+
+    language_tab = dialog.findChild(QPushButton, "SettingsTabLanguage")
+    language_tab.click()
+    app.processEvents()
+
+    assert dialog.findChild(QLabel, "SettingsPageTitleLanguage").text() == "语言"
+    assert dialog.findChild(QPushButton, "LanguageZhButton").text() == "中文"
+    assert dialog.findChild(QPushButton, "LanguageEnButton").text() == "英文"
+    assert dialog.findChild(QPushButton, "LanguageZhButton").isChecked()
+
+    changed = []
+    dialog.language_changed.connect(lambda value: changed.append(value))
+    dialog.findChild(QPushButton, "LanguageEnButton").click()
+    app.processEvents()
+
+    assert dialog.current_language() == "en"
+    assert changed[-1] == "en"
+
+
 def test_settings_dialog_provider_page_exposes_manager_and_custom_provider(app):
     dialog = SettingsDialog(parent=None)
     emitted = []

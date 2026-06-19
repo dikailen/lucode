@@ -213,7 +213,7 @@ class GuiChatSession:
             run_context_summary = str(response.run_context_summary or "")
         except asyncio.CancelledError:
             stopped = True
-            final_output = "(Stopped)"
+            final_output = "已停止"
         except Exception as exc:
             stopped = False
             final_output = _format_gui_turn_exception(exc)
@@ -316,8 +316,5 @@ def _record_session_turn(
 
 def _format_gui_turn_exception(exc: Exception) -> str:
     if exc.__class__.__name__ == "MaxTurnsExceeded":
-        return (
-            "This turn exceeded the maximum model/tool turn count and was stopped. "
-            "Try narrowing the task or switching to serial/solo."
-        )
+        return "本轮超过最大模型/工具调用次数，已停止。请缩小任务范围，或切换到 serial/solo 模式。"
     return format_turn_error(exc)

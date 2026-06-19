@@ -41,7 +41,7 @@ def test_tool_action_label_includes_tool_and_target_file():
         },
     }
 
-    assert action_label_from_event(event) == "Tool: edit_file(loader.py)"
+    assert action_label_from_event(event) == "工具：edit_file(loader.py)"
 
 
 def test_work_area_shows_worker_status_tool_and_delta(app):
@@ -71,9 +71,9 @@ def test_work_area_shows_worker_status_tool_and_delta(app):
     latest_labels = [label.text() for label in area.findChildren(QLabel, "NodeLatest")]
     detail_labels = [label.text() for label in area.findChildren(QLabel, "PlanActivity")]
 
-    assert "Running" in status_labels
+    assert "运行中" in status_labels
     assert any("patching loader" in text for text in latest_labels)
-    assert any("Tool: edit_file(loader.py)" in text for text in detail_labels)
+    assert any("工具：edit_file(loader.py)" in text for text in detail_labels)
     assert any("patching loader" in text for text in detail_labels)
 
 
@@ -95,7 +95,7 @@ def test_worker_delta_is_consumed_by_work_area_not_answer():
 def test_error_recovery_panel_shows_reason_and_actions(app):
     panel = ErrorRecoveryPanel("provider request timed out")
 
-    assert panel.findChild(QLabel, "RunFailedTitle").text() == "Run failed"
+    assert panel.findChild(QLabel, "RunFailedTitle").text() == "运行失败"
     assert "provider request timed out" in panel.findChild(QLabel, "RunFailedReason").text()
 
     buttons = {
@@ -103,6 +103,6 @@ def test_error_recovery_panel_shows_reason_and_actions(app):
         for button in panel.findChildren(QPushButton)
         if button.objectName().startswith("RunFailed")
     }
-    assert buttons["RunFailedRetryButton"] == "Retry"
-    assert buttons["RunFailedSwitchModelButton"] == "Switch model"
-    assert buttons["RunFailedProviderDoctorButton"] == "Open Provider doctor"
+    assert buttons["RunFailedRetryButton"] == "重试"
+    assert buttons["RunFailedSwitchModelButton"] == "切换模型"
+    assert buttons["RunFailedProviderDoctorButton"] == "打开服务商诊断"

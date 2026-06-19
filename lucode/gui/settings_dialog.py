@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -65,7 +66,7 @@ class _WorkerPoolRow(QFrame):
         name = QLabel(MODEL_ROLES["executor"]["label"] + "（员工可用模型池）")
         name.setObjectName("RoleName")
         header.addWidget(name)
-        hint = QLabel("主管只能从勾选模型中组建团队，空=不限制")
+        hint = QLabel("主管只会从勾选模型中组建团队，空=不限制")
         hint.setObjectName("RoleHint")
         header.addWidget(hint)
         header.addStretch(1)
@@ -113,6 +114,7 @@ class SettingsDialog(QDialog):
     worker_pool_changed = Signal(list)
     provider_manager_requested = Signal()
     custom_provider_requested = Signal()
+    language_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -125,6 +127,7 @@ class SettingsDialog(QDialog):
         self._role_models: dict[str, str] = {}
         self._worker_pool: list[str] = []
         self._mode = "solo"
+        self._language = "zh"
         self._refiner_enabled = False
         self._building = True
         self._role_rows: dict[str, _RoleRow] = {}
@@ -134,7 +137,7 @@ class SettingsDialog(QDialog):
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(12)
 
-        title = QLabel("Settings")
+        title = QLabel("设置")
         title.setObjectName("SettingsTitle")
         outer.addWidget(title)
 
@@ -151,11 +154,12 @@ class SettingsDialog(QDialog):
 
         self._tab_buttons: dict[str, QPushButton] = {}
         for key, text in (
-            ("Models", "Models"),
-            ("Privacy", "Privacy"),
-            ("Providers", "Providers"),
-            ("Shortcuts", "Shortcuts"),
-            ("About", "About"),
+            ("Models", "模型"),
+            ("Privacy", "隐私"),
+            ("Providers", "接入"),
+            ("Language", "语言"),
+            ("Shortcuts", "快捷键"),
+            ("About", "关于"),
         ):
             button = QPushButton(text)
             button.setObjectName(f"SettingsTab{key}")
@@ -173,6 +177,7 @@ class SettingsDialog(QDialog):
         self._build_models_page()
         self._build_privacy_page()
         self._build_providers_page()
+        self._build_language_page()
         self._build_shortcuts_page()
         self._build_about_page()
 
@@ -189,15 +194,15 @@ class SettingsDialog(QDialog):
         self.refiner_toggle.toggled.connect(self._on_refiner_toggled)
         self._models_actions_layout.addWidget(self.refiner_toggle)
 
-        self.provider_manager_button = QPushButton("Manage providers")
+        self.provider_manager_button = QPushButton("管理服务商")
         self.provider_manager_button.setObjectName("ProviderManagerButton")
-        self.provider_manager_button.setToolTip("Manage providers, API keys, and available models")
+        self.provider_manager_button.setToolTip("管理服务商、API 密钥和可用模型")
         self.provider_manager_button.clicked.connect(self.provider_manager_requested.emit)
         self._providers_actions_layout.addWidget(self.provider_manager_button)
 
-        self.custom_provider_button = QPushButton("Add custom provider")
+        self.custom_provider_button = QPushButton("添加自定义中转")
         self.custom_provider_button.setObjectName("CustomProviderButton")
-        self.custom_provider_button.setToolTip("Create an OpenAI-compatible proxy provider")
+        self.custom_provider_button.setToolTip("创建 OpenAI 兼容的中转服务商")
         self.custom_provider_button.clicked.connect(self.custom_provider_requested.emit)
         self._providers_actions_layout.addWidget(self.custom_provider_button)
         self._providers_actions_layout.addStretch(1)
@@ -220,8 +225,8 @@ class SettingsDialog(QDialog):
         self._building = False
 
     def _build_models_page(self) -> None:
-        page, layout = self._new_page("Models", "Models")
-        description = QLabel("Configure the models used by each execution role.")
+        page, layout = self._new_page("Models", "模型")
+        description = QLabel("配置不同执行角色使用的模型。")
         description.setObjectName("SettingsDescription")
         description.setWordWrap(True)
         layout.addWidget(description)
@@ -232,14 +237,14 @@ class SettingsDialog(QDialog):
         self._add_page("Models", page)
 
     def _build_privacy_page(self) -> None:
-        page, layout = self._new_page("Privacy", "Privacy")
-        self.privacy_hint = QLabel("Offline mode prevents GUI provider discovery from calling upstream model APIs.")
+        page, layout = self._new_page("Privacy", "隐私")
+        self.privacy_hint = QLabel("离线模式会阻止图形界面在发现服务商模型时请求上游接口。")
         self.privacy_hint.setObjectName("PrivacyModeHint")
         self.privacy_hint.setWordWrap(True)
         layout.addWidget(self.privacy_hint)
         self._privacy_controls_layout = QHBoxLayout()
         self._privacy_controls_layout.setSpacing(10)
-        label = QLabel("Privacy mode")
+        label = QLabel("隐私模式")
         label.setObjectName("FieldLabel")
         self._privacy_controls_layout.addWidget(label)
         layout.addLayout(self._privacy_controls_layout)
@@ -247,8 +252,8 @@ class SettingsDialog(QDialog):
         self._add_page("Privacy", page)
 
     def _build_providers_page(self) -> None:
-        page, layout = self._new_page("Providers", "Providers")
-        description = QLabel("Connect API providers, configure keys, and add OpenAI-compatible proxy providers.")
+        page, layout = self._new_page("Providers", "接入")
+        description = QLabel("连接 API 服务商、配置密钥，并添加 OpenAI 兼容中转。")
         description.setObjectName("SettingsDescription")
         description.setWordWrap(True)
         layout.addWidget(description)
@@ -258,9 +263,39 @@ class SettingsDialog(QDialog):
         layout.addStretch(1)
         self._add_page("Providers", page)
 
+
+    def _build_language_page(self) -> None:
+        page, layout = self._new_page("Language", "语言")
+        description = QLabel("选择界面显示语言。当前版本先以中文界面为主，英文界面将在后续版本补齐。")
+        description.setObjectName("SettingsDescription")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.language_group = QButtonGroup(self)
+        self.language_group.setExclusive(True)
+        self.language_zh_button = QPushButton("中文")
+        self.language_zh_button.setObjectName("LanguageZhButton")
+        self.language_zh_button.setCheckable(True)
+        self.language_zh_button.setChecked(True)
+        self.language_en_button = QPushButton("英文")
+        self.language_en_button.setObjectName("LanguageEnButton")
+        self.language_en_button.setCheckable(True)
+        self.language_en_button.setToolTip("英文界面将在后续版本补齐")
+        self.language_zh_button.clicked.connect(lambda _checked=False: self._set_language("zh"))
+        self.language_en_button.clicked.connect(lambda _checked=False: self._set_language("en"))
+        for button in (self.language_zh_button, self.language_en_button):
+            self.language_group.addButton(button)
+            row.addWidget(button)
+        row.addStretch(1)
+        layout.addLayout(row)
+        layout.addStretch(1)
+        self._add_page("Language", page)
+
     def _build_shortcuts_page(self) -> None:
-        page, layout = self._new_page("Shortcuts", "Shortcuts")
-        for text in ("Enter: send", "Shift+Enter: new line", "Stop: cancel current turn"):
+        page, layout = self._new_page("Shortcuts", "快捷键")
+        for text in ("回车：发送", "Shift+回车：换行", "停止：取消当前轮"):
             item = QLabel(text)
             item.setObjectName("SettingsDescription")
             layout.addWidget(item)
@@ -268,8 +303,8 @@ class SettingsDialog(QDialog):
         self._add_page("Shortcuts", page)
 
     def _build_about_page(self) -> None:
-        page, layout = self._new_page("About", "About")
-        about = QLabel("Lucode desktop workbench")
+        page, layout = self._new_page("About", "关于")
+        about = QLabel("Lucode 桌面工作台")
         about.setObjectName("SettingsDescription")
         about.setWordWrap(True)
         layout.addWidget(about)
@@ -301,6 +336,16 @@ class SettingsDialog(QDialog):
 
     def select_page(self, key: str) -> None:
         self._select_page(str(key or ""))
+
+    def current_language(self) -> str:
+        return self._language
+
+    def _set_language(self, language: str) -> None:
+        normalized = "en" if str(language or "").lower().startswith("en") else "zh"
+        self._language = normalized
+        self.language_zh_button.setChecked(normalized == "zh")
+        self.language_en_button.setChecked(normalized == "en")
+        self.language_changed.emit(normalized)
 
     def set_models(self, models: list[tuple[str, str]]) -> None:
         self._models = list(models)

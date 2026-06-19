@@ -255,7 +255,7 @@ QScrollArea#SessionListScroll {
 QFrame#SessionRow {
   background: $surface_raised;
   border: 1px solid $border_subtle;
-  border-radius: $radius_small;
+  border-radius: 12px;
 }
 
 QFrame#SessionRow[selected="true"] {
@@ -265,8 +265,8 @@ QFrame#SessionRow[selected="true"] {
 QPushButton#SessionRowButton {
   background: transparent;
   border: none;
-  border-radius: $radius_small;
-  padding: 4px 6px;
+  border-radius: 10px;
+  padding: 6px 8px;
   text-align: left;
   color: $text;
 }
@@ -332,7 +332,7 @@ QFrame#SkillCardRow,
 QFrame#McpStatusRow {
   background: $surface_raised;
   border: 1px solid $border_subtle;
-  border-radius: $radius_small;
+  border-radius: 12px;
 }
 
 QPushButton#SkillCardButton {
@@ -503,7 +503,7 @@ QFrame#WorkerNode {
   background: $surface;
   border: 1px solid $border_subtle;
   border-left: 2px solid $border_subtle;
-  border-radius: $radius_small;
+  border-radius: 12px;
 }
 
 QPushButton#NodeToggle {
@@ -557,6 +557,8 @@ QPushButton#RunFailedRetryButton {
   background: $surface_raised;
   border-color: $primary;
   color: $primary;
+  border-radius: 14px;
+  padding: 7px 14px;
 }
 
 QPushButton#RunFailedSwitchModelButton,
@@ -564,6 +566,8 @@ QPushButton#RunFailedProviderDoctorButton {
   background: $surface;
   border-color: $border_subtle;
   color: $text;
+  border-radius: 14px;
+  padding: 7px 14px;
 }
 
 QFrame#ThinkingIndicator {
@@ -718,6 +722,7 @@ QDialog#SettingsDialog QFrame#SettingsNav {
 QDialog#SettingsDialog QPushButton#SettingsTabModels,
 QDialog#SettingsDialog QPushButton#SettingsTabPrivacy,
 QDialog#SettingsDialog QPushButton#SettingsTabProviders,
+QDialog#SettingsDialog QPushButton#SettingsTabLanguage,
 QDialog#SettingsDialog QPushButton#SettingsTabShortcuts,
 QDialog#SettingsDialog QPushButton#SettingsTabAbout {
   background: transparent;
@@ -731,6 +736,7 @@ QDialog#SettingsDialog QPushButton#SettingsTabAbout {
 QDialog#SettingsDialog QPushButton#SettingsTabModels:hover,
 QDialog#SettingsDialog QPushButton#SettingsTabPrivacy:hover,
 QDialog#SettingsDialog QPushButton#SettingsTabProviders:hover,
+QDialog#SettingsDialog QPushButton#SettingsTabLanguage:hover,
 QDialog#SettingsDialog QPushButton#SettingsTabShortcuts:hover,
 QDialog#SettingsDialog QPushButton#SettingsTabAbout:hover {
   background: $surface_raised;
@@ -741,6 +747,7 @@ QDialog#SettingsDialog QPushButton#SettingsTabAbout:hover {
 QDialog#SettingsDialog QPushButton#SettingsTabModels:checked,
 QDialog#SettingsDialog QPushButton#SettingsTabPrivacy:checked,
 QDialog#SettingsDialog QPushButton#SettingsTabProviders:checked,
+QDialog#SettingsDialog QPushButton#SettingsTabLanguage:checked,
 QDialog#SettingsDialog QPushButton#SettingsTabShortcuts:checked,
 QDialog#SettingsDialog QPushButton#SettingsTabAbout:checked {
   background: $user_surface;
@@ -751,6 +758,7 @@ QDialog#SettingsDialog QPushButton#SettingsTabAbout:checked {
 QDialog#SettingsDialog QLabel#SettingsPageTitleModels,
 QDialog#SettingsDialog QLabel#SettingsPageTitlePrivacy,
 QDialog#SettingsDialog QLabel#SettingsPageTitleProviders,
+QDialog#SettingsDialog QLabel#SettingsPageTitleLanguage,
 QDialog#SettingsDialog QLabel#SettingsPageTitleShortcuts,
 QDialog#SettingsDialog QLabel#SettingsPageTitleAbout {
   color: $text;
@@ -766,6 +774,28 @@ QDialog#SettingsDialog QLabel#PrivacyModeHint {
 QDialog#SettingsDialog QLabel#FieldLabel {
   color: $text_muted;
   font-size: $font_size_small;
+}
+
+QDialog#SettingsDialog QPushButton#LanguageZhButton,
+QDialog#SettingsDialog QPushButton#LanguageEnButton {
+  background: $surface;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_pill;
+  padding: 7px 18px;
+  color: $text_muted;
+}
+
+QDialog#SettingsDialog QPushButton#LanguageZhButton:hover,
+QDialog#SettingsDialog QPushButton#LanguageEnButton:hover {
+  border-color: $primary_hover;
+  color: $text;
+}
+
+QDialog#SettingsDialog QPushButton#LanguageZhButton:checked,
+QDialog#SettingsDialog QPushButton#LanguageEnButton:checked {
+  background: $user_surface;
+  border-color: $primary;
+  color: $primary;
 }
 
 QDialog#SettingsDialog QFrame#RolesHost {

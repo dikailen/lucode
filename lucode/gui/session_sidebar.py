@@ -62,8 +62,8 @@ class SessionSidebar(QFrame):
         self.icon_logo.setObjectName("SidebarRailLogo")
         self.icon_logo.setAlignment(Qt.AlignCenter)
         icon_layout.addWidget(self.icon_logo)
-        self.rail_chats_button = self._make_rail_button("C", "chats", "SidebarRailChats")
-        self.rail_skills_button = self._make_rail_button("S", "skills", "SidebarRailSkills")
+        self.rail_chats_button = self._make_rail_button("聊", "chats", "SidebarRailChats")
+        self.rail_skills_button = self._make_rail_button("技", "skills", "SidebarRailSkills")
         self.rail_mcp_button = self._make_rail_button("M", "mcp", "SidebarRailMcp")
         for button in (self.rail_chats_button, self.rail_skills_button, self.rail_mcp_button):
             icon_layout.addWidget(button)
@@ -85,7 +85,7 @@ class SessionSidebar(QFrame):
         header.addStretch(1)
         full_layout.addLayout(header)
 
-        self.new_session_button = QPushButton("+ New Chat")
+        self.new_session_button = QPushButton("+ 新会话")
         self.new_session_button.setObjectName("SidebarNewSessionButton")
         self.new_session_button.clicked.connect(self.new_session_requested.emit)
         full_layout.addWidget(self.new_session_button)
@@ -94,8 +94,8 @@ class SessionSidebar(QFrame):
         self.tab_group.setExclusive(True)
         tab_row = QHBoxLayout()
         tab_row.setSpacing(6)
-        self.chats_tab = self._make_tab_button("Chats", "chats", "SidebarTabChats")
-        self.skills_tab = self._make_tab_button("Skills", "skills", "SidebarTabSkills")
+        self.chats_tab = self._make_tab_button("会话", "chats", "SidebarTabChats")
+        self.skills_tab = self._make_tab_button("技能", "skills", "SidebarTabSkills")
         self.mcp_tab = self._make_tab_button("MCP", "mcp", "SidebarTabMcp")
         for button in (self.chats_tab, self.skills_tab, self.mcp_tab):
             tab_row.addWidget(button)
@@ -105,7 +105,7 @@ class SessionSidebar(QFrame):
 
         self.search_box = QLineEdit()
         self.search_box.setObjectName("SessionSearchBox")
-        self.search_box.setPlaceholderText("Search chats")
+        self.search_box.setPlaceholderText("搜索会话")
         self.search_box.textChanged.connect(lambda _text: self.refresh())
         full_layout.addWidget(self.search_box)
 
@@ -121,7 +121,7 @@ class SessionSidebar(QFrame):
         self.list_layout.setSpacing(6)
         self.scroll.setWidget(self.list_host)
 
-        self.empty_label = QLabel("No conversations yet")
+        self.empty_label = QLabel("暂无会话")
         self.empty_label.setObjectName("SidebarEmpty")
         self.empty_label.setWordWrap(True)
         self.list_layout.addWidget(self.empty_label)
@@ -194,7 +194,7 @@ class SessionSidebar(QFrame):
         button = QPushButton(text)
         button.setObjectName(object_name)
         button.setCheckable(True)
-        button.setToolTip(tab_id.title())
+        button.setToolTip({"chats": "会话", "skills": "技能", "mcp": "MCP"}.get(tab_id, tab_id))
         button.clicked.connect(lambda _checked=False, value=tab_id: self._switch_tab(value))
         return button
 
@@ -260,7 +260,7 @@ class SessionSidebar(QFrame):
             _item_session_id(item): item for item in items if _item_session_id(item)
         }
         if not items:
-            self.empty_label.setText("No conversations yet")
+            self.empty_label.setText("暂无会话")
             self.empty_label.show()
             self.list_layout.addWidget(self.empty_label)
             self.list_layout.addStretch(1)
@@ -277,7 +277,7 @@ class SessionSidebar(QFrame):
 
     def _render_skills(self) -> None:
         self._clear_list_layout()
-        title = QLabel("Skill library")
+        title = QLabel("技能库")
         title.setObjectName("SkillPanelTitle")
         self.list_layout.addWidget(title)
         for card in self._skill_cards:
@@ -287,7 +287,7 @@ class SessionSidebar(QFrame):
 
     def _render_mcp(self) -> None:
         self._clear_list_layout()
-        title = QLabel("MCP servers")
+        title = QLabel("MCP 服务")
         title.setObjectName("McpPanelTitle")
         self.list_layout.addWidget(title)
         for row in self._mcp_rows:
@@ -302,7 +302,7 @@ class SessionSidebar(QFrame):
     def _on_delete_requested(self, session_id: str) -> None:
         if not session_id or self._session_store is None:
             return
-        answer = QMessageBox.question(self, "Delete Chat", "Delete this conversation?")
+        answer = QMessageBox.question(self, "删除会话", "确认删除这个会话吗？")
         if answer != QMessageBox.Yes:
             return
         try:
@@ -339,7 +339,7 @@ class _SessionRow(QFrame):
         self.row_button.clicked.connect(lambda: self.session_selected.emit(self.session_id))
         layout.addWidget(self.row_button, 1)
 
-        self.delete_button = QPushButton("Delete")
+        self.delete_button = QPushButton("删除")
         self.delete_button.setObjectName("SessionDeleteButton")
         self.delete_button.setProperty("session_id", self.session_id)
         self.delete_button.clicked.connect(lambda: self.delete_requested.emit(self.session_id))
@@ -406,7 +406,7 @@ def _item_title(item) -> str:
     else:
         title = getattr(item, "title", "") or getattr(item, "last_user", "") or getattr(item, "session_id", "")
     text = str(title or "").replace("\n", " ").strip()
-    return text[:34] + "..." if len(text) > 36 else text or "Untitled chat"
+    return text[:34] + "..." if len(text) > 36 else text or "未命名会话"
 
 
 def _item_meta(item) -> str:
@@ -421,7 +421,7 @@ def _item_meta(item) -> str:
     if relative:
         parts.append(relative)
     if count:
-        parts.append(f"{count} messages")
+        parts.append(f"{count} 条消息")
     return " - ".join(parts)
 
 
@@ -438,14 +438,14 @@ def _relative_time(value: str) -> str:
     except ValueError:
         return text[:10]
     if seconds < 60:
-        return "just now"
+        return "刚刚"
     minutes = seconds // 60
     if minutes < 60:
-        return f"{minutes} min ago"
+        return f"{minutes} 分钟前"
     hours = minutes // 60
     if hours < 24:
-        return f"{hours} hr ago"
+        return f"{hours} 小时前"
     days = hours // 24
     if days < 30:
-        return f"{days} days ago"
+        return f"{days} 天前"
     return updated.date().isoformat()

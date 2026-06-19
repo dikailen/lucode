@@ -32,12 +32,12 @@ SKILL_ORDER = (
 )
 
 SKILL_TITLES = {
-    "code_engineer": "Code Engineer",
-    "project_explorer": "Project Explorer",
-    "final_synthesizer": "Final Synthesizer",
-    "skill_creator": "Skill Creator",
-    "solo_executor_contract": "Solo Executor",
-    "serial_executor_contract": "Serial Executor",
+    "code_engineer": "代码工程",
+    "project_explorer": "项目探索",
+    "final_synthesizer": "最终汇总",
+    "skill_creator": "技能创建",
+    "solo_executor_contract": "单脑执行",
+    "serial_executor_contract": "串行执行",
 }
 
 MCP_ALIASES = {
@@ -71,11 +71,11 @@ def load_default_mcp_rows() -> list[McpRow]:
         matches = [catalog[alias] for alias in aliases if alias in catalog]
         implemented = any(bool(item.get("implemented")) for item in matches)
         if matches:
-            status = "Connected" if implemented else "Available"
+            status = "已连接" if implemented else "可用"
             detail = _mcp_detail(matches[0])
         else:
-            status = "Offline"
-            detail = "Not configured"
+            status = "离线"
+            detail = "未配置"
         rows.append(McpRow(id=title, title=title, status=status, detail=detail))
     return rows
 
@@ -107,10 +107,10 @@ def _load_mcp_catalog() -> dict[str, dict[str, Any]]:
 
 def _skill_chips(skill_id: str) -> tuple[str, ...]:
     if skill_id in {"code_engineer", "project_explorer", "final_synthesizer"}:
-        return ("Core", "Enabled", "Local")
+        return ("核心", "已启用", "本地")
     if skill_id == "skill_creator":
-        return ("Core", "Local")
-    return ("Enabled", "Local")
+        return ("核心", "本地")
+    return ("已启用", "本地")
 
 
 def _title_from_id(value: str) -> str:
@@ -120,6 +120,6 @@ def _title_from_id(value: str) -> str:
 def _mcp_detail(item: dict[str, Any]) -> str:
     tools = item.get("tools")
     if isinstance(tools, list) and tools:
-        return f"{len(tools)} tools"
+        return f"{len(tools)} 个工具"
     risk = str(item.get("risk_level") or "").strip()
     return risk or ""

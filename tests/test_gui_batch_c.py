@@ -100,12 +100,12 @@ def test_approval_context_details_show_file_lines_and_code_preview():
 
     details = _render_context_details(context)
 
-    assert "Tool: edit_file" in details
-    assert "Rule: workspace_edit" in details
-    assert "File: loader.py" in details
-    assert "Access: write" in details
-    assert "Lines: 1-12" in details
-    assert "Code preview:" in details
+    assert "工具：edit_file" in details
+    assert "规则：workspace_edit" in details
+    assert "文件：loader.py" in details
+    assert "访问：write" in details
+    assert "行：1-12" in details
+    assert "代码预览：" in details
     assert "def load_data():" in details
     assert "mode: replace" in details
 

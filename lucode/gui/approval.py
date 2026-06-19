@@ -135,7 +135,7 @@ class ApprovalDialog(_qt_base_dialog()):
     def _build(self, context: ApprovalRequestContext) -> None:
         _, QtWidgets = _qt_modules()
         self.setObjectName("ApprovalDialog")
-        self.setWindowTitle("Approval required")
+        self.setWindowTitle("需要审批")
         self.setModal(False)
         self.setMinimumWidth(620)
 
@@ -143,11 +143,11 @@ class ApprovalDialog(_qt_base_dialog()):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
-        title = QtWidgets.QLabel("Approval required")
+        title = QtWidgets.QLabel("需要审批")
         title.setObjectName("ApprovalTitle")
         layout.addWidget(title)
 
-        prompt = QtWidgets.QLabel(context.prompt or "Approve this tool call?")
+        prompt = QtWidgets.QLabel(context.prompt or "是否批准这次工具调用？")
         prompt.setObjectName("ApprovalPrompt")
         prompt.setWordWrap(True)
         layout.addWidget(prompt)
@@ -162,22 +162,22 @@ class ApprovalDialog(_qt_base_dialog()):
         button_row.setSpacing(8)
         layout.addLayout(button_row)
 
-        once = QtWidgets.QPushButton("Allow once")
+        once = QtWidgets.QPushButton("允许一次")
         once.setObjectName("ApprovalAllowOnce")
         once.clicked.connect(lambda: self._decide(APPROVAL_DECISIONS.once))
         button_row.addWidget(once)
 
-        session = QtWidgets.QPushButton("Allow session")
+        session = QtWidgets.QPushButton("本会话允许")
         session.setObjectName("ApprovalAllowSession")
         session.clicked.connect(lambda: self._decide(APPROVAL_DECISIONS.session))
         button_row.addWidget(session)
 
-        deny = QtWidgets.QPushButton("Reject")
+        deny = QtWidgets.QPushButton("拒绝")
         deny.setObjectName("ApprovalReject")
         deny.clicked.connect(lambda: self._decide(APPROVAL_DECISIONS.deny))
         button_row.addWidget(deny)
 
-        edit = QtWidgets.QPushButton("Edit instruction")
+        edit = QtWidgets.QPushButton("改指令")
         edit.setObjectName("ApprovalEditInstruction")
         edit.clicked.connect(lambda: self._decide(APPROVAL_DECISIONS.edit))
         button_row.addWidget(edit)
@@ -196,19 +196,19 @@ class ApprovalDialog(_qt_base_dialog()):
 def _render_context_details(context: ApprovalRequestContext) -> str:
     lines = []
     if context.tool_name:
-        lines.append(f"Tool: {context.tool_name}")
+        lines.append(f"工具：{context.tool_name}")
     if context.tool_rule:
-        lines.append(f"Rule: {context.tool_rule}")
+        lines.append(f"规则：{context.tool_rule}")
     if context.files_touched:
         lines.append("")
-        lines.append("Files:")
+        lines.append("文件：")
         for item in context.files_touched:
             path = str(item.get("path") or "").strip()
             access = str(item.get("access") or "").strip()
             if path:
-                lines.append(f"- File: {path}")
+                lines.append(f"- 文件：{path}")
                 if access:
-                    lines.append(f"  Access: {access}")
+                    lines.append(f"  访问：{access}")
                 line_range = _format_line_range(item)
                 if line_range:
                     lines.append(f"  {line_range}")
@@ -217,25 +217,25 @@ def _render_context_details(context: ApprovalRequestContext) -> str:
         normal_keys = [key for key in sorted(context.arguments_summary) if key not in code_preview]
         if normal_keys:
             lines.append("")
-            lines.append("Arguments summary:")
+            lines.append("参数摘要：")
             for key in normal_keys:
                 value = context.arguments_summary.get(key)
                 lines.append(f"- {key}: {_format_summary_value(value)}")
         if code_preview:
             lines.append("")
-            lines.append("Code preview:")
+            lines.append("代码预览：")
             for key in sorted(code_preview):
                 value = _truncate_preview(str(code_preview[key]))
                 lines.append(f"{key}:")
                 lines.append(value)
     if context.risk:
         lines.append("")
-        lines.append("Risk:")
+        lines.append("风险：")
         for key in sorted(context.risk):
             value = context.risk.get(key)
             lines.append(f"- {key}: {_format_summary_value(value)}")
     if not lines:
-        lines.append("No tool context was available for this approval request.")
+        lines.append("这次审批请求没有可用的工具上下文。")
     return "\n".join(lines)
 
 
@@ -250,7 +250,7 @@ def _format_summary_value(value: Any) -> str:
 def _format_line_range(item: dict[str, Any]) -> str:
     explicit = item.get("lines") or item.get("line_range")
     if explicit not in (None, ""):
-        return f"Lines: {explicit}"
+        return f"行：{explicit}"
     start = (
         item.get("line_start")
         or item.get("start_line")
@@ -262,8 +262,8 @@ def _format_line_range(item: dict[str, Any]) -> str:
     if start in (None, ""):
         return ""
     if end in (None, "") or str(end) == str(start):
-        return f"Line: {start}"
-    return f"Lines: {start}-{end}"
+        return f"行：{start}"
+    return f"行：{start}-{end}"
 
 
 def _extract_code_preview(arguments: dict[str, Any]) -> dict[str, str]:
@@ -282,5 +282,5 @@ def _extract_code_preview(arguments: dict[str, Any]) -> dict[str, str]:
 def _truncate_preview(value: str) -> str:
     if len(value) <= _PREVIEW_LIMIT:
         return value
-    return value[:_PREVIEW_LIMIT].rstrip() + "\n... [preview truncated]"
+    return value[:_PREVIEW_LIMIT].rstrip() + "\n... [预览已截断]"
 
