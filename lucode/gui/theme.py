@@ -67,18 +67,9 @@ QFrame#MessageBubble[userRole="true"] {
   color: $text;
 }
 
-QFrame#MessageBubble[assistantRole="true"] {
-  background: $surface_raised;
-  border-color: $border_subtle;
-}
-
 QLabel#RoleLabel {
   color: $text_muted;
   font-size: $font_size_small;
-}
-
-QLabel#AssistantText {
-  line-height: 150%;
 }
 
 QLabel#UserText {
@@ -442,9 +433,10 @@ QLabel#SupervisorActivity {
 }
 
 QFrame#WorkerNode {
-  background: transparent;
-  border: none;
+  background: $surface;
+  border: 1px solid $border_subtle;
   border-left: 2px solid $border_subtle;
+  border-radius: $radius_small;
 }
 
 QPushButton#NodeToggle {

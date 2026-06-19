@@ -31,7 +31,6 @@ class MessageBubble(QFrame):
         self._truncated = False
         self.setObjectName("MessageBubble")
         self.setProperty("userRole", role == "user")
-        self.setProperty("assistantRole", role != "user")
         self.style().unpolish(self)
         self.style().polish(self)
         self._cap = BUBBLE_MAX_WIDTH
@@ -43,7 +42,7 @@ class MessageBubble(QFrame):
         layout.setSpacing(6)
 
         self.content_label = QLabel()
-        self.content_label.setObjectName("UserText" if role == "user" else "AssistantText")
+        self.content_label.setObjectName("UserText")
         self.content_label.setWordWrap(True)
         self.content_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.content_label)
@@ -86,10 +85,10 @@ class MessageBubble(QFrame):
 
 
 STATUS_LABELS_ZH = {
-    "waiting": "waiting",
-    "running": "running",
-    "completed": "completed",
-    "failed": "failed",
+    "waiting": "Waiting",
+    "running": "Running",
+    "completed": "Completed",
+    "failed": "Failed",
 }
 
 STATUS_TOKEN = {
@@ -122,7 +121,7 @@ def _group_by_parallel(tasks: list[dict]) -> list[tuple[str, list[tuple[int, dic
     show_label = len(order) > 1
     result: list[tuple[str, list[tuple[int, dict]]]] = []
     for key in order:
-        label = f"并行组 {key}" if (key is not None and show_label) else ""
+        label = f"Parallel group {key}" if (key is not None and show_label) else ""
         result.append((label, groups[key]))
     return result
 
@@ -187,24 +186,29 @@ def action_label_from_event(event: dict) -> str:
     summary = summary if isinstance(summary, dict) else {}
     if event_type == "FastPathUsed":
         tool = _clean(payload.get("tool") or payload.get("action"))
-        return f"快速路径 {tool}" if tool else "使用快速路径"
+        return f"Fast path: {tool}" if tool else "Fast path used"
     if event_type != "ToolInvoked":
         return ""
+    tool = _clean(payload.get("tool") or payload.get("tool_name"))
+    paths = _file_paths(payload)
+    if tool and paths:
+        return f"Tool: {tool}({paths[0]})"
+    if tool:
+        return f"Tool: {tool}"
     group = _action_group(payload)
     if group == "read":
         paths = _file_paths(payload, access="read")
-        return f"读取 {paths[0]}" if paths else "读取文件"
+        return f"Read: {paths[0]}" if paths else "Read files"
     if group == "write":
         paths = _file_paths(payload, access="write")
-        return f"写入 {paths[0]}" if paths else "写入文件"
+        return f"Write: {paths[0]}" if paths else "Write files"
     if group == "search":
         query = _clean(summary.get("query") or summary.get("pattern") or summary.get("text"))
-        return f"搜索 {query}" if query else "搜索代码"
+        return f"Search: {query}" if query else "Search code"
     if group == "run":
         command = _clean(summary.get("command") or summary.get("cmd"))
-        return f"运行 {command}" if command else "运行命令"
-    tool = _clean(payload.get("tool") or payload.get("tool_name"))
-    return f"调用 {tool}" if tool else _clean(event.get("message")) or "处理工具"
+        return f"Run: {command}" if command else "Run command"
+    return _clean(event.get("message")) or "Tool event"
 
 def _truncate_line(text: str) -> str:
     line = _clean(text).splitlines()[-1] if _clean(text) else ""
@@ -242,7 +246,7 @@ class WorkerNode(QFrame):
         self._apply_dot("waiting")
         head.addWidget(self.dot)
 
-        title = str(task.get("title") or task.get("id") or f"任务 {index}")
+        title = str(task.get("title") or task.get("id") or f"Task {index}")
         self.title_label = QLabel(f"{index}. {title}")
         self.title_label.setObjectName("PlanTaskTitle")
         self.title_label.setWordWrap(True)
@@ -256,13 +260,13 @@ class WorkerNode(QFrame):
 
         meta = QHBoxLayout()
         meta.setSpacing(8)
-        meta.addWidget(_chip(f"模型 {model_label or '未指定'}", "PlanChipModel"))
+        meta.addWidget(_chip(f"Model {model_label or 'unassigned'}", "PlanChipModel"))
         mcp = [str(item) for item in (task.get("mcp") or []) if str(item)]
         if mcp:
             meta.addWidget(_chip("MCP " + ", ".join(mcp), "PlanChip"))
         depends = [str(item) for item in (task.get("depends_on") or []) if str(item)]
         if depends:
-            meta.addWidget(_chip("依赖 " + ", ".join(depends), "PlanChip"))
+            meta.addWidget(_chip("Depends " + ", ".join(depends), "PlanChip"))
         meta.addStretch(1)
         layout.addLayout(meta)
 
@@ -348,7 +352,7 @@ class WorkArea(QFrame):
 
         route = str(payload.get("route_type") or "")
         tasks = list(payload.get("tasks") or [])
-        self._route_text = ROUTE_LABELS_ZH.get(route, route or "未规划")
+        self._route_text = ROUTE_LABELS_ZH.get(route, route or "unplanned")
         self._task_count = len(tasks)
 
         layout = QVBoxLayout(self)
@@ -375,12 +379,12 @@ class WorkArea(QFrame):
         self.supervisor_activity.hide()
         body_layout.addWidget(self.supervisor_activity)
 
-        plan_line = QLabel(f"计划 · {self._route_text} · {self._task_count} 个任务")
+        plan_line = QLabel(f"Planning completed · {self._route_text} · {self._task_count} tasks")
         plan_line.setObjectName("PlanGroupLabel")
         body_layout.addWidget(plan_line)
 
         if not tasks:
-            empty = QLabel("暂无可展示的执行任务")
+            empty = QLabel("No execution tasks to display")
             empty.setObjectName("PlanEmpty")
             body_layout.addWidget(empty)
         else:
@@ -402,7 +406,7 @@ class WorkArea(QFrame):
             self.header.setText(f"\u25b8 {self._collapsed_summary}")
             return
         arrow = "\u25be" if self.header.isChecked() else "\u25b8"
-        self.header.setText(f"{arrow} 执行计划 · {self._task_count} 个任务")
+        self.header.setText(f"{arrow} Execution · {self._task_count} tasks")
 
     def _toggle_body(self) -> None:
         self.body.setVisible(self.header.isChecked())
@@ -425,7 +429,7 @@ class WorkArea(QFrame):
         text = _clean(text)
         if not text:
             return
-        self.supervisor_activity.setText(f"主脑 · {text}")
+        self.supervisor_activity.setText(f"Supervisor · {text}")
         self.supervisor_activity.show()
 
     def apply_event(self, event: dict) -> bool:
@@ -457,13 +461,13 @@ class WorkArea(QFrame):
         done = sum(1 for n in self.worker_nodes.values() if n.status == "completed")
         failed = sum(1 for n in self.worker_nodes.values() if n.status == "failed")
         if total and failed:
-            base = f"已完成 · {done}/{total} 完成 · {failed} 失败"
+            base = f"Completed · {done}/{total} done · {failed} failed"
         elif total:
-            base = f"已完成 · {total} 个任务"
+            base = f"Completed · {total} tasks"
         else:
-            base = "已完成"
+            base = "Completed"
         if elapsed_seconds is not None and elapsed_seconds >= 0:
-            base += f" · 用时 {int(round(elapsed_seconds))}s"
+            base += f" · {int(round(elapsed_seconds))}s"
         self._collapsed_summary = base
         self.header.setChecked(False)
         self.body.setVisible(False)

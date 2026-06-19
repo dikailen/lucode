@@ -41,6 +41,8 @@ def test_assistant_message_bubble_has_no_role_label(app):
     bubble = MessageBubble("assistant", "hello")
 
     assert bubble.findChildren(QLabel, "RoleLabel") == []
+    assert not bubble.property("assistantRole")
+    assert bubble.content_label.objectName() == "UserText"
 
 
 def test_short_user_message_bubble_has_readable_minimum_width(app):
@@ -90,6 +92,8 @@ def test_minimal_theme_keeps_user_bubble_neutral():
     assert f"color: {TOKENS['text']};" in user_block
     assert f"color: {TOKENS['text']};" in sheet
     assert "QFrame#MessageBubble[userRole=\"true\"] QLabel#RoleLabel" not in sheet
+    assert 'QFrame#MessageBubble[assistantRole="true"]' not in sheet
+    assert "QLabel#AssistantText" not in sheet
     assert TOKENS["primary"] not in user_block
 
 
