@@ -42,12 +42,6 @@ class MessageBubble(QFrame):
         layout.setContentsMargins(14, 8, 14, 8)
         layout.setSpacing(6)
 
-        if role != "user":
-            self.role_label = QLabel("Lucode")
-            self.role_label.setObjectName("RoleLabel")
-            self.role_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            layout.addWidget(self.role_label)
-
         self.content_label = QLabel()
         self.content_label.setObjectName("UserText" if role == "user" else "AssistantText")
         self.content_label.setWordWrap(True)

@@ -37,12 +37,10 @@ def test_user_message_bubble_is_compact_and_has_no_role_label(app):
     assert bubble.sizePolicy().horizontalPolicy() == QSizePolicy.Maximum
 
 
-def test_assistant_message_bubble_keeps_lucode_role_label(app):
+def test_assistant_message_bubble_has_no_role_label(app):
     bubble = MessageBubble("assistant", "hello")
 
-    labels = bubble.findChildren(QLabel, "RoleLabel")
-    assert len(labels) == 1
-    assert labels[0].text() == "Lucode"
+    assert bubble.findChildren(QLabel, "RoleLabel") == []
 
 
 def test_short_user_message_bubble_has_readable_minimum_width(app):
