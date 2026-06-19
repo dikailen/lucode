@@ -81,19 +81,30 @@ QLabel#EmptyState {
   color: $text_muted;
 }
 
-QPlainTextEdit {
+QFrame#ComposerShell {
   background: $surface;
-  border: 2px solid $border_subtle;
-  border-radius: $radius_small;
+  border: 1px solid $border_subtle;
+  border-radius: 18px;
+}
+
+QFrame#ComposerInputRow {
+  background: transparent;
+  border: none;
+}
+
+QFrame#ComposerShell QPlainTextEdit {
+  background: $surface;
+  border: 1px solid $border_subtle;
+  border-radius: 14px;
   padding: $space_2;
   selection-background-color: $primary;
 }
 
-QPlainTextEdit:focus {
-  border: 2px solid $primary;
+QFrame#ComposerShell QPlainTextEdit:focus {
+  border: 1px solid $primary;
 }
 
-QPlainTextEdit:disabled {
+QFrame#ComposerShell QPlainTextEdit:disabled {
   background: $surface;
   border-color: $border;
   color: $text_muted;
