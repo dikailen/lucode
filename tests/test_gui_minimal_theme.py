@@ -97,6 +97,17 @@ def test_minimal_theme_keeps_user_bubble_neutral():
     assert TOKENS["primary"] not in user_block
 
 
+
+
+def test_workbench_theme_uses_light_panel_foundation():
+    sheet = render_stylesheet()
+
+    assert TOKENS["bg"] == "#f6f7fb"
+    assert TOKENS["surface"] == "#ffffff"
+    assert TOKENS["text"] == "#111827"
+    assert "QFrame#SidebarIconRail" in sheet
+    assert "QFrame#ComposerShell" in sheet
+    assert "border: 1px solid #d8dee8;" in sheet
 def test_answer_block_still_renders_markdown(app):
     block = AnswerBlock("**ok**")
 

@@ -281,9 +281,9 @@ class MainWindow(QMainWindow):
         self.set_status("idle" if self.turn_guard.can_start_new_turn else "running", self.event_label.text())
 
     def _toggle_session_sidebar(self) -> None:
-        visible = not self.session_sidebar.isVisible()
-        self.session_sidebar.setVisible(visible)
-        self.sidebar_toggle_button.setText("⟨" if visible else "⟩")
+        collapsed = not bool(self.session_sidebar.property("collapsed"))
+        self.session_sidebar.set_collapsed(collapsed)
+        self.sidebar_toggle_button.setText("⟩" if collapsed else "⟨")
 
     def _start_new_session(self) -> None:
         if not self.turn_guard.can_start_new_turn:

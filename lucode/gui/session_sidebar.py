@@ -37,10 +37,14 @@ class SessionSidebar(QFrame):
         self.setObjectName("SessionSidebar")
         self.setMinimumWidth(220)
         self.setMaximumWidth(320)
+        self.setProperty("collapsed", False)
+        self.setProperty("activeTab", "chats")
+        self.setProperty("transitioning", False)
         self._session_store = None
         self._selected_session_id = ""
         self._enabled = True
         self._active_tab = "chats"
+        self._collapsed = False
         self._items_by_session_id: dict[str, Any] = {}
         self._skill_cards = load_default_skill_cards()
         self._mcp_rows = load_default_mcp_rows()
@@ -49,17 +53,42 @@ class SessionSidebar(QFrame):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
+        self.icon_rail = QFrame()
+        self.icon_rail.setObjectName("SidebarIconRail")
+        icon_layout = QVBoxLayout(self.icon_rail)
+        icon_layout.setContentsMargins(0, 0, 0, 0)
+        icon_layout.setSpacing(8)
+        self.icon_logo = QLabel("L")
+        self.icon_logo.setObjectName("SidebarRailLogo")
+        self.icon_logo.setAlignment(Qt.AlignCenter)
+        icon_layout.addWidget(self.icon_logo)
+        self.rail_chats_button = self._make_rail_button("C", "chats", "SidebarRailChats")
+        self.rail_skills_button = self._make_rail_button("S", "skills", "SidebarRailSkills")
+        self.rail_mcp_button = self._make_rail_button("M", "mcp", "SidebarRailMcp")
+        for button in (self.rail_chats_button, self.rail_skills_button, self.rail_mcp_button):
+            icon_layout.addWidget(button)
+        icon_layout.addStretch(1)
+        self.icon_rail.hide()
+        layout.addWidget(self.icon_rail)
+
+        self.full_content = QFrame()
+        self.full_content.setObjectName("SidebarFullContent")
+        full_layout = QVBoxLayout(self.full_content)
+        full_layout.setContentsMargins(0, 0, 0, 0)
+        full_layout.setSpacing(10)
+        layout.addWidget(self.full_content, 1)
+
         header = QHBoxLayout()
         title = QLabel("Lucode")
         title.setObjectName("SidebarTitle")
         header.addWidget(title)
         header.addStretch(1)
-        layout.addLayout(header)
+        full_layout.addLayout(header)
 
         self.new_session_button = QPushButton("+ New Chat")
         self.new_session_button.setObjectName("SidebarNewSessionButton")
         self.new_session_button.clicked.connect(self.new_session_requested.emit)
-        layout.addWidget(self.new_session_button)
+        full_layout.addWidget(self.new_session_button)
 
         self.tab_group = QButtonGroup(self)
         self.tab_group.setExclusive(True)
@@ -72,19 +101,19 @@ class SessionSidebar(QFrame):
             tab_row.addWidget(button)
             self.tab_group.addButton(button)
         self.chats_tab.setChecked(True)
-        layout.addLayout(tab_row)
+        full_layout.addLayout(tab_row)
 
         self.search_box = QLineEdit()
         self.search_box.setObjectName("SessionSearchBox")
         self.search_box.setPlaceholderText("Search chats")
         self.search_box.textChanged.connect(lambda _text: self.refresh())
-        layout.addWidget(self.search_box)
+        full_layout.addWidget(self.search_box)
 
         self.scroll = QScrollArea()
         self.scroll.setObjectName("SessionListScroll")
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        layout.addWidget(self.scroll, 1)
+        full_layout.addWidget(self.scroll, 1)
 
         self.list_host = QWidget()
         self.list_layout = QVBoxLayout(self.list_host)
@@ -97,6 +126,7 @@ class SessionSidebar(QFrame):
         self.empty_label.setWordWrap(True)
         self.list_layout.addWidget(self.empty_label)
         self.list_layout.addStretch(1)
+        self._sync_rail_buttons()
 
     def set_session_store(self, session_store) -> None:
         self._session_store = session_store
@@ -137,6 +167,22 @@ class SessionSidebar(QFrame):
         self._enabled = bool(enabled)
         self._apply_enabled_state()
 
+    def set_collapsed(self, collapsed: bool) -> None:
+        self._collapsed = bool(collapsed)
+        if self._collapsed:
+            self.setMinimumWidth(56)
+            self.setMaximumWidth(64)
+        else:
+            self.setMinimumWidth(220)
+            self.setMaximumWidth(320)
+        self.setProperty("collapsed", self._collapsed)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.full_content.setVisible(not self._collapsed)
+        self.icon_rail.setVisible(self._collapsed)
+        self._sync_rail_buttons()
+        self._apply_enabled_state()
+
     def _make_tab_button(self, text: str, tab_id: str, object_name: str) -> QPushButton:
         button = QPushButton(text)
         button.setObjectName(object_name)
@@ -144,16 +190,28 @@ class SessionSidebar(QFrame):
         button.clicked.connect(lambda _checked=False, value=tab_id: self._switch_tab(value))
         return button
 
+    def _make_rail_button(self, text: str, tab_id: str, object_name: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName(object_name)
+        button.setCheckable(True)
+        button.setToolTip(tab_id.title())
+        button.clicked.connect(lambda _checked=False, value=tab_id: self._switch_tab(value))
+        return button
+
     def _switch_tab(self, tab_id: str) -> None:
         if tab_id not in {"chats", "skills", "mcp"}:
             return
+        self.setProperty("transitioning", True)
         self._active_tab = tab_id
+        self.setProperty("activeTab", tab_id)
         self.chats_tab.setChecked(tab_id == "chats")
         self.skills_tab.setChecked(tab_id == "skills")
         self.mcp_tab.setChecked(tab_id == "mcp")
+        self._sync_rail_buttons()
         self.new_session_button.setVisible(tab_id == "chats")
         self.search_box.setVisible(tab_id == "chats")
         self.refresh()
+        self.setProperty("transitioning", False)
         self._apply_enabled_state()
 
     def _apply_enabled_state(self) -> None:
@@ -161,12 +219,19 @@ class SessionSidebar(QFrame):
         self.search_box.setEnabled(self._enabled)
         for button in (self.chats_tab, self.skills_tab, self.mcp_tab):
             button.setEnabled(self._enabled)
+        for button in (self.rail_chats_button, self.rail_skills_button, self.rail_mcp_button):
+            button.setEnabled(self._enabled)
         for button in self.findChildren(QPushButton, "SessionRowButton"):
             button.setEnabled(self._enabled)
         for button in self.findChildren(QPushButton, "SessionDeleteButton"):
             button.setEnabled(self._enabled)
         for button in self.findChildren(QPushButton, "SkillCardButton"):
             button.setEnabled(self._enabled)
+
+    def _sync_rail_buttons(self) -> None:
+        self.rail_chats_button.setChecked(self._active_tab == "chats")
+        self.rail_skills_button.setChecked(self._active_tab == "skills")
+        self.rail_mcp_button.setChecked(self._active_tab == "mcp")
 
     def _clear_list_layout(self) -> None:
         while self.list_layout.count():
@@ -357,7 +422,7 @@ def _item_meta(item) -> str:
         parts.append(relative)
     if count:
         parts.append(f"{count} messages")
-    return " · ".join(parts)
+    return " - ".join(parts)
 
 
 def _relative_time(value: str) -> str:

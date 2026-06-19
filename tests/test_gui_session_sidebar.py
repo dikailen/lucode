@@ -196,6 +196,47 @@ def test_sidebar_switches_between_chats_skills_and_mcp(app):
     assert len(sidebar.findChildren(QPushButton, "SessionRowButton")) == 2
 
 
+
+
+def test_sidebar_collapsed_mode_keeps_icon_rail_visible(app):
+    store = FakeSessionStore()
+    sidebar = SessionSidebar()
+    sidebar.set_session_store(store)
+    sidebar.refresh()
+    sidebar.show()
+    app.processEvents()
+
+    sidebar.set_collapsed(True)
+    app.processEvents()
+
+    assert sidebar.property("collapsed") is True
+    assert sidebar.maximumWidth() <= 76
+    assert sidebar.findChild(QFrame, "SidebarIconRail").isVisible()
+    assert not sidebar.new_session_button.isVisible()
+    assert not sidebar.search_box.isVisible()
+    assert not sidebar.scroll.isVisible()
+
+    sidebar.findChild(QPushButton, "SidebarRailChats").click()
+    sidebar.set_collapsed(False)
+    app.processEvents()
+
+    assert sidebar.property("collapsed") is False
+    assert sidebar.maximumWidth() >= 220
+    assert not sidebar.findChild(QFrame, "SidebarIconRail").isVisible()
+    assert sidebar.new_session_button.isVisible()
+    assert sidebar.search_box.isVisible()
+    assert sidebar.scroll.isVisible()
+
+
+def test_sidebar_tab_switch_marks_transition_state(app):
+    sidebar = SessionSidebar()
+    sidebar.refresh()
+
+    sidebar.findChild(QPushButton, "SidebarTabSkills").click()
+    app.processEvents()
+
+    assert sidebar.property("activeTab") == "skills"
+    assert sidebar.property("transitioning") is False
 def test_main_window_new_session_clears_messages_and_title(app, tmp_path):
     workspace = _isolated_workspace(tmp_path)
     session = GuiChatSession(workspace=workspace)

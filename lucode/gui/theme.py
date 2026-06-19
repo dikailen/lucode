@@ -4,19 +4,19 @@ from string import Template
 
 
 TOKENS = {
-    "bg": "#0f1117",
-    "surface": "#151922",
-    "surface_raised": "#1b2030",
-    "border": "#2a3142",
-    "border_subtle": "#20262f",
-    "user_surface": "#1d2433",
-    "text": "#e6eaf2",
-    "text_muted": "#9aa4b2",
-    "primary": "#6aa6ff",
-    "primary_hover": "#8bbcff",
-    "danger": "#ff6b7a",
-    "success": "#62d68f",
-    "warning": "#f2c14e",
+    "bg": "#f6f7fb",
+    "surface": "#ffffff",
+    "surface_raised": "#f8fafc",
+    "border": "#d8dee8",
+    "border_subtle": "#e6ebf2",
+    "user_surface": "#eef4ff",
+    "text": "#111827",
+    "text_muted": "#64748b",
+    "primary": "#2563eb",
+    "primary_hover": "#1d4ed8",
+    "danger": "#dc2626",
+    "success": "#16a34a",
+    "warning": "#d97706",
     "font_ui": '"Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif',
     "font_mono": '"Cascadia Code", Consolas, "Courier New", monospace',
     "font_size": "14px",
@@ -41,6 +41,10 @@ QWidget {
 }
 
 QMainWindow {
+  background: $bg;
+}
+
+QWidget#ChatPane {
   background: $bg;
 }
 
@@ -83,8 +87,8 @@ QLabel#EmptyState {
 
 QFrame#ComposerShell {
   background: $surface;
-  border: 1px solid $border_subtle;
-  border-radius: 18px;
+  border: 1px solid $border;
+  border-radius: 20px;
 }
 
 QFrame#ComposerInputRow {
@@ -161,12 +165,64 @@ QStatusBar {
 QFrame#ControlBar {
   background: $surface;
   border: 1px solid $border_subtle;
-  border-radius: $radius_small;
+  border-radius: 14px;
 }
 
 QFrame#SessionSidebar {
   background: $surface;
   border-right: 1px solid $border_subtle;
+}
+QFrame#SessionSidebar[collapsed="true"] {
+  background: $surface;
+  border-right: 1px solid $border;
+}
+
+QFrame#SidebarFullContent {
+  background: transparent;
+  border: none;
+}
+
+QFrame#SidebarIconRail {
+  background: $surface;
+  border: none;
+}
+
+QLabel#SidebarRailLogo {
+  background: $surface_raised;
+  border: 1px solid $border_subtle;
+  border-radius: 14px;
+  color: $primary;
+  font-weight: 700;
+  min-height: 38px;
+  max-height: 38px;
+}
+
+QPushButton#SidebarRailChats,
+QPushButton#SidebarRailSkills,
+QPushButton#SidebarRailMcp {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  color: $text_muted;
+  min-height: 38px;
+  max-height: 38px;
+  padding: 0;
+}
+
+QPushButton#SidebarRailChats:hover,
+QPushButton#SidebarRailSkills:hover,
+QPushButton#SidebarRailMcp:hover {
+  background: $surface_raised;
+  border-color: $border_subtle;
+  color: $text;
+}
+
+QPushButton#SidebarRailChats:checked,
+QPushButton#SidebarRailSkills:checked,
+QPushButton#SidebarRailMcp:checked {
+  background: $user_surface;
+  border-color: $border;
+  color: $primary;
 }
 
 QLabel#SidebarTitle {

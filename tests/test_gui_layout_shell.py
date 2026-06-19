@@ -60,8 +60,12 @@ def test_sidebar_toggle_hides_and_restores_sidebar(app, tmp_path):
 
     toggle.click()
     app.processEvents()
-    assert not sidebar.isVisible()
+    assert sidebar.isVisible()
+    assert sidebar.property("collapsed") is True
+    assert sidebar.maximumWidth() <= 76
 
     toggle.click()
     app.processEvents()
     assert sidebar.isVisible()
+    assert sidebar.property("collapsed") is False
+    assert sidebar.maximumWidth() >= 220
