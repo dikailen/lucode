@@ -32,12 +32,14 @@ class SessionSidebar(QFrame):
     new_session_requested = Signal()
     session_selected = Signal(str)
     session_deleted = Signal(str)
+    settings_requested = Signal()
+    collapse_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("SessionSidebar")
-        self.setMinimumWidth(220)
-        self.setMaximumWidth(320)
+        self.setMinimumWidth(294)
+        self.setMaximumWidth(294)
         self.setProperty("collapsed", False)
         self.setProperty("activeTab", "chats")
         self.setProperty("transitioning", False)
@@ -53,8 +55,8 @@ class SessionSidebar(QFrame):
         self._mcp_rows = load_default_mcp_rows()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(20, 28, 12, 18)
+        layout.setSpacing(18)
 
         self.icon_rail = QFrame()
         self.icon_rail.setObjectName("SidebarIconRail")
@@ -71,14 +73,22 @@ class SessionSidebar(QFrame):
         for button in (self.rail_chats_button, self.rail_skills_button, self.rail_mcp_button):
             icon_layout.addWidget(button)
         icon_layout.addStretch(1)
+        self.rail_settings_button = QPushButton("S")
+        self.rail_settings_button.setObjectName("SidebarRailSettingsButton")
+        self.rail_settings_button.clicked.connect(self.settings_requested.emit)
+        icon_layout.addWidget(self.rail_settings_button)
+        self.rail_toggle_button = QPushButton(">")
+        self.rail_toggle_button.setObjectName("SidebarRailToggleButton")
+        self.rail_toggle_button.clicked.connect(self.collapse_requested.emit)
+        icon_layout.addWidget(self.rail_toggle_button)
         self.icon_rail.hide()
-        layout.addWidget(self.icon_rail)
+        layout.addWidget(self.icon_rail, 1)
 
         self.full_content = QFrame()
         self.full_content.setObjectName("SidebarFullContent")
         full_layout = QVBoxLayout(self.full_content)
         full_layout.setContentsMargins(0, 0, 0, 0)
-        full_layout.setSpacing(10)
+        full_layout.setSpacing(14)
         layout.addWidget(self.full_content, 1)
 
         header = QHBoxLayout()
@@ -124,6 +134,23 @@ class SessionSidebar(QFrame):
         self.list_layout.setSpacing(6)
         self.scroll.setWidget(self.list_host)
 
+        self.utility_bar = QFrame()
+        self.utility_bar.setObjectName("SidebarUtilityBar")
+        utility_layout = QHBoxLayout(self.utility_bar)
+        utility_layout.setContentsMargins(0, 0, 0, 0)
+        utility_layout.setSpacing(8)
+        self.sidebar_settings_button = QPushButton(self._t('control.settings_tip'))
+        self.sidebar_settings_button.setObjectName("SidebarSettingsButton")
+        self.sidebar_settings_button.clicked.connect(self.settings_requested.emit)
+        utility_layout.addWidget(self.sidebar_settings_button, 1)
+        self.sidebar_toggle_button = QPushButton("<")
+        self.sidebar_toggle_button.setObjectName("SidebarToggleButton")
+        self.sidebar_toggle_button.setToolTip(self._t('main.sidebar.toggle_tip'))
+        self.sidebar_toggle_button.clicked.connect(self.collapse_requested.emit)
+        utility_layout.addWidget(self.sidebar_toggle_button)
+        full_layout.addWidget(self.utility_bar)
+        self.sidebar_toggle_button.setVisible(True)
+
         self.empty_label = QLabel(self._t('sidebar.empty'))
         self.empty_label.setObjectName("SidebarEmpty")
         self.empty_label.setWordWrap(True)
@@ -142,6 +169,10 @@ class SessionSidebar(QFrame):
         self.skills_tab.setText(self._t('sidebar.skills'))
         self.mcp_tab.setText(self._t('sidebar.mcp'))
         self.search_box.setPlaceholderText(self._t('sidebar.search'))
+        self.sidebar_settings_button.setText(self._t('control.settings_tip'))
+        self.sidebar_toggle_button.setToolTip(self._t('main.sidebar.toggle_tip'))
+        self.rail_settings_button.setToolTip(self._t('control.settings_tip'))
+        self.rail_toggle_button.setToolTip(self._t('main.sidebar.toggle_tip'))
         self._sync_rail_buttons()
         self.refresh()
 
@@ -184,11 +215,13 @@ class SessionSidebar(QFrame):
     def set_collapsed(self, collapsed: bool) -> None:
         self._collapsed = bool(collapsed)
         if self._collapsed:
-            self.setMinimumWidth(56)
+            self.setMinimumWidth(64)
             self.setMaximumWidth(64)
+            self.layout().setContentsMargins(12, 18, 12, 18)
         else:
-            self.setMinimumWidth(220)
-            self.setMaximumWidth(320)
+            self.setMinimumWidth(294)
+            self.setMaximumWidth(294)
+            self.layout().setContentsMargins(20, 28, 12, 18)
         self.setProperty("collapsed", self._collapsed)
         self.style().unpolish(self)
         self.style().polish(self)
@@ -231,6 +264,10 @@ class SessionSidebar(QFrame):
     def _apply_enabled_state(self) -> None:
         self.new_session_button.setEnabled(self._enabled)
         self.search_box.setEnabled(self._enabled)
+        self.sidebar_settings_button.setEnabled(self._enabled)
+        self.sidebar_toggle_button.setEnabled(self._enabled)
+        self.rail_settings_button.setEnabled(self._enabled)
+        self.rail_toggle_button.setEnabled(self._enabled)
         for button in (self.chats_tab, self.skills_tab, self.mcp_tab):
             button.setEnabled(self._enabled)
         for button in (self.rail_chats_button, self.rail_skills_button, self.rail_mcp_button):
@@ -246,6 +283,8 @@ class SessionSidebar(QFrame):
         self.rail_chats_button.setChecked(self._active_tab == "chats")
         self.rail_skills_button.setChecked(self._active_tab == "skills")
         self.rail_mcp_button.setChecked(self._active_tab == "mcp")
+        self.sidebar_toggle_button.setText(">" if self._collapsed else "<")
+        self.rail_toggle_button.setText(">" if self._collapsed else "<")
 
     def _clear_list_layout(self) -> None:
         while self.list_layout.count():

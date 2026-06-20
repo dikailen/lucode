@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
+    QButtonGroup,
     QScrollArea,
     QSplitter,
     QStatusBar,
@@ -24,7 +25,7 @@ from catalog_system.model_catalog import clear_model_catalog_cache
 from lucode.gui.approval import GuiApprovalSession, LatestApprovalContext
 from lucode.gui.answer_stream import AnswerStreamState
 from lucode.gui.chat_session import GuiChatSession
-from lucode.gui.control_panel import ControlBar
+from lucode.gui.control_panel import ControlBar, execution_mode_label, execution_mode_options
 from lucode.gui.event_bridge import EventBridge
 from lucode.gui.i18n import Translator, load_gui_language, save_gui_language
 from lucode.gui.session_sidebar import SessionSidebar
@@ -116,7 +117,7 @@ class MainWindow(QMainWindow):
         self._closing = False
 
         self.setWindowTitle("Lucode")
-        self.resize(1040, 720)
+        self.resize(1600, 1000)
 
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.setObjectName("MainSplitter")
@@ -127,31 +128,60 @@ class MainWindow(QMainWindow):
         self.session_sidebar.new_session_requested.connect(self._start_new_session)
         self.session_sidebar.session_selected.connect(self._resume_selected_session)
         self.session_sidebar.session_deleted.connect(self._on_sidebar_session_deleted)
+        self.session_sidebar.settings_requested.connect(self._open_settings_dialog)
+        self.session_sidebar.collapse_requested.connect(self._toggle_session_sidebar)
+        self.sidebar_toggle_button = self.session_sidebar.sidebar_toggle_button
         self.main_splitter.addWidget(self.session_sidebar)
 
         chat_pane = QWidget()
         chat_pane.setObjectName("ChatPane")
         root_layout = QVBoxLayout(chat_pane)
-        root_layout.setContentsMargins(18, 18, 18, 10)
-        root_layout.setSpacing(12)
+        root_layout.setContentsMargins(0, 0, 0, 16)
+        root_layout.setSpacing(0)
         self.main_splitter.addWidget(chat_pane)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
-        self.main_splitter.setSizes([260, 780])
+        self.main_splitter.setSizes([294, 866])
 
         header = QFrame()
         header.setObjectName("ChatHeader")
+        header.setFixedHeight(76)
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(8)
-        self.sidebar_toggle_button = QPushButton("⟨")
-        self.sidebar_toggle_button.setObjectName("SidebarToggleButton")
-        self.sidebar_toggle_button.setToolTip(self._t('main.sidebar.toggle_tip'))
-        self.sidebar_toggle_button.clicked.connect(self._toggle_session_sidebar)
-        header_layout.addWidget(self.sidebar_toggle_button)
+        header_layout.setContentsMargins(24, 0, 20, 0)
+        header_layout.setSpacing(14)
+
         self.session_title_label = QLabel(self._t('main.new_chat'))
         self.session_title_label.setObjectName("SessionTitleLabel")
         header_layout.addWidget(self.session_title_label, 1)
+
+        self.top_status_chip = QLabel()
+        self.top_status_chip.setObjectName("TopStatusChip")
+        header_layout.addWidget(self.top_status_chip)
+
+        self.top_mode_host = QWidget(header)
+        self.top_mode_host.setObjectName("TopModeHost")
+        mode_layout = QHBoxLayout(self.top_mode_host)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(0)
+        self.top_mode_group = QButtonGroup(self)
+        self.top_mode_group.setExclusive(True)
+        self.top_mode_buttons: dict[str, QPushButton] = {}
+        for mode, label in execution_mode_options(self.language):
+            button = QPushButton(label)
+            button.setObjectName("TopModeButton")
+            button.setProperty("mode_id", mode)
+            button.setCheckable(True)
+            button.clicked.connect(lambda _checked=False, value=mode: self._on_execution_mode_changed(value))
+            self.top_mode_group.addButton(button)
+            self.top_mode_buttons[mode] = button
+            mode_layout.addWidget(button)
+        header_layout.addWidget(self.top_mode_host)
+
+        self.top_settings_button = QPushButton("⚙")
+        self.top_settings_button.setObjectName("TopSettingsButton")
+        self.top_settings_button.setToolTip(self._t('control.settings_tip'))
+        self.top_settings_button.clicked.connect(self._open_settings_dialog)
+        header_layout.addWidget(self.top_settings_button)
         root_layout.addWidget(header)
 
         self.control_bar = ControlBar(language=self.language)
@@ -167,7 +197,7 @@ class MainWindow(QMainWindow):
         self.settings_panel.providers_changed.connect(self._refresh_configured_models)
         self.main_splitter.addWidget(self.settings_panel)
         self.main_splitter.setStretchFactor(2, 0)
-        self.main_splitter.setSizes([260, 780, 0])
+        self.main_splitter.setSizes([294, 866, 0])
         self._init_control_bar()
 
         self.scroll_area = QScrollArea()
@@ -224,6 +254,7 @@ class MainWindow(QMainWindow):
         input_row_layout.addWidget(self.stop_button)
 
         self.status = QStatusBar()
+        self.status.hide()
         self.setStatusBar(self.status)
         self.state_label = QLabel()
         self.event_label = QLabel(self._t('main.ready'))
@@ -237,6 +268,7 @@ class MainWindow(QMainWindow):
         self.settings_panel.set_language(self.language)
         self.input_box.set_language(self.language)
         self.control_bar.set_language(self.language)
+        self._refresh_top_mode_buttons()
         self.session_sidebar.refresh()
 
     def _init_control_bar(self) -> None:
@@ -257,6 +289,7 @@ class MainWindow(QMainWindow):
             query_refiner_enabled=bool(settings.query_refiner_enabled),
             worker_pool=list(getattr(settings, "allowed_worker_models", []) or []),
         )
+        self._sync_top_mode_buttons(settings.execution_mode)
         self.settings_dialog.set_initial(
             execution_mode=settings.execution_mode,
             privacy_mode=settings.privacy_mode,
@@ -274,6 +307,20 @@ class MainWindow(QMainWindow):
         self.settings_dialog.custom_provider_requested.connect(self._open_custom_provider_manager)
         self.settings_dialog.language_changed.connect(self._on_language_changed)
 
+
+    def _sync_top_mode_buttons(self, mode: str) -> None:
+        normalized = str(mode or self.mode or "").strip()
+        for mode_id, button in self.top_mode_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(mode_id == normalized)
+            button.blockSignals(False)
+
+    def _refresh_top_mode_buttons(self) -> None:
+        for mode_id, button in self.top_mode_buttons.items():
+            button.setText(execution_mode_label(mode_id, self.language))
+        self.top_settings_button.setToolTip(self._t('control.settings_tip'))
+        self._sync_top_mode_buttons(self.mode)
+
     def _on_language_changed(self, language: str) -> None:
         self.language = language
         self._t = Translator(language)
@@ -283,8 +330,8 @@ class MainWindow(QMainWindow):
         self.settings_dialog.set_language(language)
         self.settings_panel.set_language(language)
         self.control_bar.set_language(language)
+        self._refresh_top_mode_buttons()
         self.approval_session.language = language
-        self.sidebar_toggle_button.setToolTip(self._t('main.sidebar.toggle_tip'))
         self.send_button.setText(self._t('main.send'))
         self.stop_button.setText(self._t('main.stop'))
         if self.session_title_label.text() in {'新会话', 'New chat'}:
@@ -312,6 +359,12 @@ class MainWindow(QMainWindow):
     def _on_execution_mode_changed(self, mode: str) -> None:
         self.mode = self.chat_session.set_execution_mode(mode)
         self.settings_dialog.set_execution_mode(self.mode)
+        self.control_bar.set_initial(
+            execution_mode=self.mode,
+            privacy_mode=self.chat_session.settings.privacy_mode,
+            role_models={},
+        )
+        self._sync_top_mode_buttons(self.mode)
         self.set_status("idle" if self.turn_guard.can_start_new_turn else "running", self.event_label.text())
 
     def _toggle_session_sidebar(self) -> None:
@@ -537,6 +590,9 @@ class MainWindow(QMainWindow):
         self._thinking_indicator = None
 
     def set_running(self, running: bool) -> None:
+        for button in self.top_mode_buttons.values():
+            button.setEnabled(not running)
+        self.top_settings_button.setEnabled(not running)
         self.send_button.setEnabled(not running)
         self.stop_button.setEnabled(running)
         self.input_box.setEnabled(not running)
@@ -545,6 +601,9 @@ class MainWindow(QMainWindow):
         self.session_sidebar.set_enabled(not running)
 
     def set_stopping(self) -> None:
+        for button in self.top_mode_buttons.values():
+            button.setEnabled(False)
+        self.top_settings_button.setEnabled(False)
         self.send_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.input_box.setEnabled(False)
@@ -554,6 +613,9 @@ class MainWindow(QMainWindow):
         self.set_status_i18n("stopped", "main.event.stopping")
 
     def set_approval_waiting(self) -> None:
+        for button in self.top_mode_buttons.values():
+            button.setEnabled(False)
+        self.top_settings_button.setEnabled(False)
         self.send_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.input_box.setEnabled(False)
@@ -577,6 +639,12 @@ class MainWindow(QMainWindow):
         self.state_label.setText(f"{labels.get(state, state)} · {self._t('main.status.mode')} {self.mode}")
         self.state_label.setStyleSheet(status_style(state))
         self.event_label.setText(event)
+        self.top_status_chip.setText(f"\u25cf {labels.get(state, state)}")
+        self.top_status_chip.setProperty("state", state)
+        style = self.top_status_chip.style()
+        style.unpolish(self.top_status_chip)
+        style.polish(self.top_status_chip)
+        self.top_status_chip.update()
 
     def handle_runtime_event(self, event: dict) -> None:
         if self._closing:

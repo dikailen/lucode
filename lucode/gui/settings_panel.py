@@ -25,8 +25,8 @@ class SettingsSidePanel(QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("SettingsSidePanel")
-        self.setMinimumWidth(360)
-        self.setMaximumWidth(440)
+        self.setMinimumWidth(436)
+        self.setMaximumWidth(436)
         self.workspace_root = Path(workspace_root)
         self.user_home = Path(user_home)
         self.privacy_mode = str(privacy_mode or "local_first")
@@ -35,8 +35,8 @@ class SettingsSidePanel(QFrame):
         self.settings_content = settings_content
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(12)
+        root.setContentsMargins(18, 24, 18, 18)
+        root.setSpacing(18)
 
         header = QFrame(self)
         header.setObjectName("SettingsPanelHeader")
@@ -146,7 +146,7 @@ class SettingsSidePanel(QFrame):
         index = parent.indexOf(self)
         if index < 0 or len(sizes) <= index:
             return
-        target = min(max(self.minimumWidth(), 400), self.maximumWidth())
+        target = self.maximumWidth()
         if sizes[index] >= self.minimumWidth():
             return
         available = sum(sizes)

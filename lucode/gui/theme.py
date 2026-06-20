@@ -4,7 +4,7 @@ from string import Template
 
 
 TOKENS = {
-    "bg": "#f6f7fb",
+    "bg": "#f7f8fb",
     "surface": "#ffffff",
     "surface_raised": "#f8fafc",
     "border": "#d8dee8",
@@ -45,7 +45,9 @@ QMainWindow {
 }
 
 QWidget#ChatPane {
-  background: $bg;
+  background: $surface;
+  border-left: 1px solid $border_subtle;
+  border-right: 1px solid $border_subtle;
 }
 
 QLabel {
@@ -55,7 +57,7 @@ QLabel {
 QScrollArea,
 QScrollArea > QWidget,
 QScrollArea > QWidget > QWidget {
-  background: $bg;
+  background: $surface;
   border: none;
 }
 
@@ -169,8 +171,8 @@ QFrame#ControlBar {
 }
 
 QFrame#SessionSidebar {
-  background: $surface;
-  border-right: 1px solid $border_subtle;
+  background: $bg;
+  border-right: none;
 }
 QFrame#SessionSidebar[collapsed="true"] {
   background: $surface;
@@ -359,15 +361,70 @@ QLabel#McpDetail {
 }
 
 QFrame#ChatHeader {
-  background: transparent;
-  border: none;
+  background: $surface;
+  border-bottom: 1px solid $border_subtle;
 }
 
 QLabel#SessionTitleLabel {
   color: $text;
+  font-size: 18px;
   font-weight: 600;
 }
 
+QLabel#TopStatusChip {
+  background: $surface_raised;
+  border: 1px solid $border_subtle;
+  border-radius: 10px;
+  padding: 8px 14px;
+  color: $success;
+  font-size: $font_size_small;
+}
+
+QLabel#TopStatusChip[state="running"] {
+  color: $success;
+}
+
+QLabel#TopStatusChip[state="stopped"] {
+  color: $warning;
+}
+
+QLabel#TopStatusChip[state="failed"] {
+  color: $danger;
+}
+
+QWidget#TopModeHost {
+  background: $surface_raised;
+  border: 1px solid $border_subtle;
+  border-radius: 10px;
+}
+
+QPushButton#TopModeButton {
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  color: $text;
+}
+
+QPushButton#TopModeButton:checked {
+  background: $surface;
+  color: $primary;
+}
+
+QPushButton#TopSettingsButton {
+  background: $surface_raised;
+  border: 1px solid $border_subtle;
+  border-radius: 10px;
+  padding: 8px 13px;
+  color: $text;
+}
+
+QFrame#SidebarUtilityBar {
+  background: transparent;
+  border: none;
+}
+
+QPushButton#SidebarSettingsButton,
 QPushButton#SidebarToggleButton {
   background: transparent;
   border: none;
@@ -376,9 +433,32 @@ QPushButton#SidebarToggleButton {
   color: $text_muted;
 }
 
+QPushButton#SidebarSettingsButton {
+  text-align: left;
+}
+
+QPushButton#SidebarSettingsButton:hover,
 QPushButton#SidebarToggleButton:hover {
   color: $text;
   background: $surface_raised;
+}
+
+QPushButton#SidebarRailSettingsButton,
+QPushButton#SidebarRailToggleButton {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  color: $text_muted;
+  min-height: 38px;
+  max-height: 38px;
+  padding: 0;
+}
+
+QPushButton#SidebarRailSettingsButton:hover,
+QPushButton#SidebarRailToggleButton:hover {
+  background: $surface_raised;
+  border-color: $border_subtle;
+  color: $text;
 }
 
 QFrame#ComposerToolbar {
@@ -927,7 +1007,7 @@ QPushButton#GearButton:checked {
 
 QFrame#SettingsSidePanel {
   background: $surface;
-  border-left: 1px solid $border;
+  border-left: 1px solid $border_subtle;
 }
 
 QFrame#SettingsPanelHeader {
