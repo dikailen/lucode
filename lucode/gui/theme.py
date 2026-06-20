@@ -925,6 +925,116 @@ QPushButton#GearButton:checked {
   color: $text;
 }
 
+QFrame#SettingsSidePanel {
+  background: $surface;
+  border-left: 1px solid $border;
+}
+
+QFrame#SettingsPanelHeader {
+  background: transparent;
+  border: none;
+}
+
+QLabel#SettingsPanelTitle {
+  color: $text;
+  font-weight: 600;
+}
+
+QPushButton#SettingsPanelBackButton,
+QPushButton#SettingsPanelCloseButton {
+  background: $surface_raised;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_pill;
+  padding: 6px 12px;
+  color: $text_muted;
+}
+
+QPushButton#SettingsPanelBackButton:hover,
+QPushButton#SettingsPanelCloseButton:hover {
+  border-color: $primary_hover;
+  color: $text;
+}
+
+QWidget#SettingsContent QLabel#SettingsTitle {
+  color: $text;
+  font-weight: 600;
+}
+
+QWidget#SettingsContent QFrame#SettingsNav {
+  background: transparent;
+  border: none;
+  min-width: 116px;
+}
+
+QWidget#SettingsContent QPushButton#SettingsTabModels,
+QWidget#SettingsContent QPushButton#SettingsTabPrivacy,
+QWidget#SettingsContent QPushButton#SettingsTabProviders,
+QWidget#SettingsContent QPushButton#SettingsTabLanguage,
+QWidget#SettingsContent QPushButton#SettingsTabShortcuts,
+QWidget#SettingsContent QPushButton#SettingsTabAbout {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: $radius_small;
+  padding: 8px 10px;
+  text-align: left;
+  color: $text_muted;
+}
+
+QWidget#SettingsContent QPushButton#SettingsTabModels:hover,
+QWidget#SettingsContent QPushButton#SettingsTabPrivacy:hover,
+QWidget#SettingsContent QPushButton#SettingsTabProviders:hover,
+QWidget#SettingsContent QPushButton#SettingsTabLanguage:hover,
+QWidget#SettingsContent QPushButton#SettingsTabShortcuts:hover,
+QWidget#SettingsContent QPushButton#SettingsTabAbout:hover {
+  background: $surface_raised;
+  border-color: $border_subtle;
+  color: $text;
+}
+
+QWidget#SettingsContent QPushButton#SettingsTabModels:checked,
+QWidget#SettingsContent QPushButton#SettingsTabPrivacy:checked,
+QWidget#SettingsContent QPushButton#SettingsTabProviders:checked,
+QWidget#SettingsContent QPushButton#SettingsTabLanguage:checked,
+QWidget#SettingsContent QPushButton#SettingsTabShortcuts:checked,
+QWidget#SettingsContent QPushButton#SettingsTabAbout:checked {
+  background: $user_surface;
+  border-color: $border;
+  color: $text;
+}
+
+QWidget#SettingsContent QLabel#SettingsPageTitleModels,
+QWidget#SettingsContent QLabel#SettingsPageTitlePrivacy,
+QWidget#SettingsContent QLabel#SettingsPageTitleProviders,
+QWidget#SettingsContent QLabel#SettingsPageTitleLanguage,
+QWidget#SettingsContent QLabel#SettingsPageTitleShortcuts,
+QWidget#SettingsContent QLabel#SettingsPageTitleAbout {
+  color: $text;
+  font-weight: 600;
+}
+
+QWidget#SettingsContent QLabel#SettingsDescription,
+QWidget#SettingsContent QLabel#PrivacyModeHint,
+QWidget#SettingsContent QLabel#FieldLabel {
+  color: $text_muted;
+  font-size: $font_size_small;
+}
+
+QWidget#SettingsContent QPushButton#LanguageZhButton,
+QWidget#SettingsContent QPushButton#LanguageEnButton {
+  background: $surface;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_pill;
+  padding: 7px 18px;
+  color: $text_muted;
+}
+
+QWidget#SettingsContent QPushButton#LanguageZhButton:checked,
+QWidget#SettingsContent QPushButton#LanguageEnButton:checked {
+  background: $user_surface;
+  border-color: $primary;
+  color: $primary;
+}
+
 QFrame#SettingsDrawer {
   background: transparent;
   border: none;

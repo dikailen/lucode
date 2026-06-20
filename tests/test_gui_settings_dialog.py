@@ -16,6 +16,7 @@ if HAS_PYSIDE:
     from lucode.gui.chat_session import GuiChatSession  # noqa: E402
     from lucode.gui.control_panel import ControlBar  # noqa: E402
     from lucode.gui.main_window import MainWindow  # noqa: E402
+    from lucode.gui.settings_panel import SettingsSidePanel  # noqa: E402
     from lucode.gui.settings_dialog import SettingsDialog  # noqa: E402
 
 
@@ -192,19 +193,49 @@ def test_settings_dialog_signals_still_update_chat_session(app, tmp_path):
     assert session.settings.privacy_mode == "offline"
 
 
-def test_main_window_settings_button_opens_dialog(app, tmp_path):
+def test_main_window_settings_button_opens_embedded_panel(app, tmp_path):
     session = GuiChatSession(workspace=tmp_path)
     window = MainWindow(workspace=tmp_path, chat_session=session)
+    window.show()
+    app.processEvents()
     button = window.control_bar.findChild(QPushButton, "SettingsButton")
 
     assert button is not None
+    assert isinstance(window.settings_panel, SettingsSidePanel)
+    assert not window.settings_panel.isVisible()
+
     button.click()
     app.processEvents()
 
-    dialog = window.findChild(SettingsDialog, "SettingsDialog")
-    assert dialog is not None
-    assert dialog.isVisible()
-    dialog.close()
+    assert window.settings_panel.isVisible()
+    assert window.settings_panel.current_view() == "settings"
+    assert window.findChild(SettingsDialog, "SettingsDialog") is None
+
+    window.settings_panel.close_button.click()
+    app.processEvents()
+
+    assert not window.settings_panel.isVisible()
+
+
+def test_main_window_provider_manager_stays_inside_settings_panel(app, tmp_path):
+    session = GuiChatSession(workspace=tmp_path)
+    window = MainWindow(workspace=tmp_path, chat_session=session)
+    window.show()
+    app.processEvents()
+
+    window._open_settings_dialog()
+    window.settings_dialog.select_page("Providers")
+    window.settings_dialog.provider_manager_button.click()
+    app.processEvents()
+
+    assert window.settings_panel.isVisible()
+    assert window.settings_panel.current_view() == "providers"
+    assert window.settings_panel.provider_content.isVisible()
+
+    window.settings_panel.back_button.click()
+    app.processEvents()
+
+    assert window.settings_panel.current_view() == "settings"
 
 
 def test_main_window_language_switch_refreshes_and_persists(app, tmp_path):

@@ -39,6 +39,7 @@ CUSTOM_PROVIDER_SENTINEL = "__custom_provider__"
 
 class ProviderManagerDialog(QDialog):
     providers_changed = Signal()
+    close_requested = Signal()
 
     def __init__(
         self,
@@ -48,12 +49,14 @@ class ProviderManagerDialog(QDialog):
         privacy_mode: str = "local_first",
         language: str = "zh",
         parent: QWidget | None = None,
+        embedded: bool = False,
     ) -> None:
         super().__init__(parent)
         self.workspace_root = Path(workspace_root)
         self.user_home = Path(user_home)
         self.privacy_mode = str(privacy_mode or "local_first")
         self._language = normalize_language(language)
+        self._embedded = bool(embedded)
         self._t = Translator(self._language)
         self.catalog = load_provider_catalog()
         self._mode = "list"
@@ -101,12 +104,18 @@ class ProviderManagerDialog(QDialog):
 
         footer = QHBoxLayout()
         footer.addStretch(1)
-        close_button = QPushButton(self._t('provider.close'))
-        close_button.clicked.connect(self.close)
-        footer.addWidget(close_button)
+        self.close_button = QPushButton(self._t('provider.close'))
+        self.close_button.setObjectName("ProviderCloseButton")
+        self.close_button.clicked.connect(self._handle_close_requested)
+        footer.addWidget(self.close_button)
         layout.addLayout(footer)
 
         self.stack.addWidget(page)
+
+    def _handle_close_requested(self) -> None:
+        self.close_requested.emit()
+        if not self._embedded:
+            self.close()
 
     def _build_form_page(self) -> None:
         page = QWidget()
@@ -558,4 +567,3 @@ class ProviderManagerDialog(QDialog):
         self.homepage_edit.setText(str(provider_info.get("homepage") or ""))
         default_models = [str(item).strip() for item in provider_info.get("models") or [] if str(item).strip()]
         self.manual_models_edit.setPlainText("\n".join(default_models))
-

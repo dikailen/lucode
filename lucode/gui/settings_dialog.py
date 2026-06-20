@@ -109,7 +109,7 @@ class _WorkerPoolRow(QFrame):
             box.setEnabled(enabled)
 
 
-class SettingsDialog(QDialog):
+class SettingsContent(QWidget):
     privacy_mode_changed = Signal(str)
     role_model_changed = Signal(str, str)
     query_refiner_toggled = Signal(bool)
@@ -117,14 +117,14 @@ class SettingsDialog(QDialog):
     provider_manager_requested = Signal()
     custom_provider_requested = Signal()
     language_changed = Signal(str)
+    close_requested = Signal()
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None, *, show_footer: bool = True):
         super().__init__(parent)
-        self.setObjectName("SettingsDialog")
+        self.setObjectName("SettingsContent")
         self._language = "zh"
         self._t = Translator(self._language)
         self.setWindowTitle(self._t('settings.window'))
-        self.setModal(False)
         self.resize(760, 560)
 
         self._models: list[tuple[str, str]] = []
@@ -223,9 +223,12 @@ class SettingsDialog(QDialog):
         footer.addStretch(1)
         self.close_button = QPushButton(self._t('settings.close'))
         close_button = self.close_button
-        close_button.clicked.connect(self.close)
-        footer.addWidget(close_button)
-        outer.addLayout(footer)
+        close_button.clicked.connect(self.close_requested.emit)
+        if show_footer:
+            footer.addWidget(close_button)
+            outer.addLayout(footer)
+        else:
+            close_button.hide()
         self._building = False
 
     def _build_models_page(self) -> None:
@@ -506,3 +509,81 @@ class SettingsDialog(QDialog):
             return
         self._worker_pool = self._pool_row.selected_models()
         self.worker_pool_changed.emit(list(self._worker_pool))
+
+
+class SettingsDialog(QDialog):
+    privacy_mode_changed = Signal(str)
+    role_model_changed = Signal(str, str)
+    query_refiner_toggled = Signal(bool)
+    worker_pool_changed = Signal(list)
+    provider_manager_requested = Signal()
+    custom_provider_requested = Signal()
+    language_changed = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("SettingsDialog")
+        self.content = SettingsContent(parent=self)
+        self.setWindowTitle(self.content.windowTitle())
+        self.setModal(False)
+        self.resize(760, 560)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.content)
+
+        self.content.privacy_mode_changed.connect(self.privacy_mode_changed.emit)
+        self.content.role_model_changed.connect(self.role_model_changed.emit)
+        self.content.query_refiner_toggled.connect(self.query_refiner_toggled.emit)
+        self.content.worker_pool_changed.connect(self.worker_pool_changed.emit)
+        self.content.provider_manager_requested.connect(self.provider_manager_requested.emit)
+        self.content.custom_provider_requested.connect(self.custom_provider_requested.emit)
+        self.content.language_changed.connect(self._on_content_language_changed)
+        self.content.close_requested.connect(self.close)
+
+    def __getattr__(self, name: str):
+        content = self.__dict__.get("content")
+        if content is not None and hasattr(content, name):
+            return getattr(content, name)
+        raise AttributeError(name)
+
+    def _on_content_language_changed(self, language: str) -> None:
+        self.setWindowTitle(self.content.windowTitle())
+        self.language_changed.emit(language)
+
+    def select_page(self, key: str) -> None:
+        self.content.select_page(key)
+
+    def current_language(self) -> str:
+        return self.content.current_language()
+
+    def set_language(self, language: str, *, emit: bool = False) -> None:
+        self.content.set_language(language, emit=emit)
+        self.setWindowTitle(self.content.windowTitle())
+
+    def set_models(self, models: list[tuple[str, str]]) -> None:
+        self.content.set_models(models)
+
+    def set_initial(
+        self,
+        *,
+        execution_mode: str,
+        privacy_mode: str,
+        role_models: dict[str, str],
+        query_refiner_enabled: bool = False,
+        worker_pool: list[str] | None = None,
+    ) -> None:
+        self.content.set_initial(
+            execution_mode=execution_mode,
+            privacy_mode=privacy_mode,
+            role_models=role_models,
+            query_refiner_enabled=query_refiner_enabled,
+            worker_pool=worker_pool,
+        )
+
+    def set_execution_mode(self, mode: str) -> None:
+        self.content.set_execution_mode(mode)
+
+    def set_enabled(self, enabled: bool) -> None:
+        self.content.set_enabled(enabled)

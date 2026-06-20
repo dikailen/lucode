@@ -27,9 +27,9 @@ from lucode.gui.chat_session import GuiChatSession
 from lucode.gui.control_panel import ControlBar
 from lucode.gui.event_bridge import EventBridge
 from lucode.gui.i18n import Translator, load_gui_language, save_gui_language
-from lucode.gui.provider_manager import ProviderManagerDialog
 from lucode.gui.session_sidebar import SessionSidebar
-from lucode.gui.settings_dialog import SettingsDialog
+from lucode.gui.settings_dialog import SettingsContent
+from lucode.gui.settings_panel import SettingsSidePanel
 from lucode.gui.stream_routing import classify_gui_stream_event
 from lucode.gui.turn_state import TurnStateGuard
 from lucode.gui.widgets import ErrorRecoveryPanel, AnswerBlock, MessageBubble, ThinkingIndicator, WorkArea, status_style
@@ -155,7 +155,19 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(header)
 
         self.control_bar = ControlBar(language=self.language)
-        self.settings_dialog = SettingsDialog(parent=self)
+        self.settings_dialog = SettingsContent(parent=self, show_footer=False)
+        self.settings_panel = SettingsSidePanel(
+            settings_content=self.settings_dialog,
+            workspace_root=self.chat_session.workspace_context.workspace_root,
+            user_home=self.chat_session.workspace_context.user_home,
+            privacy_mode=self.chat_session.settings.privacy_mode,
+            language=self.language,
+            parent=self,
+        )
+        self.settings_panel.providers_changed.connect(self._refresh_configured_models)
+        self.main_splitter.addWidget(self.settings_panel)
+        self.main_splitter.setStretchFactor(2, 0)
+        self.main_splitter.setSizes([260, 780, 0])
         self._init_control_bar()
 
         self.scroll_area = QScrollArea()
@@ -222,6 +234,7 @@ class MainWindow(QMainWindow):
         self.set_status_i18n("idle", "main.ready")
         self.session_sidebar.set_language(self.language)
         self.settings_dialog.set_language(self.language)
+        self.settings_panel.set_language(self.language)
         self.input_box.set_language(self.language)
         self.control_bar.set_language(self.language)
         self.session_sidebar.refresh()
@@ -268,6 +281,7 @@ class MainWindow(QMainWindow):
         self.input_box.set_language(language)
         self.session_sidebar.set_language(language)
         self.settings_dialog.set_language(language)
+        self.settings_panel.set_language(language)
         self.control_bar.set_language(language)
         self.approval_session.language = language
         self.sidebar_toggle_button.setToolTip(self._t('main.sidebar.toggle_tip'))
@@ -279,32 +293,15 @@ class MainWindow(QMainWindow):
         self.set_status_i18n(self._status_state, self._status_event_key)
 
     def _open_settings_dialog(self) -> None:
-        self.settings_dialog.show()
-        self.settings_dialog.raise_()
-        self.settings_dialog.activateWindow()
+        self.settings_panel.show_settings()
 
     def _open_provider_manager(self) -> None:
-        dialog = ProviderManagerDialog(
-            workspace_root=self.chat_session.workspace_context.workspace_root,
-            user_home=self.chat_session.workspace_context.user_home,
-            privacy_mode=self.chat_session.settings.privacy_mode,
-            language=self.language,
-            parent=self,
-        )
-        dialog.providers_changed.connect(self._refresh_configured_models)
-        dialog.exec()
+        self.settings_panel.set_privacy_mode(self.chat_session.settings.privacy_mode)
+        self.settings_panel.show_provider_manager()
 
     def _open_custom_provider_manager(self) -> None:
-        dialog = ProviderManagerDialog(
-            workspace_root=self.chat_session.workspace_context.workspace_root,
-            user_home=self.chat_session.workspace_context.user_home,
-            privacy_mode=self.chat_session.settings.privacy_mode,
-            language=self.language,
-            parent=self,
-        )
-        dialog.providers_changed.connect(self._refresh_configured_models)
-        dialog.start_custom_provider()
-        dialog.exec()
+        self.settings_panel.set_privacy_mode(self.chat_session.settings.privacy_mode)
+        self.settings_panel.show_provider_manager(custom=True)
 
     def _refresh_configured_models(self) -> None:
         clear_model_catalog_cache()
@@ -489,9 +486,7 @@ class MainWindow(QMainWindow):
         self.set_status_i18n("idle", "main.event.retry_prefilled")
 
     def _open_settings_models_page(self) -> None:
-        if hasattr(self.settings_dialog, "select_page"):
-            self.settings_dialog.select_page("Models")
-        self._open_settings_dialog()
+        self.settings_panel.show_settings("Models")
 
     def _append_stream_answer(self, text: str) -> None:
         if not text:
@@ -546,7 +541,7 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(running)
         self.input_box.setEnabled(not running)
         self.control_bar.set_enabled(not running)
-        self.settings_dialog.set_enabled(not running)
+        self.settings_panel.set_enabled(not running)
         self.session_sidebar.set_enabled(not running)
 
     def set_stopping(self) -> None:
@@ -554,7 +549,7 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(False)
         self.input_box.setEnabled(False)
         self.control_bar.set_enabled(False)
-        self.settings_dialog.set_enabled(False)
+        self.settings_panel.set_enabled(False)
         self.session_sidebar.set_enabled(False)
         self.set_status_i18n("stopped", "main.event.stopping")
 
@@ -563,7 +558,7 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(True)
         self.input_box.setEnabled(False)
         self.control_bar.set_enabled(False)
-        self.settings_dialog.set_enabled(False)
+        self.settings_panel.set_enabled(False)
         self.session_sidebar.set_enabled(False)
         self.set_status_i18n("running", "main.event.approval")
 
