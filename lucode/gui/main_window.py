@@ -26,6 +26,7 @@ from lucode.gui.answer_stream import AnswerStreamState
 from lucode.gui.chat_session import GuiChatSession
 from lucode.gui.control_panel import ControlBar
 from lucode.gui.event_bridge import EventBridge
+from lucode.gui.i18n import Translator, load_gui_language, save_gui_language
 from lucode.gui.provider_manager import ProviderManagerDialog
 from lucode.gui.session_sidebar import SessionSidebar
 from lucode.gui.settings_dialog import SettingsDialog
@@ -53,8 +54,15 @@ class ChatInput(QPlainTextEdit):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setPlaceholderText("输入消息，回车发送，Shift+回车换行")
+        self._language = 'zh'
+        self._t = Translator(self._language)
+        self.setPlaceholderText(self._t('main.input.placeholder'))
         self.setFixedHeight(82)
+
+    def set_language(self, language: str) -> None:
+        self._language = language
+        self._t = Translator(language)
+        self.setPlaceholderText(self._t('main.input.placeholder'))
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() in {Qt.Key_Return, Qt.Key_Enter} and not event.modifiers() & Qt.ShiftModifier:
@@ -84,6 +92,9 @@ class MainWindow(QMainWindow):
             event_bridge=self.event_bridge,
             approval_session=self.approval_session,
         )
+        self.language = load_gui_language(workspace_root=self.workspace)
+        self._t = Translator(self.language)
+        self.approval_session.language = self.language
         self.mode = str(mode or getattr(self.chat_session.settings, "execution_mode", "") or "settings")
         self.turn_guard = TurnStateGuard()
         self.work_area: WorkArea | None = None
@@ -97,6 +108,8 @@ class MainWindow(QMainWindow):
         self._error_panel_row: QWidget | None = None
         self._error_panel: ErrorRecoveryPanel | None = None
         self._last_failed_prompt = ""
+        self._status_state = "idle"
+        self._status_event_key = "main.ready"
         self.work_task: asyncio.Task | None = None
         self.work_task_id = 0
         self._turn_start: float = 0.0
@@ -133,15 +146,15 @@ class MainWindow(QMainWindow):
         header_layout.setSpacing(8)
         self.sidebar_toggle_button = QPushButton("⟨")
         self.sidebar_toggle_button.setObjectName("SidebarToggleButton")
-        self.sidebar_toggle_button.setToolTip("折叠/展开会话栏")
+        self.sidebar_toggle_button.setToolTip(self._t('main.sidebar.toggle_tip'))
         self.sidebar_toggle_button.clicked.connect(self._toggle_session_sidebar)
         header_layout.addWidget(self.sidebar_toggle_button)
-        self.session_title_label = QLabel("新会话")
+        self.session_title_label = QLabel(self._t('main.new_chat'))
         self.session_title_label.setObjectName("SessionTitleLabel")
         header_layout.addWidget(self.session_title_label, 1)
         root_layout.addWidget(header)
 
-        self.control_bar = ControlBar()
+        self.control_bar = ControlBar(language=self.language)
         self.settings_dialog = SettingsDialog(parent=self)
         self._init_control_bar()
 
@@ -156,7 +169,7 @@ class MainWindow(QMainWindow):
         self.message_layout.setSpacing(10)
         self.scroll_area.setWidget(self.message_host)
 
-        self.empty_state = QLabel("输入问题，开始使用 Lucode")
+        self.empty_state = QLabel(self._t('main.empty'))
         self.empty_state.setObjectName("EmptyState")
         self.empty_state.setAlignment(Qt.AlignCenter)
         self.message_layout.addWidget(self.empty_state, 1)
@@ -187,12 +200,12 @@ class MainWindow(QMainWindow):
         self.input_box.submit_requested.connect(self.send_current_message)
         input_row_layout.addWidget(self.input_box, 1)
 
-        self.send_button = QPushButton("发送")
+        self.send_button = QPushButton(self._t('main.send'))
         self.send_button.setObjectName("SendButton")
         self.send_button.clicked.connect(self.send_current_message)
         input_row_layout.addWidget(self.send_button)
 
-        self.stop_button = QPushButton("停止")
+        self.stop_button = QPushButton(self._t('main.stop'))
         self.stop_button.setObjectName("StopButton")
         self.stop_button.clicked.connect(self.stop_current_turn)
         self.stop_button.setEnabled(False)
@@ -201,12 +214,16 @@ class MainWindow(QMainWindow):
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.state_label = QLabel()
-        self.event_label = QLabel("就绪")
+        self.event_label = QLabel(self._t('main.ready'))
         self.path_label = QLabel(str(self.workspace))
         self.status.addWidget(self.state_label)
         self.status.addWidget(self.event_label, 1)
         self.status.addPermanentWidget(self.path_label)
-        self.set_status("idle", "就绪")
+        self.set_status_i18n("idle", "main.ready")
+        self.session_sidebar.set_language(self.language)
+        self.settings_dialog.set_language(self.language)
+        self.input_box.set_language(self.language)
+        self.control_bar.set_language(self.language)
         self.session_sidebar.refresh()
 
     def _init_control_bar(self) -> None:
@@ -242,6 +259,24 @@ class MainWindow(QMainWindow):
         self.settings_dialog.worker_pool_changed.connect(self.chat_session.set_allowed_worker_models)
         self.settings_dialog.provider_manager_requested.connect(self._open_provider_manager)
         self.settings_dialog.custom_provider_requested.connect(self._open_custom_provider_manager)
+        self.settings_dialog.language_changed.connect(self._on_language_changed)
+
+    def _on_language_changed(self, language: str) -> None:
+        self.language = language
+        self._t = Translator(language)
+        save_gui_language(language, workspace_root=self.workspace)
+        self.input_box.set_language(language)
+        self.session_sidebar.set_language(language)
+        self.settings_dialog.set_language(language)
+        self.control_bar.set_language(language)
+        self.approval_session.language = language
+        self.sidebar_toggle_button.setToolTip(self._t('main.sidebar.toggle_tip'))
+        self.send_button.setText(self._t('main.send'))
+        self.stop_button.setText(self._t('main.stop'))
+        if self.session_title_label.text() in {'新会话', 'New chat'}:
+            self.session_title_label.setText(self._t('main.new_chat'))
+        self.empty_state.setText(self._t('main.empty'))
+        self.set_status_i18n(self._status_state, self._status_event_key)
 
     def _open_settings_dialog(self) -> None:
         self.settings_dialog.show()
@@ -253,6 +288,7 @@ class MainWindow(QMainWindow):
             workspace_root=self.chat_session.workspace_context.workspace_root,
             user_home=self.chat_session.workspace_context.user_home,
             privacy_mode=self.chat_session.settings.privacy_mode,
+            language=self.language,
             parent=self,
         )
         dialog.providers_changed.connect(self._refresh_configured_models)
@@ -263,6 +299,7 @@ class MainWindow(QMainWindow):
             workspace_root=self.chat_session.workspace_context.workspace_root,
             user_home=self.chat_session.workspace_context.user_home,
             privacy_mode=self.chat_session.settings.privacy_mode,
+            language=self.language,
             parent=self,
         )
         dialog.providers_changed.connect(self._refresh_configured_models)
@@ -291,8 +328,8 @@ class MainWindow(QMainWindow):
         self.chat_session.new_session()
         self.session_sidebar.select_session("")
         self._clear_message_area()
-        self.session_title_label.setText("新会话")
-        self.set_status("idle", "新会话")
+        self.session_title_label.setText(self._t('main.new_chat'))
+        self.set_status_i18n("idle", "main.event.new_chat")
 
     def _resume_selected_session(self, session_id: str) -> None:
         if not self.turn_guard.can_start_new_turn:
@@ -316,9 +353,9 @@ class MainWindow(QMainWindow):
             elif role == "assistant":
                 self.add_answer_block(content)
         self.session_title_label.setText(
-            self.session_sidebar.session_title(current_id) or _title_from_messages(messages) or "历史会话"
+            self.session_sidebar.session_title(current_id) or _title_from_messages(messages) or self._t('main.history')
         )
-        self.set_status("idle", "已恢复会话")
+        self.set_status_i18n("idle", "main.event.restored")
 
     def _on_sidebar_session_deleted(self, session_id: str) -> None:
         if str(session_id or "") == str(self.chat_session.current_session_id or ""):
@@ -340,9 +377,9 @@ class MainWindow(QMainWindow):
         self._stream_answer_block = None
         self._answer_stream.reset()
         self._turn_start = time.monotonic()
-        self._show_thinking("正在思考")
+        self._show_thinking(self._t('main.event.thinking'))
         self.set_running(True)
-        self.set_status("running", "处理中")
+        self.set_status_i18n("running", "main.event.processing")
         self.work_task_id = turn_id
         self.work_task = asyncio.create_task(self._run_turn(turn_id, text))
 
@@ -394,7 +431,7 @@ class MainWindow(QMainWindow):
             self._work_area_row.deleteLater()
             self._work_area_row = None
         model_labels = dict(self.chat_session.list_configured_models())
-        area = WorkArea(payload, model_labels=model_labels)
+        area = WorkArea(payload, model_labels=model_labels, language=self.language)
         self.work_area = area
         row = QWidget()
         row_layout = QHBoxLayout(row)
@@ -421,7 +458,7 @@ class MainWindow(QMainWindow):
         self._clear_thinking()
         self._hide_empty_state()
         self._clear_error_panel()
-        panel = ErrorRecoveryPanel(reason)
+        panel = ErrorRecoveryPanel(reason, language=self.language)
         panel.retry_requested.connect(self._prefill_retry_prompt)
         panel.switch_model_requested.connect(self._open_settings_models_page)
         panel.provider_doctor_requested.connect(self._open_provider_manager)
@@ -432,7 +469,7 @@ class MainWindow(QMainWindow):
         self.message_layout.addWidget(row)
         self._error_panel = panel
         self._error_panel_row = row
-        self.set_status("failed", "运行失败")
+        self.set_status_i18n("failed", "main.event.failed")
         self.set_running(False)
         self._scroll_to_bottom()
         return panel
@@ -449,7 +486,7 @@ class MainWindow(QMainWindow):
         if prompt:
             self.input_box.setPlainText(prompt)
             self.input_box.setFocus()
-        self.set_status("idle", "已回填失败请求")
+        self.set_status_i18n("idle", "main.event.retry_prefilled")
 
     def _open_settings_models_page(self) -> None:
         if hasattr(self.settings_dialog, "select_page"):
@@ -519,7 +556,7 @@ class MainWindow(QMainWindow):
         self.control_bar.set_enabled(False)
         self.settings_dialog.set_enabled(False)
         self.session_sidebar.set_enabled(False)
-        self.set_status("stopped", "正在停止")
+        self.set_status_i18n("stopped", "main.event.stopping")
 
     def set_approval_waiting(self) -> None:
         self.send_button.setEnabled(False)
@@ -528,16 +565,21 @@ class MainWindow(QMainWindow):
         self.control_bar.set_enabled(False)
         self.settings_dialog.set_enabled(False)
         self.session_sidebar.set_enabled(False)
-        self.set_status("running", "等待审批")
+        self.set_status_i18n("running", "main.event.approval")
 
-    def set_status(self, state: str, event: str) -> None:
+    def set_status_i18n(self, state: str, event_key: str) -> None:
+        self.set_status(state, self._t(event_key), event_key=event_key)
+
+    def set_status(self, state: str, event: str, *, event_key: str = "") -> None:
+        self._status_state = state
+        self._status_event_key = event_key
         labels = {
-            "idle": "空闲",
-            "running": "运行中",
-            "stopped": "已停止",
-            "failed": "失败",
+            "idle": self._t('main.status.idle'),
+            "running": self._t('main.status.running'),
+            "stopped": self._t('main.status.stopped'),
+            "failed": self._t('main.status.failed'),
         }
-        self.state_label.setText(f"{labels.get(state, state)} · 模式 {self.mode}")
+        self.state_label.setText(f"{labels.get(state, state)} · {self._t('main.status.mode')} {self.mode}")
         self.state_label.setStyleSheet(status_style(state))
         self.event_label.setText(event)
 
@@ -548,11 +590,11 @@ class MainWindow(QMainWindow):
         task_id = str(event.get("task_id") or "")
 
         if event_type == "TurnStarted":
-            self.set_status("running", "本轮开始")
+            self.set_status_i18n("running", "main.event.turn_started")
             return
         if event_type == "PlanningStarted":
             if self._thinking_indicator is not None:
-                self._thinking_indicator.set_base("主脑正在规划")
+                self._thinking_indicator.set_base(self._t('main.event.planning'))
         if event_type == "PlanningCompleted":
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
             if payload.get("tasks") or payload.get("route_type"):
@@ -587,9 +629,9 @@ class MainWindow(QMainWindow):
             if self.turn_guard.is_running and not self.turn_guard.is_stopping:
                 payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
                 if str(payload.get("status") or "") == "failed":
-                    self.show_failed_state(_event_text(event) or "本轮运行失败。")
+                    self.show_failed_state(_event_text(event) or self._t('main.turn_failed_default'))
                 else:
-                    self.set_status("idle", "本轮完成")
+                    self.set_status_i18n("idle", "main.event.completed")
             return
         if event_type == "ToolApprovalPre":
             self.approval_context.update_from_event(event)
@@ -598,7 +640,7 @@ class MainWindow(QMainWindow):
         if event_type == "ToolApprovalPost":
             if self.turn_guard.is_running and not self.turn_guard.is_stopping:
                 self.set_running(True)
-                self.set_status("running", "审批已处理")
+                self.set_status_i18n("running", "main.event.approval_done")
         summary = _event_summary(event)
         if summary:
             self.event_label.setText(summary)
@@ -613,11 +655,11 @@ class MainWindow(QMainWindow):
                     self.add_answer_block(result.final_output)
             self.mode = result.execution_mode or self.mode
             if result.stopped:
-                self.set_status("stopped", "已停止")
+                self.set_status_i18n("stopped", "main.event.stopped")
             elif result.failed:
                 self.show_failed_state(result.final_output)
             else:
-                self.set_status("idle", "本轮完成")
+                self.set_status_i18n("idle", "main.event.completed")
             self.session_sidebar.refresh()
             current_id = str(self.chat_session.current_session_id or "").strip()
             if current_id:
@@ -640,7 +682,7 @@ class MainWindow(QMainWindow):
             self.empty_state.hide()
 
     def _create_empty_state(self) -> QLabel:
-        label = QLabel("输入问题，开始使用 Lucode")
+        label = QLabel(self._t('main.empty'))
         label.setObjectName("EmptyState")
         label.setAlignment(Qt.AlignCenter)
         return label

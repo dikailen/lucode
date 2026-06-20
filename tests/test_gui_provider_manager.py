@@ -188,3 +188,25 @@ def test_settings_dialog_exposes_provider_manager_entry(app):
     dialog.provider_manager_button.click()
 
     assert emitted == [True]
+
+
+
+def test_provider_manager_uses_english_labels_when_language_is_english(tmp_path, app):
+    from lucode.gui.provider_manager import ProviderManagerDialog
+
+    dialog = ProviderManagerDialog(
+        workspace_root=tmp_path / "ws",
+        user_home=tmp_path / "home",
+        language="en",
+    )
+
+    assert dialog.windowTitle() == "Models and providers"
+    assert dialog.fetch_button.text() == "Fetch models"
+    assert dialog.select_all_models.text() == "Select all"
+    assert dialog.search_edit.placeholderText() == "Search models..."
+    assert dialog.provider_combo.itemText(0) == "+ Custom proxy"
+
+    dialog.start_custom_provider("proxy")
+
+    assert dialog.form_title.text() == "Add custom proxy"
+    assert dialog.save_button.text() == "Save"

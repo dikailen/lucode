@@ -1,24 +1,14 @@
 from __future__ import annotations
 
-from runtime.config.execution_mode import EXECUTION_MODES, execution_mode_label_zh, normalize_execution_mode
-from runtime.config.model_config import MODEL_ROLES, ROLE_ORDER
-from runtime.safety.privacy import PRIVACY_MODES, normalize_privacy_mode
+from runtime.config.execution_mode import EXECUTION_MODES, normalize_execution_mode
+from runtime.config.model_config import ROLE_ORDER
+from runtime.safety.privacy import PRIVACY_MODES
+
+from lucode.gui.i18n import Translator, normalize_language
 
 
 EXECUTION_MODE_ORDER = ("solo", "serial", "full")
 PRIVACY_MODE_ORDER = ("offline", "local_first", "cloud_allowed")
-
-PRIVACY_LABELS_ZH = {
-    "offline": "离线",
-    "local_first": "本地优先",
-    "cloud_allowed": "允许云端",
-}
-
-EXECUTION_MODE_HINTS_ZH = {
-    "solo": "单执行脑直接完成任务",
-    "serial": "主脑规划，专家串行流水线",
-    "full": "主脑按复杂度组队，多员工并行",
-}
 
 # 每个执行模式实际会用到的角色脑（依据 runtime 实现核实）。
 # value: (role_id, "always" | "conditional")
@@ -36,21 +26,42 @@ MODE_ROLE_USAGE: dict[str, list[tuple[str, str]]] = {
     ],
 }
 
-ROLE_CONDITION_HINTS_ZH = {
-    "final_synthesizer": "多 agent 路线时启用",
-}
+
+def execution_mode_label(mode: str, language: str = "zh") -> str:
+    normalized = normalize_execution_mode(mode)
+    return Translator(language)(f"control.mode.{normalized}")
 
 
-def execution_mode_options() -> list[tuple[str, str]]:
-    return [(mode, execution_mode_label_zh(mode)) for mode in EXECUTION_MODE_ORDER if mode in EXECUTION_MODES]
+def execution_mode_options(language: str = "zh") -> list[tuple[str, str]]:
+    return [
+        (mode, execution_mode_label(mode, language))
+        for mode in EXECUTION_MODE_ORDER
+        if mode in EXECUTION_MODES
+    ]
 
 
-def privacy_mode_options() -> list[tuple[str, str]]:
-    return [(mode, PRIVACY_LABELS_ZH.get(mode, mode)) for mode in PRIVACY_MODE_ORDER if mode in PRIVACY_MODES]
+def privacy_mode_options(language: str = "zh") -> list[tuple[str, str]]:
+    t = Translator(language)
+    return [
+        (mode, t(f"privacy.{mode}"))
+        for mode in PRIVACY_MODE_ORDER
+        if mode in PRIVACY_MODES
+    ]
 
 
-def role_options() -> list[tuple[str, str]]:
-    return [(role, MODEL_ROLES[role]["label"]) for role in ROLE_ORDER]
+def role_label(role: str, language: str = "zh") -> str:
+    return Translator(language)(f"role.{role}")
+
+
+def role_condition_hint(role: str, language: str = "zh") -> str:
+    t = Translator(language)
+    if role == "final_synthesizer":
+        return t("settings.role.final_synthesizer_hint")
+    return t("settings.role.conditional")
+
+
+def role_options(language: str = "zh") -> list[tuple[str, str]]:
+    return [(role, role_label(role, language)) for role in ROLE_ORDER]
 
 
 def roles_for_mode(mode: str) -> list[tuple[str, str]]:
@@ -100,9 +111,11 @@ if _PYSIDE_AVAILABLE:
         execution_mode_changed = Signal(str)
         settings_requested = Signal()
 
-        def __init__(self, parent: QWidget | None = None):
+        def __init__(self, parent: QWidget | None = None, *, language: str = "zh"):
             super().__init__(parent)
             self.setObjectName("ControlBar")
+            self._language = normalize_language(language)
+            self._t = Translator(self._language)
             self._mode = "solo"
             self._building = True
 
@@ -114,20 +127,21 @@ if _PYSIDE_AVAILABLE:
             self._building = False
 
         def _build_row(self, outer) -> None:
-            seg_label = QLabel("执行模式")
-            seg_label.setObjectName("FieldLabel")
-            outer.addWidget(seg_label)
+            self.mode_label = QLabel(self._t("control.execution_mode"))
+            self.mode_label.setObjectName("FieldLabel")
+            outer.addWidget(self.mode_label)
 
             self._mode_group = QButtonGroup(self)
             self._mode_group.setExclusive(True)
             self._mode_buttons: dict[str, QPushButton] = {}
             seg = QHBoxLayout()
             seg.setSpacing(0)
-            for mode, label in execution_mode_options():
+            for mode, label in execution_mode_options(self._language):
                 btn = QPushButton(label)
                 btn.setCheckable(True)
                 btn.setObjectName("SegButton")
-                btn.setToolTip(EXECUTION_MODE_HINTS_ZH.get(mode, ""))
+                btn.setProperty("mode_id", mode)
+                btn.setToolTip(self._t(f"control.mode_tip.{mode}"))
                 btn.clicked.connect(lambda _checked, m=mode: self._on_mode_clicked(m))
                 self._mode_group.addButton(btn)
                 self._mode_buttons[mode] = btn
@@ -140,9 +154,27 @@ if _PYSIDE_AVAILABLE:
 
             self.settings_button = QPushButton("⚙")
             self.settings_button.setObjectName("SettingsButton")
-            self.settings_button.setToolTip("设置")
+            self.settings_button.setToolTip(self._t("control.settings_tip"))
             self.settings_button.clicked.connect(self.settings_requested.emit)
             outer.addWidget(self.settings_button)
+
+        def set_language(self, language: str) -> None:
+            self._language = normalize_language(language)
+            self._t = Translator(self._language)
+            self._refresh_language()
+
+        def _refresh_language(self) -> None:
+            self.mode_label.setText(self._t("control.execution_mode"))
+            for mode, button in self._mode_buttons.items():
+                button.setText(execution_mode_label(mode, self._language))
+                button.setToolTip(self._t(f"control.mode_tip.{mode}"))
+            self.settings_button.setToolTip(self._t("control.settings_tip"))
+            self._refresh_summary()
+
+        def _refresh_summary(self) -> None:
+            self.summary_label.setText(
+                self._t("control.summary", mode=execution_mode_label(self._mode, self._language))
+            )
 
         def set_models(self, models: list[tuple[str, str]]) -> None:
             del models
@@ -162,7 +194,7 @@ if _PYSIDE_AVAILABLE:
             btn = self._mode_buttons.get(self._mode)
             if btn is not None:
                 btn.setChecked(True)
-            self.summary_label.setText(f"模式 {execution_mode_label_zh(self._mode)}")
+            self._refresh_summary()
             self._building = False
 
         def set_enabled(self, enabled: bool) -> None:
@@ -172,6 +204,6 @@ if _PYSIDE_AVAILABLE:
 
         def _on_mode_clicked(self, mode: str) -> None:
             self._mode = normalize_execution_mode(mode)
-            self.summary_label.setText(f"模式 {execution_mode_label_zh(self._mode)}")
+            self._refresh_summary()
             if not self._building:
                 self.execution_mode_changed.emit(self._mode)

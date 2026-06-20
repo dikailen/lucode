@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from catalog_system.model_probe import fetch_upstream_models
+from lucode.gui.i18n import Translator, normalize_language
 from runtime.config.model_config import (
     connect_provider,
     load_auth,
@@ -45,19 +46,22 @@ class ProviderManagerDialog(QDialog):
         workspace_root: Path | str,
         user_home: Path | str,
         privacy_mode: str = "local_first",
+        language: str = "zh",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.workspace_root = Path(workspace_root)
         self.user_home = Path(user_home)
         self.privacy_mode = str(privacy_mode or "local_first")
+        self._language = normalize_language(language)
+        self._t = Translator(self._language)
         self.catalog = load_provider_catalog()
         self._mode = "list"
         self._editing_provider_id = ""
         self._model_checks: dict[str, QCheckBox] = {}
 
         self.setObjectName("ProviderManagerDialog")
-        self.setWindowTitle("模型与接入")
+        self.setWindowTitle(self._t('provider.window'))
         self.resize(720, 620)
 
         root = QVBoxLayout(self)
@@ -78,11 +82,11 @@ class ProviderManagerDialog(QDialog):
         layout.setSpacing(12)
 
         header = QHBoxLayout()
-        title = QLabel("已接入服务商")
+        title = QLabel(self._t('provider.list_title'))
         title.setObjectName("ProviderManagerTitle")
         header.addWidget(title)
         header.addStretch(1)
-        add_button = QPushButton("+ 添加")
+        add_button = QPushButton(self._t('provider.add'))
         add_button.setObjectName("ProviderPrimaryButton")
         add_button.clicked.connect(self.start_add)
         header.addWidget(add_button)
@@ -97,7 +101,7 @@ class ProviderManagerDialog(QDialog):
 
         footer = QHBoxLayout()
         footer.addStretch(1)
-        close_button = QPushButton("关闭")
+        close_button = QPushButton(self._t('provider.close'))
         close_button.clicked.connect(self.close)
         footer.addWidget(close_button)
         layout.addLayout(footer)
@@ -110,44 +114,44 @@ class ProviderManagerDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        self.form_title = QLabel("添加服务商")
+        self.form_title = QLabel(self._t('provider.form.add'))
         self.form_title.setObjectName("ProviderManagerTitle")
         layout.addWidget(self.form_title)
 
         self.provider_combo = QComboBox()
         self._populate_provider_combo()
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
-        layout.addLayout(self._field_row("服务商", self.provider_combo))
+        layout.addLayout(self._field_row(self._t('provider.field.provider'), self.provider_combo))
 
         self.custom_provider_id_edit = QLineEdit()
         self.custom_provider_id_edit.setPlaceholderText("my_proxy")
         self.custom_provider_id_edit.textChanged.connect(lambda _text: self._on_provider_changed())
-        layout.addLayout(self._field_row("服务商编号", self.custom_provider_id_edit))
+        layout.addLayout(self._field_row(self._t('provider.field.provider_id'), self.custom_provider_id_edit))
 
         self.base_url_edit = QLineEdit()
         self.base_url_edit.setPlaceholderText("https://api.example.com/v1")
-        layout.addLayout(self._field_row("接口地址", self.base_url_edit))
+        layout.addLayout(self._field_row(self._t('provider.field.base_url'), self.base_url_edit))
 
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.Password)
-        self.api_key_edit.setPlaceholderText("编辑已有服务商时留空表示不修改密钥")
-        layout.addLayout(self._field_row("API 密钥", self.api_key_edit))
+        self.api_key_edit.setPlaceholderText(self._t('provider.placeholder.keep_key'))
+        layout.addLayout(self._field_row(self._t('provider.field.api_key'), self.api_key_edit))
 
         self.homepage_edit = QLineEdit()
         self.homepage_edit.setPlaceholderText("https://example.com")
-        layout.addLayout(self._field_row("官网地址", self.homepage_edit))
+        layout.addLayout(self._field_row(self._t('provider.field.homepage'), self.homepage_edit))
 
         action_row = QHBoxLayout()
-        self.fetch_button = QPushButton("获取模型")
+        self.fetch_button = QPushButton(self._t('provider.fetch'))
         self.fetch_button.setObjectName("ProviderSecondaryButton")
         self.fetch_button.clicked.connect(self.fetch_models)
         action_row.addWidget(self.fetch_button)
-        self.select_all_models = QCheckBox("全选")
+        self.select_all_models = QCheckBox(self._t('provider.select_all'))
         self.select_all_models.toggled.connect(self._toggle_all_models)
         action_row.addWidget(self.select_all_models)
         action_row.addStretch(1)
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("搜索模型...")
+        self.search_edit.setPlaceholderText(self._t('provider.search'))
         self.search_edit.textChanged.connect(self._filter_models)
         action_row.addWidget(self.search_edit)
         layout.addLayout(action_row)
@@ -171,7 +175,7 @@ class ProviderManagerDialog(QDialog):
 
         self.manual_models_edit = QPlainTextEdit()
         self.manual_models_edit.setObjectName("ProviderManualModels")
-        self.manual_models_edit.setPlaceholderText("获取失败时可手动输入模型名，逗号或换行分隔")
+        self.manual_models_edit.setPlaceholderText(self._t('provider.manual'))
         self.manual_models_edit.setFixedHeight(72)
         layout.addWidget(self.manual_models_edit)
 
@@ -180,11 +184,11 @@ class ProviderManagerDialog(QDialog):
         layout.addWidget(self.status_label)
 
         footer = QHBoxLayout()
-        back_button = QPushButton("返回")
+        back_button = QPushButton(self._t('provider.back'))
         back_button.clicked.connect(self.show_list)
         footer.addWidget(back_button)
         footer.addStretch(1)
-        self.save_button = QPushButton("保存")
+        self.save_button = QPushButton(self._t('provider.save'))
         self.save_button.setObjectName("ProviderPrimaryButton")
         self.save_button.clicked.connect(self.save_current_provider)
         footer.addWidget(self.save_button)
@@ -206,7 +210,7 @@ class ProviderManagerDialog(QDialog):
         self.provider_combo.blockSignals(True)
         self.provider_combo.clear()
         seen: set[str] = set()
-        self.provider_combo.addItem("+ 自定义中转", CUSTOM_PROVIDER_SENTINEL)
+        self.provider_combo.addItem(self._t('provider.custom_combo'), CUSTOM_PROVIDER_SENTINEL)
         for provider_id, item in sorted(self.catalog.items()):
             display_name = str(item.get("display_name") or provider_id)
             self.provider_combo.addItem(display_name, provider_id)
@@ -232,7 +236,7 @@ class ProviderManagerDialog(QDialog):
         config = load_lucode_config(workspace_root=self.workspace_root)
         providers = config.get("provider") or {}
         if not providers:
-            empty = QLabel("还没有接入任何服务商。")
+            empty = QLabel(self._t('provider.empty'))
             empty.setObjectName("ProviderEmpty")
             self.provider_list_layout.addWidget(empty)
             self.provider_list_layout.addStretch(1)
@@ -256,16 +260,16 @@ class ProviderManagerDialog(QDialog):
         layout.addWidget(name)
 
         models = [str(item) for item in provider_config.get("models") or [] if str(item).strip()]
-        key_state = "本地" if provider_config.get("local") else ("已配置密钥" if provider_has_api_key(provider_id, self.user_home) else "未配置密钥")
-        detail = QLabel(f"{key_state} · {len(models)} 模型")
+        key_state = self._t("provider.local") if provider_config.get("local") else (self._t("provider.key_configured") if provider_has_api_key(provider_id, self.user_home) else self._t("provider.key_missing"))
+        detail = QLabel(f"{key_state} · {self._t('provider.models_count', count=len(models))}")
         detail.setObjectName("ProviderDetail")
         layout.addWidget(detail)
         layout.addStretch(1)
 
-        edit_button = QPushButton("编辑")
+        edit_button = QPushButton(self._t('provider.edit'))
         edit_button.clicked.connect(lambda _checked=False, pid=provider_id: self.start_edit(pid))
         layout.addWidget(edit_button)
-        delete_button = QPushButton("删除")
+        delete_button = QPushButton(self._t('provider.delete'))
         delete_button.setObjectName("ProviderDangerButton")
         delete_button.clicked.connect(lambda _checked=False, pid=provider_id: self.delete_provider(pid))
         layout.addWidget(delete_button)
@@ -274,7 +278,7 @@ class ProviderManagerDialog(QDialog):
     def start_add(self) -> None:
         self._mode = "add"
         self._editing_provider_id = ""
-        self.form_title.setText("添加服务商")
+        self.form_title.setText(self._t('provider.form.add'))
         self._populate_provider_combo()
         if self.provider_combo.currentData() == CUSTOM_PROVIDER_SENTINEL and self.provider_combo.count() > 1:
             self.provider_combo.setCurrentIndex(1)
@@ -291,7 +295,7 @@ class ProviderManagerDialog(QDialog):
     def start_custom_provider(self, provider_id: str = "") -> None:
         self._mode = "add"
         self._editing_provider_id = ""
-        self.form_title.setText("添加自定义中转")
+        self.form_title.setText(self._t('provider.form.custom'))
         self._populate_provider_combo()
         idx = self.provider_combo.findData(CUSTOM_PROVIDER_SENTINEL)
         if idx >= 0:
@@ -312,12 +316,12 @@ class ProviderManagerDialog(QDialog):
         config = load_lucode_config(workspace_root=self.workspace_root)
         provider_config = config.get("provider", {}).get(provider_id)
         if not isinstance(provider_config, dict):
-            self.status_label.setText(f"未找到服务商：{provider_id}")
+            self.status_label.setText(self._t('provider.not_found', provider_id=provider_id))
             return
 
         self._mode = "edit"
         self._editing_provider_id = provider_id
-        self.form_title.setText("编辑服务商")
+        self.form_title.setText(self._t('provider.form.edit'))
         self._populate_provider_combo()
         idx = self.provider_combo.findData(provider_id)
         if idx >= 0:
@@ -344,41 +348,41 @@ class ProviderManagerDialog(QDialog):
         try:
             provider_id = self._current_provider_id()
         except ValueError:
-            self.status_label.setText("请先填写服务商编号。")
+            self.status_label.setText(self._t('provider.error.provider_id'))
             return
         base_url = self.base_url_edit.text().strip()
         api_key = self.api_key_edit.text().strip()
         provider_info = self._provider_info(provider_id)
         backend_type = str(provider_info.get("compatible_type") or provider_info.get("backend_type") or "openai_compatible")
         if str(self.privacy_mode or "").lower() == "offline":
-            self.status_label.setText("离线隐私模式下不会请求上游模型列表，可手动输入模型名。")
+            self.status_label.setText(self._t('provider.offline'))
             return
         if not base_url:
-            self.status_label.setText("请先填写接口地址。")
+            self.status_label.setText(self._t('provider.error.base_url'))
             return
         if backend_type != "ollama" and not api_key and not provider_info.get("local"):
-            self.status_label.setText("请先填写 API 密钥。")
+            self.status_label.setText(self._t('provider.error.api_key'))
             return
 
         result = fetch_upstream_models(base_url, api_key, backend_type=backend_type)
         if not result.get("ok"):
-            self.status_label.setText(str(result.get("error") or "获取模型失败，可手动输入模型名。"))
+            self.status_label.setText(str(result.get('error') or self._t('provider.fetch_failed')))
             return
 
         models = [str(item).strip() for item in result.get("models") or [] if str(item).strip()]
         self._set_models(models, checked=[])
         self.manual_models_edit.setPlainText("\n".join(models))
-        self.status_label.setText(f"已获取 {len(models)} 个模型，请勾选需要启用的模型。")
+        self.status_label.setText(self._t('provider.fetch_ok', count=len(models)))
 
     def save_current_provider(self) -> bool:
         try:
             provider_id = self._current_provider_id()
         except ValueError:
-            self.status_label.setText("请先填写服务商编号。")
+            self.status_label.setText(self._t('provider.error.provider_id'))
             return False
         selected = self.selected_models() if self._model_checks else self._manual_models()
         if not selected:
-            self.status_label.setText("请至少选择或填写一个模型。")
+            self.status_label.setText(self._t('provider.error.no_models'))
             return False
 
         provider_info = self._provider_info(provider_id)
@@ -431,8 +435,8 @@ class ProviderManagerDialog(QDialog):
         if not confirm:
             result = QMessageBox.question(
                 self,
-                "删除服务商",
-                "删除后会同时移除该服务商的模型配置和 API 密钥。确认删除吗？",
+                self._t('provider.delete_title'),
+                self._t('provider.delete_prompt'),
             )
             if result != QMessageBox.Yes:
                 return False

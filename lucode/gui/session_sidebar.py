@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from lucode.gui.i18n import Translator, normalize_language
 from lucode.gui.sidebar_data import (
     McpRow,
     SkillCard,
@@ -45,6 +46,8 @@ class SessionSidebar(QFrame):
         self._enabled = True
         self._active_tab = "chats"
         self._collapsed = False
+        self._language = 'zh'
+        self._t = Translator(self._language)
         self._items_by_session_id: dict[str, Any] = {}
         self._skill_cards = load_default_skill_cards()
         self._mcp_rows = load_default_mcp_rows()
@@ -85,7 +88,7 @@ class SessionSidebar(QFrame):
         header.addStretch(1)
         full_layout.addLayout(header)
 
-        self.new_session_button = QPushButton("+ 新会话")
+        self.new_session_button = QPushButton(self._t('sidebar.new_chat'))
         self.new_session_button.setObjectName("SidebarNewSessionButton")
         self.new_session_button.clicked.connect(self.new_session_requested.emit)
         full_layout.addWidget(self.new_session_button)
@@ -94,9 +97,9 @@ class SessionSidebar(QFrame):
         self.tab_group.setExclusive(True)
         tab_row = QHBoxLayout()
         tab_row.setSpacing(6)
-        self.chats_tab = self._make_tab_button("会话", "chats", "SidebarTabChats")
-        self.skills_tab = self._make_tab_button("技能", "skills", "SidebarTabSkills")
-        self.mcp_tab = self._make_tab_button("MCP", "mcp", "SidebarTabMcp")
+        self.chats_tab = self._make_tab_button(self._t('sidebar.chats'), "chats", "SidebarTabChats")
+        self.skills_tab = self._make_tab_button(self._t('sidebar.skills'), "skills", "SidebarTabSkills")
+        self.mcp_tab = self._make_tab_button(self._t('sidebar.mcp'), "mcp", "SidebarTabMcp")
         for button in (self.chats_tab, self.skills_tab, self.mcp_tab):
             tab_row.addWidget(button)
             self.tab_group.addButton(button)
@@ -105,7 +108,7 @@ class SessionSidebar(QFrame):
 
         self.search_box = QLineEdit()
         self.search_box.setObjectName("SessionSearchBox")
-        self.search_box.setPlaceholderText("搜索会话")
+        self.search_box.setPlaceholderText(self._t('sidebar.search'))
         self.search_box.textChanged.connect(lambda _text: self.refresh())
         full_layout.addWidget(self.search_box)
 
@@ -121,7 +124,7 @@ class SessionSidebar(QFrame):
         self.list_layout.setSpacing(6)
         self.scroll.setWidget(self.list_host)
 
-        self.empty_label = QLabel("暂无会话")
+        self.empty_label = QLabel(self._t('sidebar.empty'))
         self.empty_label.setObjectName("SidebarEmpty")
         self.empty_label.setWordWrap(True)
         self.list_layout.addWidget(self.empty_label)
@@ -130,6 +133,17 @@ class SessionSidebar(QFrame):
 
     def set_session_store(self, session_store) -> None:
         self._session_store = session_store
+
+    def set_language(self, language: str) -> None:
+        self._language = normalize_language(language)
+        self._t = Translator(self._language)
+        self.new_session_button.setText(self._t('sidebar.new_chat'))
+        self.chats_tab.setText(self._t('sidebar.chats'))
+        self.skills_tab.setText(self._t('sidebar.skills'))
+        self.mcp_tab.setText(self._t('sidebar.mcp'))
+        self.search_box.setPlaceholderText(self._t('sidebar.search'))
+        self._sync_rail_buttons()
+        self.refresh()
 
     def refresh(self) -> None:
         if self._active_tab == "skills":
@@ -194,7 +208,7 @@ class SessionSidebar(QFrame):
         button = QPushButton(text)
         button.setObjectName(object_name)
         button.setCheckable(True)
-        button.setToolTip({"chats": "会话", "skills": "技能", "mcp": "MCP"}.get(tab_id, tab_id))
+        button.setToolTip({"chats": self._t('sidebar.chats'), "skills": self._t('sidebar.skills'), "mcp": self._t('sidebar.mcp')}.get(tab_id, tab_id))
         button.clicked.connect(lambda _checked=False, value=tab_id: self._switch_tab(value))
         return button
 
@@ -260,7 +274,7 @@ class SessionSidebar(QFrame):
             _item_session_id(item): item for item in items if _item_session_id(item)
         }
         if not items:
-            self.empty_label.setText("暂无会话")
+            self.empty_label.setText(self._t('sidebar.empty'))
             self.empty_label.show()
             self.list_layout.addWidget(self.empty_label)
             self.list_layout.addStretch(1)
@@ -268,7 +282,7 @@ class SessionSidebar(QFrame):
             return
         self.empty_label.hide()
         for item in items:
-            row = _SessionRow(item, selected=_item_session_id(item) == self._selected_session_id)
+            row = _SessionRow(item, selected=_item_session_id(item) == self._selected_session_id, language=self._language)
             row.session_selected.connect(self._on_session_selected)
             row.delete_requested.connect(self._on_delete_requested)
             self.list_layout.addWidget(row)
@@ -277,7 +291,7 @@ class SessionSidebar(QFrame):
 
     def _render_skills(self) -> None:
         self._clear_list_layout()
-        title = QLabel("技能库")
+        title = QLabel(self._t('sidebar.skill_library'))
         title.setObjectName("SkillPanelTitle")
         self.list_layout.addWidget(title)
         for card in self._skill_cards:
@@ -287,7 +301,7 @@ class SessionSidebar(QFrame):
 
     def _render_mcp(self) -> None:
         self._clear_list_layout()
-        title = QLabel("MCP 服务")
+        title = QLabel(self._t('sidebar.mcp_services'))
         title.setObjectName("McpPanelTitle")
         self.list_layout.addWidget(title)
         for row in self._mcp_rows:
@@ -302,7 +316,7 @@ class SessionSidebar(QFrame):
     def _on_delete_requested(self, session_id: str) -> None:
         if not session_id or self._session_store is None:
             return
-        answer = QMessageBox.question(self, "删除会话", "确认删除这个会话吗？")
+        answer = QMessageBox.question(self, self._t('sidebar.delete_title'), self._t('sidebar.delete_prompt'))
         if answer != QMessageBox.Yes:
             return
         try:
@@ -319,7 +333,7 @@ class _SessionRow(QFrame):
     session_selected = Signal(str)
     delete_requested = Signal(str)
 
-    def __init__(self, item, *, selected: bool = False, parent: QWidget | None = None):
+    def __init__(self, item, *, selected: bool = False, language: str = 'zh', parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("SessionRow")
         self.session_id = _item_session_id(item)
@@ -331,15 +345,16 @@ class _SessionRow(QFrame):
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(6)
 
-        title = _item_title(item)
-        meta = _item_meta(item)
+        self._t = Translator(language)
+        title = _item_title(item, language=language)
+        meta = _item_meta(item, language=language)
         self.row_button = QPushButton(f"{title}\n{meta}".strip())
         self.row_button.setObjectName("SessionRowButton")
         self.row_button.setProperty("session_id", self.session_id)
         self.row_button.clicked.connect(lambda: self.session_selected.emit(self.session_id))
         layout.addWidget(self.row_button, 1)
 
-        self.delete_button = QPushButton("删除")
+        self.delete_button = QPushButton(self._t('sidebar.delete'))
         self.delete_button.setObjectName("SessionDeleteButton")
         self.delete_button.setProperty("session_id", self.session_id)
         self.delete_button.clicked.connect(lambda: self.delete_requested.emit(self.session_id))
@@ -400,16 +415,16 @@ def _item_session_id(item) -> str:
     return str(getattr(item, "session_id", "") or getattr(item, "history_id", "") or "")
 
 
-def _item_title(item) -> str:
+def _item_title(item, *, language: str = 'zh') -> str:
     if isinstance(item, dict):
         title = item.get("title") or item.get("last_user") or item.get("session_id") or ""
     else:
         title = getattr(item, "title", "") or getattr(item, "last_user", "") or getattr(item, "session_id", "")
     text = str(title or "").replace("\n", " ").strip()
-    return text[:34] + "..." if len(text) > 36 else text or "未命名会话"
+    return text[:34] + "..." if len(text) > 36 else text or Translator(language)('sidebar.untitled')
 
 
-def _item_meta(item) -> str:
+def _item_meta(item, *, language: str = 'zh') -> str:
     if isinstance(item, dict):
         updated = item.get("updated_at") or ""
         count = item.get("message_count") or 0
@@ -417,15 +432,16 @@ def _item_meta(item) -> str:
         updated = getattr(item, "updated_at", "") or ""
         count = getattr(item, "message_count", 0) or 0
     parts = []
-    relative = _relative_time(updated)
+    t = Translator(language)
+    relative = _relative_time(updated, language=language)
     if relative:
         parts.append(relative)
     if count:
-        parts.append(f"{count} 条消息")
+        parts.append(f"{count} {t('sidebar.messages')}")
     return " - ".join(parts)
 
 
-def _relative_time(value: str) -> str:
+def _relative_time(value: str, *, language: str = 'zh') -> str:
     text = str(value or "").strip()
     if not text:
         return ""
@@ -438,14 +454,14 @@ def _relative_time(value: str) -> str:
     except ValueError:
         return text[:10]
     if seconds < 60:
-        return "刚刚"
+        return Translator(language)('sidebar.just_now')
     minutes = seconds // 60
     if minutes < 60:
-        return f"{minutes} 分钟前"
+        return Translator(language)('sidebar.minutes_ago', count=minutes)
     hours = minutes // 60
     if hours < 24:
-        return f"{hours} 小时前"
+        return Translator(language)('sidebar.hours_ago', count=hours)
     days = hours // 24
     if days < 30:
-        return f"{days} 天前"
+        return Translator(language)('sidebar.days_ago', count=days)
     return updated.date().isoformat()

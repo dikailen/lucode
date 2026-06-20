@@ -93,6 +93,33 @@ def test_settings_dialog_defaults_to_chinese_and_exposes_language_choice(app):
     assert changed[-1] == "en"
 
 
+def test_settings_dialog_switches_visible_text_between_languages(app):
+    dialog = SettingsDialog(parent=None)
+
+    assert dialog.findChild(QPushButton, "SettingsTabModels").text() == "模型"
+    assert dialog.findChild(QPushButton, "SettingsTabLanguage").text() == "语言"
+    assert dialog.findChild(QPushButton, "LanguageEnButton").text() == "英文"
+
+    dialog.findChild(QPushButton, "LanguageEnButton").click()
+    app.processEvents()
+
+    assert dialog.current_language() == "en"
+    assert dialog.windowTitle() == "Settings"
+    assert dialog.findChild(QPushButton, "SettingsTabModels").text() == "Models"
+    assert dialog.findChild(QPushButton, "SettingsTabLanguage").text() == "Language"
+    assert dialog.findChild(QLabel, "SettingsPageTitleLanguage").text() == "Language"
+    assert dialog.findChild(QPushButton, "LanguageZhButton").text() == "Chinese"
+    assert dialog.findChild(QPushButton, "LanguageEnButton").text() == "English"
+
+    dialog.findChild(QPushButton, "LanguageZhButton").click()
+    app.processEvents()
+
+    assert dialog.current_language() == "zh"
+    assert dialog.windowTitle() == "设置"
+    assert dialog.findChild(QPushButton, "SettingsTabModels").text() == "模型"
+    assert dialog.findChild(QPushButton, "LanguageEnButton").text() == "英文"
+
+
 def test_settings_dialog_provider_page_exposes_manager_and_custom_provider(app):
     dialog = SettingsDialog(parent=None)
     emitted = []
@@ -178,3 +205,25 @@ def test_main_window_settings_button_opens_dialog(app, tmp_path):
     assert dialog is not None
     assert dialog.isVisible()
     dialog.close()
+
+
+def test_main_window_language_switch_refreshes_and_persists(app, tmp_path):
+    session = GuiChatSession(workspace=tmp_path)
+    window = MainWindow(workspace=tmp_path, chat_session=session)
+
+    window.settings_dialog.findChild(QPushButton, "LanguageEnButton").click()
+    app.processEvents()
+
+    assert window.settings_dialog.current_language() == "en"
+    assert window.input_box.placeholderText() == "Type a message, Enter to send, Shift+Enter for newline"
+    assert window.send_button.text() == "Send"
+    assert window.stop_button.text() == "Stop"
+    assert window.session_sidebar.new_session_button.text() == "+ New chat"
+    assert window.session_sidebar.findChild(QPushButton, "SidebarTabSkills").text() == "Skills"
+
+    restored = MainWindow(workspace=tmp_path, chat_session=GuiChatSession(workspace=tmp_path))
+
+    assert restored.settings_dialog.current_language() == "en"
+    assert restored.send_button.text() == "Send"
+    assert restored.control_bar.summary_label.text().startswith("Mode ")
+    assert restored.control_bar.settings_button.toolTip() == "Settings"
