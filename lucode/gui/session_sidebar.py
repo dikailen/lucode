@@ -388,14 +388,14 @@ class _SessionRow(QFrame):
         self.session_id = _item_session_id(item)
         self.setProperty("selected", bool(selected))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setMinimumHeight(36)
-        self.setMaximumHeight(44)
+        self.setMinimumHeight(34)
+        self.setMaximumHeight(40)
         self.setCursor(Qt.PointingHandCursor)
         self.style().unpolish(self)
         self.style().polish(self)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 6, 4)
+        layout.setContentsMargins(8, 3, 6, 3)
         layout.setSpacing(8)
 
         self._t = Translator(language)

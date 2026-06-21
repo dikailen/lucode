@@ -24,7 +24,7 @@ from catalog_system.model_catalog import clear_model_catalog_cache
 from lucode.gui.approval import GuiApprovalSession, LatestApprovalContext
 from lucode.gui.answer_stream import AnswerStreamState
 from lucode.gui.chat_session import GuiChatSession
-from lucode.gui.control_panel import ControlBar, execution_mode_label
+from lucode.gui.control_panel import ControlBar, compact_execution_mode_label, execution_mode_label
 from lucode.gui.event_bridge import EventBridge
 from lucode.gui.i18n import Translator, load_gui_language, save_gui_language
 from lucode.gui.session_sidebar import SessionSidebar
@@ -57,7 +57,7 @@ class ChatInput(QPlainTextEdit):
         self._language = 'zh'
         self._t = Translator(self._language)
         self.setPlaceholderText(self._t('main.input.placeholder'))
-        self.setFixedHeight(64)
+        self.setFixedHeight(56)
 
     def set_language(self, language: str) -> None:
         self._language = language
@@ -159,15 +159,15 @@ class MainWindow(QMainWindow):
 
         self.top_mode_host = QWidget(header)
         self.top_mode_host.setObjectName("TopModeHost")
-        self.top_mode_host.setMaximumWidth(150)
-        self.top_mode_host.setMaximumHeight(38)
+        self.top_mode_host.setMaximumWidth(90)
+        self.top_mode_host.setMaximumHeight(36)
         mode_layout = QHBoxLayout(self.top_mode_host)
         mode_layout.setContentsMargins(0, 0, 0, 0)
         mode_layout.setSpacing(0)
         self.top_mode_chip = QLabel()
         self.top_mode_chip.setObjectName("TopModeChip")
-        self.top_mode_chip.setMaximumWidth(142)
-        self.top_mode_chip.setMaximumHeight(36)
+        self.top_mode_chip.setMaximumWidth(82)
+        self.top_mode_chip.setMaximumHeight(34)
         self.top_mode_chip.setAlignment(Qt.AlignCenter)
         mode_layout.addWidget(self.top_mode_chip)
         header_layout.addWidget(self.top_mode_host)
@@ -230,11 +230,11 @@ class MainWindow(QMainWindow):
 
         composer = QFrame(composer_host)
         composer.setObjectName("ComposerShell")
-        composer.setMinimumHeight(132)
-        composer.setMaximumHeight(148)
+        composer.setMinimumHeight(122)
+        composer.setMaximumHeight(128)
         composer_layout = QVBoxLayout(composer)
-        composer_layout.setContentsMargins(16, 12, 16, 12)
-        composer_layout.setSpacing(8)
+        composer_layout.setContentsMargins(14, 10, 14, 10)
+        composer_layout.setSpacing(6)
         composer_host_layout.addWidget(composer)
 
         input_row = QFrame(composer)
@@ -333,9 +333,11 @@ class MainWindow(QMainWindow):
 
     def _sync_top_mode_buttons(self, mode: str) -> None:
         normalized = str(mode or self.mode or "").strip()
-        self.top_mode_chip.setText(f"{self._t('main.status.mode')}: {execution_mode_label(normalized, self.language)}")
+        compact_label = compact_execution_mode_label(normalized, self.language)
+        full_label = execution_mode_label(normalized, self.language)
+        self.top_mode_chip.setText(compact_label)
         self.top_mode_chip.setProperty("mode_id", normalized)
-        self.top_mode_chip.setToolTip(self.top_mode_chip.text())
+        self.top_mode_chip.setToolTip(f"{self._t('main.status.mode')}: {full_label}")
 
     def _refresh_top_mode_buttons(self) -> None:
         self.top_settings_button.setToolTip(self._t('control.settings_tip'))

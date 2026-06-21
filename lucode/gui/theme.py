@@ -456,7 +456,7 @@ QLabel#TopModeChip {
   background: $surface_raised;
   border: 1px solid $border_subtle;
   border-radius: 10px;
-  padding: 6px 12px;
+  padding: 5px 10px;
   color: $text;
 }
 

@@ -39,7 +39,7 @@ def test_composer_shell_contains_toolbar_input_and_actions(app, tmp_path):
     assert toolbar.parentWidget() is composer
     assert input_row.parentWidget() is composer
     assert composer.layout().indexOf(input_row) < composer.layout().indexOf(toolbar)
-    assert 124 <= composer.height() <= 168
+    assert 118 <= composer.height() <= 128
     assert window.input_box.parentWidget() is input_row
     assert window.send_button.parentWidget() is toolbar
     assert window.stop_button.parentWidget() is toolbar

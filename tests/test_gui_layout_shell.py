@@ -130,9 +130,16 @@ def test_top_mode_area_is_compact_status_chip(app, tmp_path):
     assert mode_chip is not None
     assert mode_chip.parentWidget() is mode_host
     assert top_mode_buttons == []
-    assert mode_host.maximumWidth() <= 150
-    assert mode_chip.maximumHeight() <= 36
+    assert mode_host.maximumWidth() <= 124
+    assert mode_chip.maximumWidth() <= 116
+    assert mode_chip.maximumHeight() <= 34
     assert mode_chip.property("mode_id") == session.settings.execution_mode
+    assert ":" not in mode_chip.text()
+    assert "Agent" not in mode_chip.text()
+    assert len(mode_chip.text()) <= 8
+    mode_tooltip = mode_chip.toolTip()
+    assert mode_tooltip
+    assert len(mode_tooltip) > len(mode_chip.text())
 
 
 def test_bottom_mode_switch_updates_top_mode_chip(app, tmp_path):
@@ -153,6 +160,7 @@ def test_bottom_mode_switch_updates_top_mode_chip(app, tmp_path):
 
     assert mode_chip.property("mode_id") == "serial"
     assert mode_chip.text() != previous_text
+    assert len(mode_chip.text()) <= 8
 
 
 def test_chat_rows_use_direct_output_canvas_without_tinted_stripes(app, tmp_path):

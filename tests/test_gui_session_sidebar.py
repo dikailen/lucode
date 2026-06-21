@@ -248,7 +248,7 @@ def test_sidebar_session_rows_are_compact_list_items(app):
     assert len(rows) == 2
     for row in rows:
         assert row.sizePolicy().verticalPolicy() == QSizePolicy.Fixed
-        assert row.maximumHeight() <= 44
+        assert row.maximumHeight() <= 40
 
     title_labels = sidebar.findChildren(QLabel, "SessionRowTitle")
     meta_labels = sidebar.findChildren(QLabel, "SessionRowMeta")

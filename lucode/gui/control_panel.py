@@ -32,6 +32,18 @@ def execution_mode_label(mode: str, language: str = "zh") -> str:
     return Translator(language)(f"control.mode.{normalized}")
 
 
+def compact_execution_mode_label(mode: str, language: str = "zh") -> str:
+    normalized = normalize_execution_mode(mode)
+    labels = {
+        "zh": {"solo": "单人", "serial": "串行", "full": "完全"},
+        "en": {"solo": "Solo", "serial": "Serial", "full": "Full"},
+    }
+    return labels.get(normalize_language(language), labels["zh"]).get(
+        normalized,
+        execution_mode_label(normalized, language),
+    )
+
+
 def execution_mode_options(language: str = "zh") -> list[tuple[str, str]]:
     return [
         (mode, execution_mode_label(mode, language))
@@ -177,11 +189,7 @@ if _PYSIDE_AVAILABLE:
             self._refresh_summary()
 
         def _compact_mode_label(self, mode: str) -> str:
-            labels = {
-                "zh": {"solo": "单人", "serial": "串行", "full": "完全"},
-                "en": {"solo": "Solo", "serial": "Serial", "full": "Full"},
-            }
-            return labels.get(self._language, labels["zh"]).get(mode, execution_mode_label(mode, self._language))
+            return compact_execution_mode_label(mode, self._language)
 
         def _refresh_summary(self) -> None:
             self.summary_label.setText(
