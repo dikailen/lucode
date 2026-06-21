@@ -206,9 +206,10 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.scroll_area, 1)
 
         self.message_host = QWidget()
+        self.message_host.setObjectName("MessageCanvas")
         self.message_layout = QVBoxLayout(self.message_host)
-        self.message_layout.setContentsMargins(0, 0, 0, 0)
-        self.message_layout.setSpacing(10)
+        self.message_layout.setContentsMargins(24, 20, 24, 20)
+        self.message_layout.setSpacing(16)
         self.scroll_area.setWidget(self.message_host)
 
         self.empty_state = QLabel(self._t('main.empty'))
@@ -447,6 +448,8 @@ class MainWindow(QMainWindow):
     def add_message(self, role: str, text: str) -> MessageBubble:
         self._hide_empty_state()
         row = QWidget()
+        row.setObjectName("UserMessageRow" if role == "user" else "AssistantMessageRow")
+        row.setProperty("visualRole", role)
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         bubble = MessageBubble(role, text)
@@ -484,8 +487,10 @@ class MainWindow(QMainWindow):
         area = WorkArea(payload, model_labels=model_labels, language=self.language)
         self.work_area = area
         row = QWidget()
+        row.setObjectName("ExecutionAreaRow")
+        row.setProperty("visualRole", "execution")
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setContentsMargins(0, 4, 0, 4)
         row_layout.addWidget(area, 1)
         self.message_layout.addWidget(row)
         self._work_area_row = row
@@ -497,6 +502,8 @@ class MainWindow(QMainWindow):
         self._hide_empty_state()
         block = AnswerBlock(text)
         row = QWidget()
+        row.setObjectName("AssistantAnswerRow")
+        row.setProperty("visualRole", "assistant")
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.addWidget(block, 1)
@@ -513,8 +520,10 @@ class MainWindow(QMainWindow):
         panel.switch_model_requested.connect(self._open_settings_models_page)
         panel.provider_doctor_requested.connect(self._open_provider_manager)
         row = QWidget()
+        row.setObjectName("ErrorRecoveryRow")
+        row.setProperty("visualRole", "error")
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setContentsMargins(0, 4, 0, 4)
         row_layout.addWidget(panel, 1)
         self.message_layout.addWidget(row)
         self._error_panel = panel
@@ -569,6 +578,8 @@ class MainWindow(QMainWindow):
         indicator.set_available_width(self._chat_viewport_width())
         self._thinking_indicators.append(indicator)
         row = QWidget()
+        row.setObjectName("ThinkingRow")
+        row.setProperty("visualRole", "thinking")
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.addWidget(indicator, 0, Qt.AlignLeft | Qt.AlignTop)

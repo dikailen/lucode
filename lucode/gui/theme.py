@@ -61,8 +61,26 @@ QScrollArea > QWidget > QWidget {
   border: none;
 }
 
+QWidget#MessageCanvas {
+  background: $surface;
+}
+
+QWidget#UserMessageRow,
+QWidget#AssistantMessageRow,
+QWidget#AssistantAnswerRow,
+QWidget#ExecutionAreaRow,
+QWidget#ErrorRecoveryRow,
+QWidget#ThinkingRow {
+  background: $surface;
+  border: none;
+}
+
+QWidget#AssistantAnswerRow {
+  padding: 0;
+}
 QFrame#MessageBubble {
-  border: 1px solid $border_subtle;
+  background: transparent;
+  border: none;
   border-radius: $radius_bubble;
   padding: 0;
 }
@@ -71,6 +89,11 @@ QFrame#MessageBubble[userRole="true"] {
   background: $user_surface;
   border: none;
   color: $text;
+}
+
+QFrame#MessageBubble[userRole="false"] {
+  background: transparent;
+  border: none;
 }
 
 QLabel#RoleLabel {
@@ -611,10 +634,13 @@ QLabel#NodeLatest {
 QFrame#AnswerBlock {
   background: transparent;
   border: none;
+  padding: 0;
 }
 
 QLabel#AnswerText {
   color: $text;
+  background: transparent;
+  font-size: 15px;
   line-height: 150%;
 }
 

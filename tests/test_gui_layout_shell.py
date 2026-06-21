@@ -16,6 +16,7 @@ if HAS_PYSIDE:
     from lucode.gui.chat_session import GuiChatSession  # noqa: E402
     from lucode.gui.main_window import MainWindow  # noqa: E402
     from lucode.gui.session_sidebar import SessionSidebar  # noqa: E402
+    from lucode.gui.widgets import AnswerBlock, MessageBubble  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -108,3 +109,28 @@ def test_workbench_shell_matches_concept_geometry(app, tmp_path):
     assert 286 <= sizes[0] <= 304
     assert 420 <= sizes[2] <= 460
     assert window.settings_panel.isVisible()
+
+
+def test_chat_rows_use_direct_output_canvas_without_tinted_stripes(app, tmp_path):
+    session = GuiChatSession(workspace=tmp_path)
+    window = MainWindow(workspace=tmp_path, chat_session=session)
+    window.resize(1600, 1000)
+    window.show()
+    app.processEvents()
+
+    user_bubble = window.add_message("user", "hello")
+    answer = window.add_answer_block("**direct** answer")
+    app.processEvents()
+
+    user_row = user_bubble.parentWidget()
+    answer_row = answer.parentWidget()
+
+    assert isinstance(user_bubble, MessageBubble)
+    assert isinstance(answer, AnswerBlock)
+    assert user_row is not None
+    assert answer_row is not None
+    assert user_row.objectName() == "UserMessageRow"
+    assert answer_row.objectName() == "AssistantAnswerRow"
+    assert answer_row.property("visualRole") == "assistant"
+    assert answer.objectName() == "AnswerBlock"
+    assert answer.findChild(QLabel, "AnswerText") is answer.content_label
