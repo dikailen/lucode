@@ -14,7 +14,16 @@ pytestmark = pytest.mark.skipif(not HAS_PYSIDE, reason="PySide6 is not installed
 if HAS_PYSIDE:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    from PySide6.QtWidgets import QApplication, QLabel, QFrame, QLineEdit, QMessageBox, QPushButton  # noqa: E402
+    from PySide6.QtWidgets import (  # noqa: E402
+        QApplication,
+        QLabel,
+        QFrame,
+        QLineEdit,
+        QMessageBox,
+        QPushButton,
+        QSizePolicy,
+        QVBoxLayout,
+    )
     from lucode.gui.chat_session import GuiChatSession  # noqa: E402
     from lucode.gui.main_window import MainWindow  # noqa: E402
     from lucode.gui.session_sidebar import SessionSidebar  # noqa: E402
@@ -152,9 +161,12 @@ def test_sidebar_refresh_preserves_disabled_state(app):
 
     buttons = sidebar.findChildren(QPushButton, "SessionRowButton")
     delete_buttons = sidebar.findChildren(QPushButton, "SessionDeleteButton")
+    rows = sidebar.findChildren(QFrame, "SessionRow")
     assert buttons
+    assert rows
     assert all(not button.isEnabled() for button in buttons)
     assert all(not button.isEnabled() for button in delete_buttons)
+    assert all(not row.isEnabled() for row in rows)
 
 
 def test_sidebar_switches_between_chats_skills_and_mcp(app):
@@ -194,6 +206,59 @@ def test_sidebar_switches_between_chats_skills_and_mcp(app):
 
     assert sidebar.findChild(QPushButton, "SidebarTabChats").isChecked()
     assert len(sidebar.findChildren(QPushButton, "SessionRowButton")) == 2
+
+
+def test_sidebar_uses_vertical_nav_before_new_chat(app):
+    sidebar = SessionSidebar()
+    sidebar.refresh()
+
+    full_content = sidebar.findChild(QFrame, "SidebarFullContent")
+    nav = sidebar.findChild(QFrame, "SidebarNav")
+    new_chat = sidebar.findChild(QPushButton, "SidebarNewSessionButton")
+    search = sidebar.findChild(QLineEdit, "SessionSearchBox")
+
+    assert full_content is not None
+    assert nav is not None
+    assert isinstance(nav.layout(), QVBoxLayout)
+    assert new_chat is not None
+    assert search is not None
+
+    full_layout = full_content.layout()
+    nav_index = full_layout.indexOf(nav)
+    new_index = full_layout.indexOf(new_chat)
+    search_index = full_layout.indexOf(search)
+
+    assert 0 < nav_index < new_index < search_index
+    for button_name in ("SidebarTabChats", "SidebarTabSkills", "SidebarTabMcp"):
+        button = sidebar.findChild(QPushButton, button_name)
+        assert button is not None
+        assert button.parentWidget() is nav
+        assert button.property("sidebarNavItem") is True
+        assert button.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
+        assert button.maximumHeight() <= 40
+
+
+def test_sidebar_session_rows_are_compact_list_items(app):
+    store = FakeSessionStore()
+    sidebar = SessionSidebar()
+    sidebar.set_session_store(store)
+    sidebar.refresh()
+
+    rows = sidebar.findChildren(QFrame, "SessionRow")
+    assert len(rows) == 2
+    for row in rows:
+        assert row.sizePolicy().verticalPolicy() == QSizePolicy.Fixed
+        assert row.maximumHeight() <= 44
+
+    title_labels = sidebar.findChildren(QLabel, "SessionRowTitle")
+    meta_labels = sidebar.findChildren(QLabel, "SessionRowMeta")
+    buttons = sidebar.findChildren(QPushButton, "SessionRowButton")
+
+    assert len(title_labels) == 2
+    assert len(meta_labels) == 2
+    assert len(buttons) == 2
+    assert all("\n" not in label.text() for label in title_labels)
+    assert all("\n" not in button.text() for button in buttons)
 
 
 

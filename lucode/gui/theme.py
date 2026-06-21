@@ -219,6 +219,11 @@ QFrame#SidebarFullContent {
   border: none;
 }
 
+QFrame#SidebarNav {
+  background: transparent;
+  border: none;
+}
+
 QFrame#SidebarIconRail {
   background: $surface;
   border: none;
@@ -290,29 +295,43 @@ QScrollArea#SessionListScroll {
 }
 
 QFrame#SessionRow {
-  background: $surface_raised;
+  background: $surface;
   border: 1px solid $border_subtle;
-  border-radius: 12px;
+  border-radius: 8px;
 }
 
 QFrame#SessionRow[selected="true"] {
-  border-left: 3px solid $primary;
+  background: $user_surface;
+  border-color: #a9c4ff;
 }
 
 QPushButton#SessionRowButton {
   background: transparent;
   border: none;
-  border-radius: 10px;
-  padding: 6px 8px;
+  border-radius: 0;
+  padding: 0;
   text-align: left;
   color: $text;
+}
+
+QLabel#SessionRowTitle {
+  color: $text;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+QLabel#SessionRowMeta {
+  color: $text_muted;
+  font-size: 11px;
 }
 
 QPushButton#SessionDeleteButton {
   background: transparent;
   border: none;
   color: $text_muted;
-  padding: 4px 6px;
+  border-radius: 8px;
+  padding: 1px 4px;
+  font-size: 11px;
 }
 
 QPushButton#SessionDeleteButton:hover {
@@ -320,11 +339,11 @@ QPushButton#SessionDeleteButton:hover {
 }
 
 QPushButton#SidebarNewSessionButton {
-  background: $surface_raised;
+  background: $surface;
   border: 1px solid $border_subtle;
   border-radius: $radius_small;
   padding: 7px 12px;
-  text-align: left;
+  text-align: center;
 }
 
 QPushButton#SidebarNewSessionButton:hover {
@@ -336,9 +355,10 @@ QPushButton#SidebarTabSkills,
 QPushButton#SidebarTabMcp {
   background: transparent;
   border: 1px solid transparent;
-  border-radius: $radius_pill;
-  padding: 5px 10px;
+  border-radius: 9px;
+  padding: 8px 12px;
   color: $text_muted;
+  text-align: left;
 }
 
 QPushButton#SidebarTabChats:hover,
@@ -352,9 +372,9 @@ QPushButton#SidebarTabMcp:hover {
 QPushButton#SidebarTabChats:checked,
 QPushButton#SidebarTabSkills:checked,
 QPushButton#SidebarTabMcp:checked {
-  color: $text;
+  color: $primary;
   background: $user_surface;
-  border-color: $border;
+  border-color: transparent;
 }
 
 QLabel#SkillPanelTitle,

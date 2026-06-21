@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -98,23 +99,26 @@ class SessionSidebar(QFrame):
         header.addStretch(1)
         full_layout.addLayout(header)
 
-        self.new_session_button = QPushButton(self._t('sidebar.new_chat'))
-        self.new_session_button.setObjectName("SidebarNewSessionButton")
-        self.new_session_button.clicked.connect(self.new_session_requested.emit)
-        full_layout.addWidget(self.new_session_button)
-
         self.tab_group = QButtonGroup(self)
         self.tab_group.setExclusive(True)
-        tab_row = QHBoxLayout()
-        tab_row.setSpacing(6)
+        self.nav = QFrame()
+        self.nav.setObjectName("SidebarNav")
+        nav_layout = QVBoxLayout(self.nav)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(6)
         self.chats_tab = self._make_tab_button(self._t('sidebar.chats'), "chats", "SidebarTabChats")
         self.skills_tab = self._make_tab_button(self._t('sidebar.skills'), "skills", "SidebarTabSkills")
         self.mcp_tab = self._make_tab_button(self._t('sidebar.mcp'), "mcp", "SidebarTabMcp")
         for button in (self.chats_tab, self.skills_tab, self.mcp_tab):
-            tab_row.addWidget(button)
+            nav_layout.addWidget(button)
             self.tab_group.addButton(button)
         self.chats_tab.setChecked(True)
-        full_layout.addLayout(tab_row)
+        full_layout.addWidget(self.nav)
+
+        self.new_session_button = QPushButton(self._t('sidebar.new_chat'))
+        self.new_session_button.setObjectName("SidebarNewSessionButton")
+        self.new_session_button.clicked.connect(self.new_session_requested.emit)
+        full_layout.addWidget(self.new_session_button)
 
         self.search_box = QLineEdit()
         self.search_box.setObjectName("SessionSearchBox")
@@ -234,6 +238,10 @@ class SessionSidebar(QFrame):
         button = QPushButton(text)
         button.setObjectName(object_name)
         button.setCheckable(True)
+        button.setProperty("sidebarNavItem", True)
+        button.setMinimumHeight(34)
+        button.setMaximumHeight(40)
+        button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button.clicked.connect(lambda _checked=False, value=tab_id: self._switch_tab(value))
         return button
 
@@ -278,6 +286,8 @@ class SessionSidebar(QFrame):
             button.setEnabled(self._enabled)
         for button in self.findChildren(QPushButton, "SkillCardButton"):
             button.setEnabled(self._enabled)
+        for row in self.findChildren(QFrame, "SessionRow"):
+            row.setEnabled(self._enabled)
 
     def _sync_rail_buttons(self) -> None:
         self.rail_chats_button.setChecked(self._active_tab == "chats")
@@ -377,27 +387,56 @@ class _SessionRow(QFrame):
         self.setObjectName("SessionRow")
         self.session_id = _item_session_id(item)
         self.setProperty("selected", bool(selected))
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(36)
+        self.setMaximumHeight(44)
+        self.setCursor(Qt.PointingHandCursor)
         self.style().unpolish(self)
         self.style().polish(self)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 4, 6, 4)
+        layout.setSpacing(8)
 
         self._t = Translator(language)
         title = _item_title(item, language=language)
         meta = _item_meta(item, language=language)
-        self.row_button = QPushButton(f"{title}\n{meta}".strip())
+
+        text_host = QVBoxLayout()
+        text_host.setContentsMargins(0, 0, 0, 0)
+        text_host.setSpacing(1)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("SessionRowTitle")
+        self.title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        text_host.addWidget(self.title_label)
+        self.meta_label = QLabel(meta)
+        self.meta_label.setObjectName("SessionRowMeta")
+        self.meta_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        text_host.addWidget(self.meta_label)
+        layout.addLayout(text_host, 1)
+
+        self.row_button = QPushButton(title, self)
         self.row_button.setObjectName("SessionRowButton")
         self.row_button.setProperty("session_id", self.session_id)
         self.row_button.clicked.connect(lambda: self.session_selected.emit(self.session_id))
-        layout.addWidget(self.row_button, 1)
+        self.row_button.hide()
 
-        self.delete_button = QPushButton(self._t('sidebar.delete'))
+        self.delete_button = QPushButton("x")
         self.delete_button.setObjectName("SessionDeleteButton")
         self.delete_button.setProperty("session_id", self.session_id)
+        self.delete_button.setToolTip(self._t('sidebar.delete'))
+        self.delete_button.setMaximumWidth(22)
+        self.delete_button.setMinimumWidth(22)
+        self.delete_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.delete_button.clicked.connect(lambda: self.delete_requested.emit(self.session_id))
         layout.addWidget(self.delete_button)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.session_selected.emit(self.session_id)
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 class _SkillCardRow(QFrame):
