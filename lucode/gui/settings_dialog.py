@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -30,13 +31,33 @@ from runtime.config.execution_mode import normalize_execution_mode
 from runtime.safety.privacy import normalize_privacy_mode
 
 
+def _object_suffix(value: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in str(value)).strip("_") or "model"
+
+
+def _compact_model_label(text: str, *, limit: int = 24) -> str:
+    label = str(text or "").strip()
+    if " " in label:
+        tail = label.split()[-1].strip()
+        if tail:
+            label = tail
+    if len(label) <= limit:
+        return label
+    return label[: max(0, limit - 3)].rstrip() + "..."
+
+
 class _RoleRow(QFrame):
     def __init__(self, role: str, label: str, usage: str, *, language: str = 'zh', parent=None):
         super().__init__(parent)
         self.role = role
         self.setObjectName("RoleRow")
+        self.setProperty("roleModelRow", True)
+        self.setProperty("role", role)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(58)
+        self.setMaximumHeight(76)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 8, 0, 8)
+        layout.setContentsMargins(0, 7, 0, 7)
         layout.setSpacing(12)
 
         text_host = QVBoxLayout()
@@ -54,6 +75,8 @@ class _RoleRow(QFrame):
         layout.addLayout(text_host, 1)
         self.combo = QComboBox()
         self.combo.setMinimumWidth(208)
+        self.combo.setMaximumWidth(224)
+        self.combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         layout.addWidget(self.combo)
 
 
@@ -62,26 +85,38 @@ class _WorkerPoolRow(QFrame):
 
     def __init__(self, parent=None, language: str = 'zh'):
         super().__init__(parent)
-        self.setObjectName("RoleRow")
+        self.setObjectName("WorkerPoolRow")
+        self.setProperty("workerPoolRow", True)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(112)
+        self.setMaximumHeight(168)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(0, 8, 0, 8)
+        layout.setSpacing(8)
 
-        header = QHBoxLayout()
         self._t = Translator(language)
+        header = QVBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(3)
         name = QLabel(role_label('executor', language) + self._t('settings.worker_pool.name_suffix'))
         name.setObjectName("RoleName")
         header.addWidget(name)
         hint = QLabel(self._t('settings.worker_pool.hint'))
         hint.setObjectName("RoleHint")
+        hint.setWordWrap(True)
         header.addWidget(hint)
-        header.addStretch(1)
         layout.addLayout(header)
 
         self._checks_host = QFrame()
-        self._checks_layout = QHBoxLayout(self._checks_host)
+        self._checks_host.setObjectName("WorkerPoolGrid")
+        self._checks_host.setProperty("columns", 2)
+        self._checks_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._checks_layout = QGridLayout(self._checks_host)
         self._checks_layout.setContentsMargins(0, 0, 0, 0)
-        self._checks_layout.setSpacing(12)
+        self._checks_layout.setHorizontalSpacing(8)
+        self._checks_layout.setVerticalSpacing(6)
+        self._checks_layout.setColumnStretch(0, 1)
+        self._checks_layout.setColumnStretch(1, 1)
         layout.addWidget(self._checks_host)
         self._checks: list[QCheckBox] = []
 
@@ -93,20 +128,28 @@ class _WorkerPoolRow(QFrame):
                 widget.deleteLater()
         self._checks = []
         selected_set = {str(item) for item in (selected or [])}
-        for model_id, text in models:
-            box = QCheckBox(text)
+        for index, (model_id, text) in enumerate(models):
+            box = QCheckBox(_compact_model_label(text))
+            box.setObjectName("WorkerPoolChip")
             box.setProperty("model_id", model_id)
+            box.setProperty("modelObjectName", f"WorkerPoolChip_{_object_suffix(model_id)}")
+            box.setProperty("workerPoolChip", True)
+            box.setToolTip(str(text))
             box.setChecked(model_id in selected_set)
-            self._checks_layout.addWidget(box)
+            box.setMinimumWidth(150)
+            box.setMaximumWidth(190)
+            box.setMinimumHeight(30)
+            box.setMaximumHeight(34)
+            box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self._checks_layout.addWidget(box, index // 2, index % 2)
             self._checks.append(box)
-        self._checks_layout.addStretch(1)
 
     def selected_models(self) -> list[str]:
         return [str(box.property("model_id")) for box in self._checks if box.isChecked()]
 
     def connect_changed(self, callback) -> None:
         for box in self._checks:
-            box.toggled.connect(lambda _checked: callback())
+            box.toggled.connect(lambda _checked, cb=callback: cb())
 
     def set_enabled(self, enabled: bool) -> None:
         for box in self._checks:
@@ -203,8 +246,11 @@ class SettingsContent(QWidget):
         self.refiner_toggle = QPushButton(self._t('settings.refiner'))
         self.refiner_toggle.setObjectName("QueryRefinerToggle")
         self.refiner_toggle.setCheckable(True)
+        self.refiner_toggle.setMaximumWidth(136)
+        self.refiner_toggle.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.refiner_toggle.toggled.connect(self._on_refiner_toggled)
         self._models_actions_layout.addWidget(self.refiner_toggle)
+        self._models_actions_layout.addStretch(1)
 
         self.provider_manager_button = QPushButton(self._t('settings.provider.manage'))
         self.provider_manager_button.setObjectName("ProviderManagerButton")
@@ -492,6 +538,7 @@ class SettingsContent(QWidget):
             row.combo.currentIndexChanged.connect(lambda _i, r=role: self._emit_role_model(r))
             self._roles_layout.addWidget(row)
             self._role_rows[role] = row
+        self._roles_layout.addStretch(1)
         self._building = False
 
     def _on_refiner_toggled(self, checked: bool) -> None:

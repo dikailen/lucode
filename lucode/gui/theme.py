@@ -1214,10 +1214,47 @@ QWidget#SettingsContent QStackedWidget#SettingsContentStack {
   border: none;
 }
 
-QWidget#SettingsContent QFrame#RoleRow {
+QWidget#SettingsContent QFrame#RoleRow,
+QWidget#SettingsContent QFrame#WorkerPoolRow {
   background: transparent;
   border: none;
+  border-bottom: 1px solid $border_subtle;
   border-radius: 0;
+}
+
+QWidget#SettingsContent QFrame#WorkerPoolGrid {
+  background: transparent;
+  border: none;
+}
+
+QWidget#SettingsContent QFrame#RoleRow QComboBox {
+  background: $surface;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_small;
+  padding: 5px 10px;
+}
+
+QWidget#SettingsContent QCheckBox#WorkerPoolChip {
+  background: $surface;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_small;
+  padding: 6px 10px;
+  color: $text;
+}
+
+QWidget#SettingsContent QCheckBox#WorkerPoolChip:hover {
+  border-color: $primary_hover;
+}
+
+QWidget#SettingsContent QCheckBox#WorkerPoolChip:checked {
+  background: $user_surface;
+  border-color: $primary;
+  color: $primary;
+}
+
+QWidget#SettingsContent QCheckBox#WorkerPoolChip::indicator {
+  width: 14px;
+  height: 14px;
 }
 """
 )

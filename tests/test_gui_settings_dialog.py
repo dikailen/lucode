@@ -11,7 +11,17 @@ pytestmark = pytest.mark.skipif(not HAS_PYSIDE, reason="PySide6 is not installed
 if HAS_PYSIDE:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    from PySide6.QtWidgets import QApplication, QComboBox, QFrame, QLabel, QPushButton, QSplitter, QStackedWidget  # noqa: E402
+    from PySide6.QtWidgets import (  # noqa: E402
+        QApplication,
+        QCheckBox,
+        QComboBox,
+        QFrame,
+        QLabel,
+        QPushButton,
+        QSizePolicy,
+        QSplitter,
+        QStackedWidget,
+    )
 
     from lucode.gui.chat_session import GuiChatSession  # noqa: E402
     from lucode.gui.control_panel import ControlBar  # noqa: E402
@@ -75,6 +85,97 @@ def test_settings_dialog_has_workbench_tabs(app):
         assert tab.parentWidget() is nav
         assert tab.property("tabBar") is True
         assert page is not None
+
+
+def test_settings_model_rows_are_compact_and_fixed_height(app):
+    dialog = SettingsDialog(parent=None)
+    dialog.resize(520, 760)
+    dialog.set_models([
+        ("deepseek-v4-pro", "DeepSeek deepseek-v4-pro"),
+        ("mimo-v2-5-pro", "MiMo mimo-v2.5-pro"),
+    ])
+    dialog.set_initial(
+        execution_mode="full",
+        privacy_mode="local_first",
+        role_models={
+            "orchestrator": "deepseek-v4-pro",
+            "executor": "deepseek-v4-pro",
+            "final_synthesizer": "mimo-v2-5-pro",
+        },
+        worker_pool=["deepseek-v4-pro"],
+    )
+    dialog.show()
+    app.processEvents()
+
+    role_rows = [
+        row for row in dialog.findChildren(QFrame, "RoleRow")
+        if row.property("roleModelRow") is True
+    ]
+    assert len(role_rows) >= 2
+    for row in role_rows:
+        assert row.sizePolicy().verticalPolicy() == QSizePolicy.Fixed
+        assert row.maximumHeight() <= 76
+
+    orchestrator_combo = dialog.findChild(QComboBox, "RoleModelCombo_orchestrator")
+    final_combo = dialog.findChild(QComboBox, "RoleModelCombo_final_synthesizer")
+    refiner_toggle = dialog.findChild(QPushButton, "QueryRefinerToggle")
+    assert orchestrator_combo is not None
+    assert final_combo is not None
+    assert refiner_toggle is not None
+    assert orchestrator_combo.maximumWidth() <= 230
+    assert final_combo.maximumWidth() <= 230
+    assert refiner_toggle.maximumWidth() <= 150
+    assert refiner_toggle.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
+
+
+def test_settings_worker_pool_uses_two_column_chip_grid(app):
+    dialog = SettingsDialog(parent=None)
+    dialog.resize(520, 760)
+    dialog.set_models([
+        ("deepseek-v4-pro", "DeepSeek deepseek-v4-pro"),
+        ("deepseek-coder-pro", "DeepSeek deepseek-coder-pro"),
+        ("mimo-v2-5-pro", "MiMo mimo-v2.5-pro"),
+        ("mimo-coder-pro", "MiMo mimo-coder-pro"),
+    ])
+    dialog.set_initial(
+        execution_mode="full",
+        privacy_mode="local_first",
+        role_models={
+            "orchestrator": "deepseek-v4-pro",
+            "executor": "deepseek-v4-pro",
+            "final_synthesizer": "mimo-v2-5-pro",
+        },
+        worker_pool=["deepseek-v4-pro", "mimo-v2-5-pro"],
+    )
+    dialog.show()
+    app.processEvents()
+
+    pool_row = dialog.findChild(QFrame, "WorkerPoolRow")
+    grid = dialog.findChild(QFrame, "WorkerPoolGrid")
+    chips = dialog.findChildren(QCheckBox, "WorkerPoolChip")
+
+    assert pool_row is not None
+    assert grid is not None
+    assert grid.parentWidget() is pool_row
+    assert grid.property("columns") == 2
+    assert pool_row.sizePolicy().verticalPolicy() == QSizePolicy.Fixed
+    assert pool_row.maximumHeight() <= 168
+    assert len(chips) == 4
+    assert all(chip.parentWidget() is grid for chip in chips)
+    assert all(chip.maximumWidth() <= 190 for chip in chips)
+    assert all(len(chip.text()) <= 24 for chip in chips)
+    assert {chip.property("model_id") for chip in chips if chip.isChecked()} == {
+        "deepseek-v4-pro",
+        "mimo-v2-5-pro",
+    }
+
+    emitted = []
+    dialog.worker_pool_changed.connect(lambda value: emitted.append(value))
+    coder_chip = next(chip for chip in chips if chip.property("model_id") == "deepseek-coder-pro")
+    coder_chip.click()
+    app.processEvents()
+
+    assert "deepseek-coder-pro" in emitted[-1]
 
 
 def test_settings_dialog_defaults_to_chinese_and_exposes_language_choice(app):
