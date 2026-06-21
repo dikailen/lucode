@@ -112,8 +112,13 @@ QLabel#EmptyState {
 
 QFrame#ComposerShell {
   background: $surface;
-  border: 1px solid $border;
-  border-radius: 20px;
+  border: 1px solid #bcd2ff;
+  border-radius: 22px;
+}
+
+QWidget#ComposerHost {
+  background: $surface;
+  border: none;
 }
 
 QFrame#ComposerInputRow {
@@ -122,20 +127,20 @@ QFrame#ComposerInputRow {
 }
 
 QFrame#ComposerShell QPlainTextEdit {
-  background: $surface;
-  border: 1px solid $border_subtle;
-  border-radius: 14px;
-  padding: $space_2;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 2px 0;
   selection-background-color: $primary;
 }
 
 QFrame#ComposerShell QPlainTextEdit:focus {
-  border: 1px solid $primary;
+  border: none;
 }
 
 QFrame#ComposerShell QPlainTextEdit:disabled {
-  background: $surface;
-  border-color: $border;
+  background: transparent;
+  border: none;
   color: $text_muted;
 }
 
@@ -156,25 +161,32 @@ QPushButton:disabled {
 }
 
 QPushButton#SendButton {
-  background: $surface_raised;
-  border-color: $border_subtle;
-  color: $text;
+  background: $primary;
+  border-color: $primary;
+  color: $surface;
   border-radius: $radius_pill;
+  padding: 8px 22px;
+  min-height: 20px;
 }
 
 QPushButton#SendButton:hover {
-  background: $user_surface;
-  border-color: $border;
+  background: $primary_hover;
+  border-color: $primary_hover;
 }
 
 QPushButton#SendButton:disabled {
-  background: $surface;
+  background: $surface_raised;
   border-color: $border_subtle;
   color: $text_muted;
 }
 
 QPushButton#StopButton {
-  color: $danger;
+  background: $surface_raised;
+  border-color: $border_subtle;
+  color: $text;
+  border-radius: $radius_pill;
+  padding: 8px 18px;
+  min-height: 20px;
 }
 
 QPushButton#StopButton:disabled {
@@ -188,9 +200,9 @@ QStatusBar {
 }
 
 QFrame#ControlBar {
-  background: $surface;
-  border: 1px solid $border_subtle;
-  border-radius: 14px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
 }
 
 QFrame#SessionSidebar {
@@ -492,14 +504,17 @@ QFrame#ComposerToolbar {
 QFrame#ControlBar QLabel#FieldLabel {
   color: $text_muted;
   font-size: $font_size_small;
+  padding-right: 2px;
 }
 
 QPushButton#SegButton {
   background: $surface;
   border: 1px solid $border_subtle;
-  border-radius: $radius_pill;
-  padding: 6px 16px;
+  border-radius: 9px;
+  padding: 6px 14px;
   color: $text_muted;
+  min-width: 38px;
+  min-height: 20px;
 }
 
 QPushButton#SegButton:first-child {
@@ -517,9 +532,9 @@ QPushButton#SegButton:hover {
 }
 
 QPushButton#SegButton:checked {
-  background: $primary;
+  background: $user_surface;
   border-color: $primary;
-  color: $bg;
+  color: $primary;
 }
 
 QPushButton#SegButton:disabled {
@@ -533,6 +548,43 @@ QPushButton#ToggleButton {
   border-radius: $radius_pill;
   padding: 6px 14px;
   color: $text_muted;
+}
+
+QPushButton#SettingsButton {
+  background: $surface;
+  border: 1px solid $border_subtle;
+  border-radius: $radius_pill;
+  padding: 7px 16px;
+  color: $text;
+  min-height: 20px;
+}
+
+QPushButton#SettingsButton:hover {
+  background: $surface_raised;
+  border-color: $primary_hover;
+}
+
+QPushButton#ComposerToolButton {
+  background: $surface;
+  border: 1px solid $border_subtle;
+  border-radius: 11px;
+  padding: 0;
+  color: $text;
+  min-width: 36px;
+  max-width: 36px;
+  min-height: 34px;
+  max-height: 34px;
+}
+
+QPushButton#ComposerToolButton:hover {
+  background: $surface_raised;
+  border-color: $primary_hover;
+}
+
+QPushButton#ComposerToolButton:disabled {
+  color: $text_muted;
+  background: $surface;
+  border-color: $border_subtle;
 }
 
 QPushButton#ToggleButton:checked {
@@ -1031,9 +1083,15 @@ QPushButton#GearButton:checked {
   color: $text;
 }
 
+QFrame#SettingsPanelHost {
+  background: $surface;
+  border: none;
+}
+
 QFrame#SettingsSidePanel {
   background: $surface;
-  border-left: 1px solid $border_subtle;
+  border: 1px solid $border_subtle;
+  border-radius: 18px;
 }
 
 QFrame#SettingsPanelHeader {
@@ -1043,15 +1101,16 @@ QFrame#SettingsPanelHeader {
 
 QLabel#SettingsPanelTitle {
   color: $text;
+  font-size: 20px;
   font-weight: 600;
 }
 
 QPushButton#SettingsPanelBackButton,
 QPushButton#SettingsPanelCloseButton {
-  background: $surface_raised;
-  border: 1px solid $border_subtle;
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: $radius_pill;
-  padding: 6px 12px;
+  padding: 5px 10px;
   color: $text_muted;
 }
 
@@ -1069,7 +1128,7 @@ QWidget#SettingsContent QLabel#SettingsTitle {
 QWidget#SettingsContent QFrame#SettingsNav {
   background: transparent;
   border: none;
-  min-width: 116px;
+  border-bottom: 1px solid $border_subtle;
 }
 
 QWidget#SettingsContent QPushButton#SettingsTabModels,
@@ -1079,11 +1138,13 @@ QWidget#SettingsContent QPushButton#SettingsTabLanguage,
 QWidget#SettingsContent QPushButton#SettingsTabShortcuts,
 QWidget#SettingsContent QPushButton#SettingsTabAbout {
   background: transparent;
-  border: 1px solid transparent;
-  border-radius: $radius_small;
-  padding: 8px 10px;
-  text-align: left;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 8px 0 11px 0;
+  text-align: center;
   color: $text_muted;
+  min-width: 44px;
 }
 
 QWidget#SettingsContent QPushButton#SettingsTabModels:hover,
@@ -1092,8 +1153,8 @@ QWidget#SettingsContent QPushButton#SettingsTabProviders:hover,
 QWidget#SettingsContent QPushButton#SettingsTabLanguage:hover,
 QWidget#SettingsContent QPushButton#SettingsTabShortcuts:hover,
 QWidget#SettingsContent QPushButton#SettingsTabAbout:hover {
-  background: $surface_raised;
-  border-color: $border_subtle;
+  background: transparent;
+  border-bottom-color: $border;
   color: $text;
 }
 
@@ -1103,9 +1164,9 @@ QWidget#SettingsContent QPushButton#SettingsTabProviders:checked,
 QWidget#SettingsContent QPushButton#SettingsTabLanguage:checked,
 QWidget#SettingsContent QPushButton#SettingsTabShortcuts:checked,
 QWidget#SettingsContent QPushButton#SettingsTabAbout:checked {
-  background: $user_surface;
-  border-color: $border;
-  color: $text;
+  background: transparent;
+  border-bottom-color: $primary;
+  color: $primary;
 }
 
 QWidget#SettingsContent QLabel#SettingsPageTitleModels,
@@ -1115,6 +1176,7 @@ QWidget#SettingsContent QLabel#SettingsPageTitleLanguage,
 QWidget#SettingsContent QLabel#SettingsPageTitleShortcuts,
 QWidget#SettingsContent QLabel#SettingsPageTitleAbout {
   color: $text;
+  font-size: 16px;
   font-weight: 600;
 }
 
@@ -1145,6 +1207,17 @@ QFrame#SettingsDrawer {
   background: transparent;
   border: none;
   border-top: 1px solid $border_subtle;
+}
+
+QWidget#SettingsContent QStackedWidget#SettingsContentStack {
+  background: $surface;
+  border: none;
+}
+
+QWidget#SettingsContent QFrame#RoleRow {
+  background: transparent;
+  border: none;
+  border-radius: 0;
 }
 """
 )

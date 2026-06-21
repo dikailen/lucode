@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -35,21 +36,24 @@ class _RoleRow(QFrame):
         self.role = role
         self.setObjectName("RoleRow")
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(10)
+        layout.setContentsMargins(0, 8, 0, 8)
+        layout.setSpacing(12)
 
+        text_host = QVBoxLayout()
+        text_host.setContentsMargins(0, 0, 0, 0)
+        text_host.setSpacing(3)
         name = QLabel(label)
         name.setObjectName("RoleName")
-        layout.addWidget(name)
+        text_host.addWidget(name)
 
         if usage == "conditional":
             hint = QLabel(role_condition_hint(role, language))
             hint.setObjectName("RoleHint")
-            layout.addWidget(hint)
+            text_host.addWidget(hint)
 
-        layout.addStretch(1)
+        layout.addLayout(text_host, 1)
         self.combo = QComboBox()
-        self.combo.setMinimumWidth(220)
+        self.combo.setMinimumWidth(208)
         layout.addWidget(self.combo)
 
 
@@ -137,22 +141,26 @@ class SettingsContent(QWidget):
         self._pool_row: _WorkerPoolRow | None = None
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 16)
-        outer.setSpacing(12)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(14)
 
         self.title_label = QLabel(self._t('settings.title'))
         self.title_label.setObjectName("SettingsTitle")
         outer.addWidget(self.title_label)
+        self.title_label.hide()
 
-        body = QHBoxLayout()
-        body.setSpacing(14)
+        body = QVBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(16)
         outer.addLayout(body, 1)
 
         nav = QFrame()
         nav.setObjectName("SettingsNav")
-        nav_layout = QVBoxLayout(nav)
+        nav.setMaximumHeight(48)
+        nav.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        nav_layout = QHBoxLayout(nav)
         nav_layout.setContentsMargins(0, 0, 0, 0)
-        nav_layout.setSpacing(6)
+        nav_layout.setSpacing(18)
         body.addWidget(nav)
 
         self._tab_buttons: dict[str, QPushButton] = {}
@@ -166,6 +174,7 @@ class SettingsContent(QWidget):
         ):
             button = QPushButton(text)
             button.setObjectName(f"SettingsTab{key}")
+            button.setProperty("tabBar", True)
             button.setCheckable(True)
             button.clicked.connect(lambda _checked=False, page=key: self._select_page(page))
             nav_layout.addWidget(button)

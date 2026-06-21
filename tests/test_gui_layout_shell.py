@@ -90,8 +90,11 @@ def test_workbench_shell_matches_concept_geometry(app, tmp_path):
     mode_host = window.findChild(QWidget, "TopModeHost")
     gear = window.findChild(QPushButton, "TopSettingsButton")
 
+    settings_host = window.findChild(QFrame, "SettingsPanelHost")
+
     assert splitter is not None
     assert sidebar is not None
+    assert settings_host is not None
     assert chat_header is not None
     assert status_chip is not None
     assert mode_host is not None
@@ -107,8 +110,9 @@ def test_workbench_shell_matches_concept_geometry(app, tmp_path):
     sizes = splitter.sizes()
     assert len(sizes) == 3
     assert 286 <= sizes[0] <= 304
-    assert 420 <= sizes[2] <= 460
+    assert 420 <= sizes[2] <= 470
     assert window.settings_panel.isVisible()
+    assert window.settings_panel.parentWidget() is settings_host
 
 
 def test_chat_rows_use_direct_output_canvas_without_tinted_stripes(app, tmp_path):

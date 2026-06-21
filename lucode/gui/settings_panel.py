@@ -57,7 +57,7 @@ class SettingsSidePanel(QFrame):
         self.close_button = QPushButton("X")
         self.close_button.setObjectName("SettingsPanelCloseButton")
         self.close_button.setToolTip(self._t("settings.close"))
-        self.close_button.clicked.connect(self.hide)
+        self.close_button.clicked.connect(self.close_panel)
         header_layout.addWidget(self.close_button)
         root.addWidget(header)
 
@@ -97,7 +97,7 @@ class SettingsSidePanel(QFrame):
         self.stack.setCurrentWidget(self.settings_content)
         self.back_button.hide()
         self.title_label.setText(self._t("settings.title"))
-        self.show()
+        self._show_panel_container()
         self._ensure_panel_width()
         self.raise_()
 
@@ -110,9 +110,21 @@ class SettingsSidePanel(QFrame):
         self.stack.setCurrentWidget(self.provider_content)
         self.back_button.show()
         self.title_label.setText(self._t("provider.window"))
-        self.show()
+        self._show_panel_container()
         self._ensure_panel_width()
         self.raise_()
+
+    def _show_panel_container(self) -> None:
+        container = self.parentWidget()
+        if container is not None:
+            container.show()
+        self.show()
+
+    def close_panel(self) -> None:
+        self.hide()
+        container = self.parentWidget()
+        if container is not None:
+            container.hide()
 
     def set_language(self, language: str) -> None:
         normalized = normalize_language(language)
@@ -139,15 +151,18 @@ class SettingsSidePanel(QFrame):
         self.stack.addWidget(self.provider_content)
 
     def _ensure_panel_width(self) -> None:
-        parent = self.parentWidget()
-        if not isinstance(parent, QSplitter):
+        container = self.parentWidget()
+        parent = container.parentWidget() if container is not None else None
+        splitter_item = container if isinstance(parent, QSplitter) else self
+        splitter = parent if isinstance(parent, QSplitter) else self.parentWidget()
+        if not isinstance(splitter, QSplitter):
             return
-        sizes = parent.sizes()
-        index = parent.indexOf(self)
+        sizes = splitter.sizes()
+        index = splitter.indexOf(splitter_item)
         if index < 0 or len(sizes) <= index:
             return
-        target = self.maximumWidth()
-        if sizes[index] >= self.minimumWidth():
+        target = max(self.maximumWidth(), splitter_item.minimumWidth())
+        if sizes[index] >= target:
             return
         available = sum(sizes)
         if available <= 0:
@@ -156,7 +171,7 @@ class SettingsSidePanel(QFrame):
         largest = max((i for i in range(len(sizes)) if i != index), key=lambda i: sizes[i], default=-1)
         if largest >= 0:
             sizes[largest] = max(120, sizes[largest] - target)
-        parent.setSizes(sizes)
+        splitter.setSizes(sizes)
 
     def set_privacy_mode(self, privacy_mode: str) -> None:
         self.privacy_mode = str(privacy_mode or "local_first")

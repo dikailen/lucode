@@ -25,18 +25,24 @@ def app():
 def test_composer_shell_contains_toolbar_input_and_actions(app, tmp_path):
     session = GuiChatSession(workspace=tmp_path)
     window = MainWindow(workspace=tmp_path, chat_session=session)
+    window.resize(1600, 1000)
     window.show()
     app.processEvents()
 
     composer = window.findChild(QFrame, "ComposerShell")
     toolbar = window.findChild(QFrame, "ComposerToolbar")
+    input_row = window.findChild(QFrame, "ComposerInputRow")
 
     assert composer is not None
     assert toolbar is not None
+    assert input_row is not None
     assert toolbar.parentWidget() is composer
-    assert window.input_box.parentWidget() is composer
-    assert window.send_button.parentWidget() is composer
-    assert window.stop_button.parentWidget() is composer
+    assert input_row.parentWidget() is composer
+    assert composer.layout().indexOf(input_row) < composer.layout().indexOf(toolbar)
+    assert 124 <= composer.height() <= 168
+    assert window.input_box.parentWidget() is input_row
+    assert window.send_button.parentWidget() is toolbar
+    assert window.stop_button.parentWidget() is toolbar
     assert window.findChild(ControlBar, "ControlBar").parentWidget() is toolbar
 
 

@@ -11,7 +11,7 @@ pytestmark = pytest.mark.skipif(not HAS_PYSIDE, reason="PySide6 is not installed
 if HAS_PYSIDE:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QStackedWidget  # noqa: E402
+    from PySide6.QtWidgets import QApplication, QComboBox, QFrame, QLabel, QPushButton, QSplitter, QStackedWidget  # noqa: E402
 
     from lucode.gui.chat_session import GuiChatSession  # noqa: E402
     from lucode.gui.control_panel import ControlBar  # noqa: E402
@@ -61,12 +61,19 @@ def test_settings_dialog_contains_migrated_controls(app, tmp_path):
 
 def test_settings_dialog_has_workbench_tabs(app):
     dialog = SettingsDialog(parent=None)
+    dialog.show()
+    app.processEvents()
 
+    nav = dialog.findChild(QFrame, "SettingsNav")
+    assert nav is not None
+    assert nav.maximumHeight() <= 56
     assert dialog.findChild(QStackedWidget, "SettingsContentStack") is not None
     for tab_name in ("Models", "Privacy", "Providers", "Shortcuts", "About"):
         tab = dialog.findChild(QPushButton, f"SettingsTab{tab_name}")
         page = dialog.findChild(QLabel, f"SettingsPageTitle{tab_name}")
         assert tab is not None
+        assert tab.parentWidget() is nav
+        assert tab.property("tabBar") is True
         assert page is not None
 
 
@@ -199,22 +206,31 @@ def test_main_window_settings_button_opens_embedded_panel(app, tmp_path):
     window.show()
     app.processEvents()
     button = window.control_bar.findChild(QPushButton, "SettingsButton")
+    splitter = window.findChild(QSplitter, "MainSplitter")
+    settings_host = window.findChild(QFrame, "SettingsPanelHost")
 
     assert button is not None
+    assert splitter is not None
+    assert settings_host is not None
     assert isinstance(window.settings_panel, SettingsSidePanel)
     assert not window.settings_panel.isVisible()
+    assert splitter.sizes()[2] == 0
 
     button.click()
     app.processEvents()
 
+    assert settings_host.isVisible()
     assert window.settings_panel.isVisible()
     assert window.settings_panel.current_view() == "settings"
+    assert window.settings_panel.parentWidget() is settings_host
     assert window.findChild(SettingsDialog, "SettingsDialog") is None
 
     window.settings_panel.close_button.click()
     app.processEvents()
 
+    assert not settings_host.isVisible()
     assert not window.settings_panel.isVisible()
+    assert splitter.sizes()[2] == 0
 
 
 def test_main_window_provider_manager_stays_inside_settings_panel(app, tmp_path):

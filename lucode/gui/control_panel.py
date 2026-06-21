@@ -97,6 +97,7 @@ try:
         QHBoxLayout,
         QLabel,
         QPushButton,
+        QSizePolicy,
         QWidget,
     )
 
@@ -114,14 +115,15 @@ if _PYSIDE_AVAILABLE:
         def __init__(self, parent: QWidget | None = None, *, language: str = "zh"):
             super().__init__(parent)
             self.setObjectName("ControlBar")
+            self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
             self._language = normalize_language(language)
             self._t = Translator(self._language)
             self._mode = "solo"
             self._building = True
 
             outer = QHBoxLayout(self)
-            outer.setContentsMargins(14, 12, 14, 12)
-            outer.setSpacing(12)
+            outer.setContentsMargins(0, 0, 0, 0)
+            outer.setSpacing(8)
 
             self._build_row(outer)
             self._building = False
@@ -138,6 +140,7 @@ if _PYSIDE_AVAILABLE:
             seg.setSpacing(0)
             for mode, label in execution_mode_options(self._language):
                 btn = QPushButton(label)
+                btn.setText(self._compact_mode_label(mode))
                 btn.setCheckable(True)
                 btn.setObjectName("SegButton")
                 btn.setProperty("mode_id", mode)
@@ -150,9 +153,10 @@ if _PYSIDE_AVAILABLE:
 
             self.summary_label = QLabel("")
             self.summary_label.setObjectName("ControlSummary")
+            self.summary_label.hide()
             outer.addWidget(self.summary_label, 1)
 
-            self.settings_button = QPushButton("⚙")
+            self.settings_button = QPushButton(self._t("settings.title"))
             self.settings_button.setObjectName("SettingsButton")
             self.settings_button.setToolTip(self._t("control.settings_tip"))
             self.settings_button.clicked.connect(self.settings_requested.emit)
@@ -166,10 +170,18 @@ if _PYSIDE_AVAILABLE:
         def _refresh_language(self) -> None:
             self.mode_label.setText(self._t("control.execution_mode"))
             for mode, button in self._mode_buttons.items():
-                button.setText(execution_mode_label(mode, self._language))
+                button.setText(self._compact_mode_label(mode))
                 button.setToolTip(self._t(f"control.mode_tip.{mode}"))
+            self.settings_button.setText(self._t("settings.title"))
             self.settings_button.setToolTip(self._t("control.settings_tip"))
             self._refresh_summary()
+
+        def _compact_mode_label(self, mode: str) -> str:
+            labels = {
+                "zh": {"solo": "单人", "serial": "串行", "full": "完全"},
+                "en": {"solo": "Solo", "serial": "Serial", "full": "Full"},
+            }
+            return labels.get(self._language, labels["zh"]).get(mode, execution_mode_label(mode, self._language))
 
         def _refresh_summary(self) -> None:
             self.summary_label.setText(

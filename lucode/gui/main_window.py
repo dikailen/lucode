@@ -58,7 +58,7 @@ class ChatInput(QPlainTextEdit):
         self._language = 'zh'
         self._t = Translator(self._language)
         self.setPlaceholderText(self._t('main.input.placeholder'))
-        self.setFixedHeight(82)
+        self.setFixedHeight(64)
 
     def set_language(self, language: str) -> None:
         self._language = language
@@ -186,16 +186,25 @@ class MainWindow(QMainWindow):
 
         self.control_bar = ControlBar(language=self.language)
         self.settings_dialog = SettingsContent(parent=self, show_footer=False)
+        self.settings_panel_host = QFrame()
+        self.settings_panel_host.setObjectName("SettingsPanelHost")
+        self.settings_panel_host.setMinimumWidth(0)
+        self.settings_panel_host.setMaximumWidth(460)
+        settings_panel_host_layout = QHBoxLayout(self.settings_panel_host)
+        settings_panel_host_layout.setContentsMargins(8, 14, 16, 14)
+        settings_panel_host_layout.setSpacing(0)
+
         self.settings_panel = SettingsSidePanel(
             settings_content=self.settings_dialog,
             workspace_root=self.chat_session.workspace_context.workspace_root,
             user_home=self.chat_session.workspace_context.user_home,
             privacy_mode=self.chat_session.settings.privacy_mode,
             language=self.language,
-            parent=self,
+            parent=self.settings_panel_host,
         )
         self.settings_panel.providers_changed.connect(self._refresh_configured_models)
-        self.main_splitter.addWidget(self.settings_panel)
+        settings_panel_host_layout.addWidget(self.settings_panel)
+        self.main_splitter.addWidget(self.settings_panel_host)
         self.main_splitter.setStretchFactor(2, 0)
         self.main_splitter.setSizes([294, 866, 0])
         self._init_control_bar()
@@ -217,42 +226,60 @@ class MainWindow(QMainWindow):
         self.empty_state.setAlignment(Qt.AlignCenter)
         self.message_layout.addWidget(self.empty_state, 1)
 
-        composer = QFrame()
-        composer.setObjectName("ComposerShell")
-        composer_layout = QVBoxLayout(composer)
-        composer_layout.setContentsMargins(12, 10, 12, 12)
-        composer_layout.setSpacing(10)
-        root_layout.addWidget(composer)
+        composer_host = QWidget()
+        composer_host.setObjectName("ComposerHost")
+        composer_host_layout = QHBoxLayout(composer_host)
+        composer_host_layout.setContentsMargins(18, 0, 18, 0)
+        composer_host_layout.setSpacing(0)
+        root_layout.addWidget(composer_host)
 
-        toolbar = QFrame(composer)
-        toolbar.setObjectName("ComposerToolbar")
-        toolbar_layout = QVBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        toolbar_layout.setSpacing(0)
-        toolbar_layout.addWidget(self.control_bar)
-        composer_layout.addWidget(toolbar)
+        composer = QFrame(composer_host)
+        composer.setObjectName("ComposerShell")
+        composer.setMinimumHeight(132)
+        composer.setMaximumHeight(148)
+        composer_layout = QVBoxLayout(composer)
+        composer_layout.setContentsMargins(16, 12, 16, 12)
+        composer_layout.setSpacing(8)
+        composer_host_layout.addWidget(composer)
 
         input_row = QFrame(composer)
         input_row.setObjectName("ComposerInputRow")
         input_row_layout = QHBoxLayout(input_row)
         input_row_layout.setContentsMargins(0, 0, 0, 0)
-        input_row_layout.setSpacing(8)
-        composer_layout.addWidget(input_row)
+        input_row_layout.setSpacing(0)
+        composer_layout.addWidget(input_row, 1)
 
         self.input_box = ChatInput(input_row)
         self.input_box.submit_requested.connect(self.send_current_message)
         input_row_layout.addWidget(self.input_box, 1)
 
-        self.send_button = QPushButton(self._t('main.send'))
+        toolbar = QFrame(composer)
+        toolbar.setObjectName("ComposerToolbar")
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.setSpacing(8)
+        toolbar_layout.addWidget(self.control_bar)
+        toolbar_layout.addStretch(1)
+
+        self.composer_tool_buttons: list[QPushButton] = []
+        for text, name in (("+", "Attach"), ("F", "Files"), ("</>", "Code"), (">_", "Terminal")):
+            button = QPushButton(text, toolbar)
+            button.setObjectName("ComposerToolButton")
+            button.setProperty("toolRole", name)
+            self.composer_tool_buttons.append(button)
+            toolbar_layout.addWidget(button)
+
+        self.send_button = QPushButton(self._t('main.send'), toolbar)
         self.send_button.setObjectName("SendButton")
         self.send_button.clicked.connect(self.send_current_message)
-        input_row_layout.addWidget(self.send_button)
+        toolbar_layout.addWidget(self.send_button)
 
-        self.stop_button = QPushButton(self._t('main.stop'))
+        self.stop_button = QPushButton(self._t('main.stop'), toolbar)
         self.stop_button.setObjectName("StopButton")
         self.stop_button.clicked.connect(self.stop_current_turn)
         self.stop_button.setEnabled(False)
-        input_row_layout.addWidget(self.stop_button)
+        toolbar_layout.addWidget(self.stop_button)
+        composer_layout.addWidget(toolbar)
 
         self.status = QStatusBar()
         self.status.hide()
@@ -608,6 +635,8 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(running)
         self.input_box.setEnabled(not running)
         self.control_bar.set_enabled(not running)
+        for button in self.composer_tool_buttons:
+            button.setEnabled(not running)
         self.settings_panel.set_enabled(not running)
         self.session_sidebar.set_enabled(not running)
 
@@ -619,6 +648,8 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(False)
         self.input_box.setEnabled(False)
         self.control_bar.set_enabled(False)
+        for button in self.composer_tool_buttons:
+            button.setEnabled(False)
         self.settings_panel.set_enabled(False)
         self.session_sidebar.set_enabled(False)
         self.set_status_i18n("stopped", "main.event.stopping")
@@ -631,6 +662,8 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(True)
         self.input_box.setEnabled(False)
         self.control_bar.set_enabled(False)
+        for button in self.composer_tool_buttons:
+            button.setEnabled(False)
         self.settings_panel.set_enabled(False)
         self.session_sidebar.set_enabled(False)
         self.set_status_i18n("running", "main.event.approval")
