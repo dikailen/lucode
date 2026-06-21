@@ -101,7 +101,7 @@ def test_workbench_shell_matches_concept_geometry(app, tmp_path):
     assert gear is not None
 
     assert 286 <= sidebar.width() <= 304
-    assert chat_header.height() >= 72
+    assert 60 <= chat_header.height() <= 68
     assert window.status.isHidden()
 
     gear.click()
@@ -113,6 +113,46 @@ def test_workbench_shell_matches_concept_geometry(app, tmp_path):
     assert 420 <= sizes[2] <= 470
     assert window.settings_panel.isVisible()
     assert window.settings_panel.parentWidget() is settings_host
+
+
+def test_top_mode_area_is_compact_status_chip(app, tmp_path):
+    session = GuiChatSession(workspace=tmp_path)
+    window = MainWindow(workspace=tmp_path, chat_session=session)
+    window.resize(1600, 1000)
+    window.show()
+    app.processEvents()
+
+    mode_host = window.findChild(QWidget, "TopModeHost")
+    mode_chip = window.findChild(QLabel, "TopModeChip")
+    top_mode_buttons = window.findChildren(QPushButton, "TopModeButton")
+
+    assert mode_host is not None
+    assert mode_chip is not None
+    assert mode_chip.parentWidget() is mode_host
+    assert top_mode_buttons == []
+    assert mode_host.maximumWidth() <= 150
+    assert mode_chip.maximumHeight() <= 36
+    assert mode_chip.property("mode_id") == session.settings.execution_mode
+
+
+def test_bottom_mode_switch_updates_top_mode_chip(app, tmp_path):
+    session = GuiChatSession(workspace=tmp_path)
+    window = MainWindow(workspace=tmp_path, chat_session=session)
+    window.show()
+    app.processEvents()
+
+    mode_chip = window.findChild(QLabel, "TopModeChip")
+    serial_button = next(
+        button for button in window.control_bar.findChildren(QPushButton, "SegButton")
+        if button.property("mode_id") == "serial"
+    )
+    previous_text = mode_chip.text()
+
+    serial_button.click()
+    app.processEvents()
+
+    assert mode_chip.property("mode_id") == "serial"
+    assert mode_chip.text() != previous_text
 
 
 def test_chat_rows_use_direct_output_canvas_without_tinted_stripes(app, tmp_path):

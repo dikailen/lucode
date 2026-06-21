@@ -430,7 +430,7 @@ QLabel#TopStatusChip {
   background: $surface_raised;
   border: 1px solid $border_subtle;
   border-radius: 10px;
-  padding: 8px 14px;
+  padding: 6px 12px;
   color: $success;
   font-size: $font_size_small;
 }
@@ -448,29 +448,23 @@ QLabel#TopStatusChip[state="failed"] {
 }
 
 QWidget#TopModeHost {
+  background: transparent;
+  border: none;
+}
+
+QLabel#TopModeChip {
   background: $surface_raised;
   border: 1px solid $border_subtle;
   border-radius: 10px;
-}
-
-QPushButton#TopModeButton {
-  background: transparent;
-  border: none;
-  border-radius: 8px;
-  padding: 8px 14px;
+  padding: 6px 12px;
   color: $text;
-}
-
-QPushButton#TopModeButton:checked {
-  background: $surface;
-  color: $primary;
 }
 
 QPushButton#TopSettingsButton {
   background: $surface_raised;
   border: 1px solid $border_subtle;
   border-radius: 10px;
-  padding: 8px 13px;
+  padding: 6px 10px;
   color: $text;
 }
 

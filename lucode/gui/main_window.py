@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
-    QButtonGroup,
     QScrollArea,
     QSplitter,
     QStatusBar,
@@ -25,7 +24,7 @@ from catalog_system.model_catalog import clear_model_catalog_cache
 from lucode.gui.approval import GuiApprovalSession, LatestApprovalContext
 from lucode.gui.answer_stream import AnswerStreamState
 from lucode.gui.chat_session import GuiChatSession
-from lucode.gui.control_panel import ControlBar, execution_mode_label, execution_mode_options
+from lucode.gui.control_panel import ControlBar, execution_mode_label
 from lucode.gui.event_bridge import EventBridge
 from lucode.gui.i18n import Translator, load_gui_language, save_gui_language
 from lucode.gui.session_sidebar import SessionSidebar
@@ -145,10 +144,10 @@ class MainWindow(QMainWindow):
 
         header = QFrame()
         header.setObjectName("ChatHeader")
-        header.setFixedHeight(76)
+        header.setFixedHeight(66)
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(24, 0, 20, 0)
-        header_layout.setSpacing(14)
+        header_layout.setContentsMargins(24, 0, 18, 0)
+        header_layout.setSpacing(12)
 
         self.session_title_label = QLabel(self._t('main.new_chat'))
         self.session_title_label.setObjectName("SessionTitleLabel")
@@ -160,21 +159,17 @@ class MainWindow(QMainWindow):
 
         self.top_mode_host = QWidget(header)
         self.top_mode_host.setObjectName("TopModeHost")
+        self.top_mode_host.setMaximumWidth(150)
+        self.top_mode_host.setMaximumHeight(38)
         mode_layout = QHBoxLayout(self.top_mode_host)
         mode_layout.setContentsMargins(0, 0, 0, 0)
         mode_layout.setSpacing(0)
-        self.top_mode_group = QButtonGroup(self)
-        self.top_mode_group.setExclusive(True)
-        self.top_mode_buttons: dict[str, QPushButton] = {}
-        for mode, label in execution_mode_options(self.language):
-            button = QPushButton(label)
-            button.setObjectName("TopModeButton")
-            button.setProperty("mode_id", mode)
-            button.setCheckable(True)
-            button.clicked.connect(lambda _checked=False, value=mode: self._on_execution_mode_changed(value))
-            self.top_mode_group.addButton(button)
-            self.top_mode_buttons[mode] = button
-            mode_layout.addWidget(button)
+        self.top_mode_chip = QLabel()
+        self.top_mode_chip.setObjectName("TopModeChip")
+        self.top_mode_chip.setMaximumWidth(142)
+        self.top_mode_chip.setMaximumHeight(36)
+        self.top_mode_chip.setAlignment(Qt.AlignCenter)
+        mode_layout.addWidget(self.top_mode_chip)
         header_layout.addWidget(self.top_mode_host)
 
         self.top_settings_button = QPushButton("⚙")
@@ -338,14 +333,11 @@ class MainWindow(QMainWindow):
 
     def _sync_top_mode_buttons(self, mode: str) -> None:
         normalized = str(mode or self.mode or "").strip()
-        for mode_id, button in self.top_mode_buttons.items():
-            button.blockSignals(True)
-            button.setChecked(mode_id == normalized)
-            button.blockSignals(False)
+        self.top_mode_chip.setText(f"{self._t('main.status.mode')}: {execution_mode_label(normalized, self.language)}")
+        self.top_mode_chip.setProperty("mode_id", normalized)
+        self.top_mode_chip.setToolTip(self.top_mode_chip.text())
 
     def _refresh_top_mode_buttons(self) -> None:
-        for mode_id, button in self.top_mode_buttons.items():
-            button.setText(execution_mode_label(mode_id, self.language))
         self.top_settings_button.setToolTip(self._t('control.settings_tip'))
         self._sync_top_mode_buttons(self.mode)
 
@@ -628,8 +620,6 @@ class MainWindow(QMainWindow):
         self._thinking_indicator = None
 
     def set_running(self, running: bool) -> None:
-        for button in self.top_mode_buttons.values():
-            button.setEnabled(not running)
         self.top_settings_button.setEnabled(not running)
         self.send_button.setEnabled(not running)
         self.stop_button.setEnabled(running)
@@ -641,8 +631,6 @@ class MainWindow(QMainWindow):
         self.session_sidebar.set_enabled(not running)
 
     def set_stopping(self) -> None:
-        for button in self.top_mode_buttons.values():
-            button.setEnabled(False)
         self.top_settings_button.setEnabled(False)
         self.send_button.setEnabled(False)
         self.stop_button.setEnabled(False)
@@ -655,8 +643,6 @@ class MainWindow(QMainWindow):
         self.set_status_i18n("stopped", "main.event.stopping")
 
     def set_approval_waiting(self) -> None:
-        for button in self.top_mode_buttons.values():
-            button.setEnabled(False)
         self.top_settings_button.setEnabled(False)
         self.send_button.setEnabled(False)
         self.stop_button.setEnabled(True)
